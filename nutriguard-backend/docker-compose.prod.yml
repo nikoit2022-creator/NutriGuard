@@ -1,0 +1,25 @@
+version: "3.9"
+
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Production differences from the base file:
+#   - no bind-mounted source / no --reload (image contents are authoritative)
+#   - no host port published for db/redis (backend reaches them on the
+#     internal compose network only)
+#   - restart policy tightened, resource-friendly defaults
+
+services:
+  db:
+    ports: []
+    restart: always
+
+  redis:
+    ports: []
+    restart: always
+
+  backend:
+    volumes: []
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+    restart: always
+    environment:
+      ENVIRONMENT: production

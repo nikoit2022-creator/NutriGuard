@@ -1,0 +1,1610 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "NutriGuard Backend",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/v1/auth/device": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Auth Device",
+        "description": "API Contract 3.2 \u2014 anonymous device registration/authentication.",
+        "operationId": "auth_device_api_v1_auth_device_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceAuthRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/refresh": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Refresh",
+        "operationId": "refresh_api_v1_auth_refresh_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/scan/barcode": {
+      "post": {
+        "tags": [
+          "scan"
+        ],
+        "summary": "Scan Barcode",
+        "description": "API Contract 6.1",
+        "operationId": "scan_barcode_api_v1_scan_barcode_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BarcodeScanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FullProductAnalysisOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/scan/ocr-text": {
+      "post": {
+        "tags": [
+          "scan"
+        ],
+        "summary": "Scan Ocr Text",
+        "description": "API Contract 6.2",
+        "operationId": "scan_ocr_text_api_v1_scan_ocr_text_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OcrTextScanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FullProductAnalysisOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/scan/label-image": {
+      "post": {
+        "tags": [
+          "scan"
+        ],
+        "summary": "Scan Label Image",
+        "description": "API Contract 6.3",
+        "operationId": "scan_label_image_api_v1_scan_label_image_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_scan_label_image_api_v1_scan_label_image_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FullProductAnalysisOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/products": {
+      "get": {
+        "tags": [
+          "products"
+        ],
+        "summary": "List Products",
+        "description": "API Contract 6.5",
+        "operationId": "list_products_api_v1_products_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Search"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Pagesize"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_ProductOut_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/products/{barcode}": {
+      "get": {
+        "tags": [
+          "products"
+        ],
+        "summary": "Get Product",
+        "description": "API Contract 6.4 \u2014 plain lookup, no warning/score recomputation.",
+        "operationId": "get_product_api_v1_products__barcode__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "barcode",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Barcode"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductDetailOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/ingredients": {
+      "get": {
+        "tags": [
+          "ingredients"
+        ],
+        "summary": "List Ingredients",
+        "description": "API Contract 6.6",
+        "operationId": "list_ingredients_api_v1_ingredients_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Search"
+            }
+          },
+          {
+            "name": "riskLevel",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/RiskLevel"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Risklevel"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Pagesize"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_IngredientOut_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/ingredients/{ingredient_id}": {
+      "get": {
+        "tags": [
+          "ingredients"
+        ],
+        "summary": "Get Ingredient",
+        "description": "API Contract 6.7 \u2014 lookup by id OR e-number.",
+        "operationId": "get_ingredient_api_v1_ingredients__ingredient_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "ingredient_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ingredient Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngredientOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/health-profile": {
+      "get": {
+        "tags": [
+          "health-profile"
+        ],
+        "summary": "Get Health Profile",
+        "description": "API Contract 6.8 \u2014 returns defaults (not 404) when no row exists yet.",
+        "operationId": "get_health_profile_api_v1_health_profile_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthProfileOut"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "health-profile"
+        ],
+        "summary": "Put Health Profile",
+        "description": "API Contract 6.9 \u2014 upsert semantics (Room OnConflictStrategy.REPLACE).",
+        "operationId": "put_health_profile_api_v1_health_profile_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HealthProfileIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthProfileOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/scan-history": {
+      "get": {
+        "tags": [
+          "scan-history"
+        ],
+        "summary": "List Scan History",
+        "description": "API Contract 6.10",
+        "operationId": "list_scan_history_api_v1_scan_history_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Pagesize"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_ScanHistoryOut_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "scan-history"
+        ],
+        "summary": "Clear Scan History",
+        "description": "API Contract 6.11",
+        "operationId": "clear_scan_history_api_v1_scan_history_delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Health Check",
+        "operationId": "health_check_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BarcodeScanRequest": {
+        "properties": {
+          "barcode": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Barcode"
+          }
+        },
+        "type": "object",
+        "required": [
+          "barcode"
+        ],
+        "title": "BarcodeScanRequest"
+      },
+      "Body_scan_label_image_api_v1_scan_label_image_post": {
+        "properties": {
+          "image": {
+            "type": "string",
+            "format": "binary",
+            "title": "Image"
+          }
+        },
+        "type": "object",
+        "required": [
+          "image"
+        ],
+        "title": "Body_scan_label_image_api_v1_scan_label_image_post"
+      },
+      "DeviceAuthRequest": {
+        "properties": {
+          "deviceId": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Deviceid"
+          },
+          "appVersion": {
+            "type": "string",
+            "maxLength": 32,
+            "title": "Appversion",
+            "default": ""
+          },
+          "platform": {
+            "$ref": "#/components/schemas/Platform",
+            "default": "ANDROID"
+          }
+        },
+        "type": "object",
+        "required": [
+          "deviceId"
+        ],
+        "title": "DeviceAuthRequest"
+      },
+      "FullProductAnalysisOut": {
+        "properties": {
+          "product": {
+            "$ref": "#/components/schemas/ProductOut"
+          },
+          "ingredients": {
+            "items": {
+              "$ref": "#/components/schemas/IngredientOut"
+            },
+            "type": "array",
+            "title": "Ingredients"
+          },
+          "healthScore": {
+            "type": "integer",
+            "title": "Healthscore"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/HealthWarningOut"
+            },
+            "type": "array",
+            "title": "Warnings"
+          },
+          "isFromDatabaseCache": {
+            "type": "boolean",
+            "title": "Isfromdatabasecache"
+          }
+        },
+        "type": "object",
+        "required": [
+          "product",
+          "ingredients",
+          "healthScore",
+          "warnings",
+          "isFromDatabaseCache"
+        ],
+        "title": "FullProductAnalysisOut",
+        "description": "Mirrors com.example.data.repository.FullProductAnalysis (API Contract 5.9)."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthProfileIn": {
+        "properties": {
+          "hasDiabetes": {
+            "type": "boolean",
+            "title": "Hasdiabetes",
+            "default": false
+          },
+          "hasHypertension": {
+            "type": "boolean",
+            "title": "Hashypertension",
+            "default": false
+          },
+          "hasKidneyDisease": {
+            "type": "boolean",
+            "title": "Haskidneydisease",
+            "default": false
+          },
+          "hasGout": {
+            "type": "boolean",
+            "title": "Hasgout",
+            "default": false
+          },
+          "isPregnant": {
+            "type": "boolean",
+            "title": "Ispregnant",
+            "default": false
+          },
+          "forChildren": {
+            "type": "boolean",
+            "title": "Forchildren",
+            "default": false
+          },
+          "hasHighCholesterol": {
+            "type": "boolean",
+            "title": "Hashighcholesterol",
+            "default": false
+          },
+          "avoidGluten": {
+            "type": "boolean",
+            "title": "Avoidgluten",
+            "default": false
+          },
+          "avoidLactose": {
+            "type": "boolean",
+            "title": "Avoidlactose",
+            "default": false
+          },
+          "avoidPeanuts": {
+            "type": "boolean",
+            "title": "Avoidpeanuts",
+            "default": false
+          },
+          "avoidSoy": {
+            "type": "boolean",
+            "title": "Avoidsoy",
+            "default": false
+          },
+          "avoidTreeNuts": {
+            "type": "boolean",
+            "title": "Avoidtreenuts",
+            "default": false
+          },
+          "requireVegan": {
+            "type": "boolean",
+            "title": "Requirevegan",
+            "default": false
+          },
+          "requireVegetarian": {
+            "type": "boolean",
+            "title": "Requirevegetarian",
+            "default": false
+          },
+          "requireHalal": {
+            "type": "boolean",
+            "title": "Requirehalal",
+            "default": false
+          },
+          "requireKosher": {
+            "type": "boolean",
+            "title": "Requirekosher",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "HealthProfileIn",
+        "description": "Mirrors com.example.data.model.UserHealthProfile (API Contract 5.7). No `id` field:\nthe server derives the owning user from the access token (see 6.9)."
+      },
+      "HealthProfileOut": {
+        "properties": {
+          "hasDiabetes": {
+            "type": "boolean",
+            "title": "Hasdiabetes",
+            "default": false
+          },
+          "hasHypertension": {
+            "type": "boolean",
+            "title": "Hashypertension",
+            "default": false
+          },
+          "hasKidneyDisease": {
+            "type": "boolean",
+            "title": "Haskidneydisease",
+            "default": false
+          },
+          "hasGout": {
+            "type": "boolean",
+            "title": "Hasgout",
+            "default": false
+          },
+          "isPregnant": {
+            "type": "boolean",
+            "title": "Ispregnant",
+            "default": false
+          },
+          "forChildren": {
+            "type": "boolean",
+            "title": "Forchildren",
+            "default": false
+          },
+          "hasHighCholesterol": {
+            "type": "boolean",
+            "title": "Hashighcholesterol",
+            "default": false
+          },
+          "avoidGluten": {
+            "type": "boolean",
+            "title": "Avoidgluten",
+            "default": false
+          },
+          "avoidLactose": {
+            "type": "boolean",
+            "title": "Avoidlactose",
+            "default": false
+          },
+          "avoidPeanuts": {
+            "type": "boolean",
+            "title": "Avoidpeanuts",
+            "default": false
+          },
+          "avoidSoy": {
+            "type": "boolean",
+            "title": "Avoidsoy",
+            "default": false
+          },
+          "avoidTreeNuts": {
+            "type": "boolean",
+            "title": "Avoidtreenuts",
+            "default": false
+          },
+          "requireVegan": {
+            "type": "boolean",
+            "title": "Requirevegan",
+            "default": false
+          },
+          "requireVegetarian": {
+            "type": "boolean",
+            "title": "Requirevegetarian",
+            "default": false
+          },
+          "requireHalal": {
+            "type": "boolean",
+            "title": "Requirehalal",
+            "default": false
+          },
+          "requireKosher": {
+            "type": "boolean",
+            "title": "Requirekosher",
+            "default": false
+          },
+          "id": {
+            "type": "integer",
+            "title": "Id",
+            "default": 1
+          }
+        },
+        "type": "object",
+        "title": "HealthProfileOut",
+        "description": "Same shape as the client's UserHealthProfile, plus the legacy `id` field\nkept at a constant value of 1 for backward-compatible deserialization\n(API Contract 5.7)."
+      },
+      "HealthWarningOut": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "condition": {
+            "type": "string",
+            "title": "Condition"
+          },
+          "triggerFactor": {
+            "type": "string",
+            "title": "Triggerfactor"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/WarningSeverity"
+          }
+        },
+        "type": "object",
+        "required": [
+          "title",
+          "description",
+          "condition",
+          "triggerFactor",
+          "severity"
+        ],
+        "title": "HealthWarningOut",
+        "description": "Mirrors com.example.util.HealthWarning (API Contract 5.8)."
+      },
+      "IngredientOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "commonName": {
+            "type": "string",
+            "title": "Commonname"
+          },
+          "scientificName": {
+            "type": "string",
+            "title": "Scientificname"
+          },
+          "eNumber": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enumber"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "purposeInFood": {
+            "type": "string",
+            "title": "Purposeinfood"
+          },
+          "healthConcerns": {
+            "type": "string",
+            "title": "Healthconcerns"
+          },
+          "evidenceLevel": {
+            "type": "string",
+            "title": "Evidencelevel"
+          },
+          "countriesRestrictedOrBanned": {
+            "type": "string",
+            "title": "Countriesrestrictedorbanned"
+          },
+          "efsaStatus": {
+            "type": "string",
+            "title": "Efsastatus"
+          },
+          "fdaStatus": {
+            "type": "string",
+            "title": "Fdastatus"
+          },
+          "whoIarcClassification": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Whoiarcclassification"
+          },
+          "acceptableDailyIntake": {
+            "type": "string",
+            "title": "Acceptabledailyintake"
+          },
+          "sideEffects": {
+            "type": "string",
+            "title": "Sideeffects"
+          },
+          "allergens": {
+            "type": "string",
+            "title": "Allergens"
+          },
+          "references": {
+            "type": "string",
+            "title": "References"
+          },
+          "riskLevel": {
+            "$ref": "#/components/schemas/RiskLevel"
+          },
+          "isGluten": {
+            "type": "boolean",
+            "title": "Isgluten"
+          },
+          "isLactose": {
+            "type": "boolean",
+            "title": "Islactose"
+          },
+          "isVegan": {
+            "type": "boolean",
+            "title": "Isvegan"
+          },
+          "isVegetarian": {
+            "type": "boolean",
+            "title": "Isvegetarian"
+          },
+          "isHalal": {
+            "type": "boolean",
+            "title": "Ishalal"
+          },
+          "isKosher": {
+            "type": "boolean",
+            "title": "Iskosher"
+          },
+          "badForDiabetes": {
+            "type": "boolean",
+            "title": "Badfordiabetes"
+          },
+          "badForHypertension": {
+            "type": "boolean",
+            "title": "Badforhypertension"
+          },
+          "badForKidneyDisease": {
+            "type": "boolean",
+            "title": "Badforkidneydisease"
+          },
+          "badForGout": {
+            "type": "boolean",
+            "title": "Badforgout"
+          },
+          "badForPregnancy": {
+            "type": "boolean",
+            "title": "Badforpregnancy"
+          },
+          "badForChildren": {
+            "type": "boolean",
+            "title": "Badforchildren"
+          },
+          "badForHighCholesterol": {
+            "type": "boolean",
+            "title": "Badforhighcholesterol"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "commonName",
+          "scientificName",
+          "category",
+          "description",
+          "purposeInFood",
+          "healthConcerns",
+          "evidenceLevel",
+          "countriesRestrictedOrBanned",
+          "efsaStatus",
+          "fdaStatus",
+          "acceptableDailyIntake",
+          "sideEffects",
+          "allergens",
+          "references",
+          "riskLevel",
+          "isGluten",
+          "isLactose",
+          "isVegan",
+          "isVegetarian",
+          "isHalal",
+          "isKosher",
+          "badForDiabetes",
+          "badForHypertension",
+          "badForKidneyDisease",
+          "badForGout",
+          "badForPregnancy",
+          "badForChildren",
+          "badForHighCholesterol"
+        ],
+        "title": "IngredientOut",
+        "description": "Mirrors com.example.data.model.IngredientEntity exactly (API Contract 5.4)."
+      },
+      "OcrTextScanRequest": {
+        "properties": {
+          "rawText": {
+            "type": "string",
+            "minLength": 3,
+            "title": "Rawtext"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rawText"
+        ],
+        "title": "OcrTextScanRequest"
+      },
+      "Page_IngredientOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/IngredientOut"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "pageSize": {
+            "type": "integer",
+            "title": "Pagesize"
+          },
+          "totalItems": {
+            "type": "integer",
+            "title": "Totalitems"
+          },
+          "totalPages": {
+            "type": "integer",
+            "title": "Totalpages"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "pageSize",
+          "totalItems",
+          "totalPages"
+        ],
+        "title": "Page[IngredientOut]"
+      },
+      "Page_ProductOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ProductOut"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "pageSize": {
+            "type": "integer",
+            "title": "Pagesize"
+          },
+          "totalItems": {
+            "type": "integer",
+            "title": "Totalitems"
+          },
+          "totalPages": {
+            "type": "integer",
+            "title": "Totalpages"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "pageSize",
+          "totalItems",
+          "totalPages"
+        ],
+        "title": "Page[ProductOut]"
+      },
+      "Page_ScanHistoryOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ScanHistoryOut"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "pageSize": {
+            "type": "integer",
+            "title": "Pagesize"
+          },
+          "totalItems": {
+            "type": "integer",
+            "title": "Totalitems"
+          },
+          "totalPages": {
+            "type": "integer",
+            "title": "Totalpages"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "pageSize",
+          "totalItems",
+          "totalPages"
+        ],
+        "title": "Page[ScanHistoryOut]"
+      },
+      "Platform": {
+        "type": "string",
+        "enum": [
+          "ANDROID",
+          "IOS"
+        ],
+        "title": "Platform"
+      },
+      "ProductDetailOut": {
+        "properties": {
+          "product": {
+            "$ref": "#/components/schemas/ProductOut"
+          },
+          "ingredients": {
+            "items": {
+              "$ref": "#/components/schemas/IngredientOut"
+            },
+            "type": "array",
+            "title": "Ingredients"
+          }
+        },
+        "type": "object",
+        "required": [
+          "product",
+          "ingredients"
+        ],
+        "title": "ProductDetailOut",
+        "description": "Response for GET /products/{barcode} (API Contract 6.4)."
+      },
+      "ProductOut": {
+        "properties": {
+          "barcode": {
+            "type": "string",
+            "title": "Barcode"
+          },
+          "productName": {
+            "type": "string",
+            "title": "Productname"
+          },
+          "brand": {
+            "type": "string",
+            "title": "Brand"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          },
+          "imageUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Imageurl"
+          },
+          "rawIngredientText": {
+            "type": "string",
+            "title": "Rawingredienttext"
+          },
+          "ingredientIds": {
+            "type": "string",
+            "title": "Ingredientids"
+          },
+          "healthScore": {
+            "type": "integer",
+            "title": "Healthscore"
+          },
+          "novaGroup": {
+            "type": "integer",
+            "title": "Novagroup"
+          },
+          "sugarGrams": {
+            "type": "number",
+            "title": "Sugargrams"
+          },
+          "sodiumMg": {
+            "type": "number",
+            "title": "Sodiummg"
+          },
+          "saturatedFatGrams": {
+            "type": "number",
+            "title": "Saturatedfatgrams"
+          },
+          "hasArtificialSweeteners": {
+            "type": "boolean",
+            "title": "Hasartificialsweeteners"
+          },
+          "hasPreservatives": {
+            "type": "boolean",
+            "title": "Haspreservatives"
+          },
+          "isGlutenFree": {
+            "type": "boolean",
+            "title": "Isglutenfree"
+          },
+          "isLactoseFree": {
+            "type": "boolean",
+            "title": "Islactosefree"
+          },
+          "isVegan": {
+            "type": "boolean",
+            "title": "Isvegan"
+          },
+          "isVegetarian": {
+            "type": "boolean",
+            "title": "Isvegetarian"
+          },
+          "isHalal": {
+            "type": "boolean",
+            "title": "Ishalal"
+          },
+          "isKosher": {
+            "type": "boolean",
+            "title": "Iskosher"
+          },
+          "allergensDetected": {
+            "type": "string",
+            "title": "Allergensdetected"
+          },
+          "timestamp": {
+            "type": "integer",
+            "title": "Timestamp"
+          }
+        },
+        "type": "object",
+        "required": [
+          "barcode",
+          "productName",
+          "brand",
+          "category",
+          "rawIngredientText",
+          "ingredientIds",
+          "healthScore",
+          "novaGroup",
+          "sugarGrams",
+          "sodiumMg",
+          "saturatedFatGrams",
+          "hasArtificialSweeteners",
+          "hasPreservatives",
+          "isGlutenFree",
+          "isLactoseFree",
+          "isVegan",
+          "isVegetarian",
+          "isHalal",
+          "isKosher",
+          "allergensDetected",
+          "timestamp"
+        ],
+        "title": "ProductOut",
+        "description": "Mirrors com.example.data.model.ProductEntity exactly (API Contract 5.5).\n\n`ingredient_ids` is populated by the repository layer as a\ncomma-separated string (matching the Room column) even though the\ndatabase stores a normalized many-to-many relation internally."
+      },
+      "RefreshRequest": {
+        "properties": {
+          "refreshToken": {
+            "type": "string",
+            "title": "Refreshtoken"
+          }
+        },
+        "type": "object",
+        "required": [
+          "refreshToken"
+        ],
+        "title": "RefreshRequest"
+      },
+      "RiskLevel": {
+        "type": "string",
+        "enum": [
+          "SAFE",
+          "MODERATE",
+          "POTENTIAL_CONCERN",
+          "HIGH_CONCERN"
+        ],
+        "title": "RiskLevel",
+        "description": "Mirrors com.example.data.model.RiskLevel"
+      },
+      "ScanHistoryOut": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "barcode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Barcode"
+          },
+          "productName": {
+            "type": "string",
+            "title": "Productname"
+          },
+          "brand": {
+            "type": "string",
+            "title": "Brand"
+          },
+          "healthScore": {
+            "type": "integer",
+            "title": "Healthscore"
+          },
+          "scannedAt": {
+            "type": "integer",
+            "title": "Scannedat"
+          },
+          "scanType": {
+            "$ref": "#/components/schemas/ScanType"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "productName",
+          "brand",
+          "healthScore",
+          "scannedAt",
+          "scanType"
+        ],
+        "title": "ScanHistoryOut",
+        "description": "Mirrors com.example.data.model.ScanHistoryEntity (API Contract 5.6)."
+      },
+      "ScanType": {
+        "type": "string",
+        "enum": [
+          "BARCODE",
+          "OCR_LABEL",
+          "MANUAL_INPUT"
+        ],
+        "title": "ScanType",
+        "description": "Mirrors the scanType string values used in ScanHistoryEntity"
+      },
+      "TokenResponse": {
+        "properties": {
+          "accessToken": {
+            "type": "string",
+            "title": "Accesstoken"
+          },
+          "refreshToken": {
+            "type": "string",
+            "title": "Refreshtoken"
+          },
+          "tokenType": {
+            "type": "string",
+            "title": "Tokentype",
+            "default": "Bearer"
+          },
+          "expiresIn": {
+            "type": "integer",
+            "title": "Expiresin"
+          },
+          "userId": {
+            "type": "string",
+            "title": "Userid"
+          }
+        },
+        "type": "object",
+        "required": [
+          "accessToken",
+          "refreshToken",
+          "expiresIn",
+          "userId"
+        ],
+        "title": "TokenResponse"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "WarningSeverity": {
+        "type": "string",
+        "enum": [
+          "HIGH",
+          "MODERATE",
+          "INFO"
+        ],
+        "title": "WarningSeverity",
+        "description": "Mirrors com.example.util.WarningSeverity"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}
