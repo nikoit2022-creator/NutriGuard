@@ -1,0 +1,6 @@
+{
+  "name": "NutriGuard",
+  "description": "Food ingredient analysis platform with barcode scanner, OCR label reader, E-number scientific database, personalized health profile warnings, and overall health scoring.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
