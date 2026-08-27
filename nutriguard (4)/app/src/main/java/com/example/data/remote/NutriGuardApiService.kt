@@ -41,11 +41,7 @@ class NutriGuardApiService(
 
         val requestBody = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
-            .addFormDataPart(
-                name = "file",
-                filename = "food_label.jpg",
-                body = byteArray.toRequestBody("image/jpeg".toMediaType())
-            )
+            .addPart(buildLabelImagePart(byteArray))
             .build()
 
         val endpointUrl = "$baseUrl/api/v1/scan/label-image"
@@ -84,5 +80,18 @@ class NutriGuardApiService(
 
     companion object {
         private const val TAG = "NutriGuardApiService"
+
+        /**
+         * Builds the multipart form part for the label-image scan request.
+         * The backend (POST /api/v1/scan/label-image) requires the form field
+         * name to be "image" (see app/api/v1/scan.py::scan_label_image).
+         */
+        internal fun buildLabelImagePart(byteArray: ByteArray): MultipartBody.Part {
+            return MultipartBody.Part.createFormData(
+                name = "image",
+                filename = "food_label.jpg",
+                body = byteArray.toRequestBody("image/jpeg".toMediaType())
+            )
+        }
     }
 }
