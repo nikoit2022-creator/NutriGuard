@@ -1,6 +1,11 @@
 package com.example.ui.screens
 
+import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
+import android.net.Uri
+import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -59,6 +64,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.NutriGuardSpacing
@@ -70,6 +76,9 @@ import com.example.ui.viewmodel.MainViewModel
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import java.io.File
+import kotlin.math.ceil
+import kotlin.math.max
 
 @Composable
 fun ScanHomeScreen(
@@ -85,6 +94,7 @@ fun ScanHomeScreen(
     var showManualEntry by remember { mutableStateOf(false) }
     var barcodeInput by remember { mutableStateOf("") }
     var rawTextInput by remember { mutableStateOf("") }
+    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
 
     val barcodeScannerOptions = remember {
         GmsBarcodeScannerOptions.Builder()
@@ -133,6 +143,42 @@ fun ScanHomeScreen(
             } catch (e: Exception) {
                 e.printStackTrace()
             }
+        }
+    }
+
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { captured ->
+        val uri = pendingCameraUri
+        if (captured && uri != null) {
+            try {
+                val bitmap = decodeCapturedBitmap(context, uri)
+                if (bitmap != null) {
+                    viewModel.analyzeLabelImage(bitmap)
+                    onNavigateToResult()
+                } else {
+                    Toast.makeText(context, "Unable to read the captured image.", Toast.LENGTH_SHORT).show()
+                }
+            } catch (_: Exception) {
+                Toast.makeText(context, "Unable to process the captured image.", Toast.LENGTH_SHORT).show()
+            }
+        }
+        pendingCameraUri = null
+    }
+
+    val startIngredientPhotoCapture: () -> Unit = {
+        try {
+            val photoFile = File.createTempFile("ingredient_label_", ".jpg", context.cacheDir)
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                photoFile
+            )
+            pendingCameraUri = uri
+            cameraLauncher.launch(uri)
+        } catch (_: Exception) {
+            pendingCameraUri = null
+            Toast.makeText(context, "Unable to open the camera.", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -250,9 +296,7 @@ fun ScanHomeScreen(
                             )
                             .clickable {
                                 if (isOcrMode) {
-                                    val sampleText = "Carbonated Water, High Fructose Corn Syrup, Citric Acid, Aspartame (E951), Tartrazine (E102), Sodium Nitrite (E250), Titanium Dioxide (E171)"
-                                    viewModel.analyzeOcrText(sampleText)
-                                    onNavigateToResult()
+                                    startIngredientPhotoCapture()
                                 } else {
                                     startBarcodeScan()
                                 }
@@ -293,9 +337,7 @@ fun ScanHomeScreen(
                     Button(
                         onClick = {
                             if (isOcrMode) {
-                                val sampleText = "Carbonated Water, High Fructose Corn Syrup, Citric Acid, Aspartame (E951), Tartrazine (E102), Sodium Nitrite (E250), Titanium Dioxide (E171)"
-                                viewModel.analyzeOcrText(sampleText)
-                                onNavigateToResult()
+                                startIngredientPhotoCapture()
                             } else {
                                 startBarcodeScan()
                             }
@@ -668,3 +710,35 @@ private fun SampleProductCard(
 
 internal fun normalizeScannedBarcode(rawValue: String?): String? =
     rawValue?.trim()?.takeIf { it.isNotEmpty() }
+
+internal fun decodeCapturedBitmap(
+    context: Context,
+    uri: Uri,
+    maxDimension: Int = 2048
+): Bitmap? {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        val source = ImageDecoder.createSource(context.contentResolver, uri)
+        return ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+            val largestDimension = max(info.size.width, info.size.height)
+            val sampleSize = ceil(largestDimension.toDouble() / maxDimension)
+                .toInt()
+                .coerceAtLeast(1)
+            decoder.setTargetSampleSize(sampleSize)
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+        }
+    }
+
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    context.contentResolver.openInputStream(uri)?.use {
+        BitmapFactory.decodeStream(it, null, bounds)
+    }
+    val largestDimension = max(bounds.outWidth, bounds.outHeight)
+    var sampleSize = 1
+    while (largestDimension / sampleSize > maxDimension) {
+        sampleSize *= 2
+    }
+    val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+    return context.contentResolver.openInputStream(uri)?.use {
+        BitmapFactory.decodeStream(it, null, options)
+    }
+}
