@@ -1,4 +1,19 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import java.util.Properties
+
+val localProperties = Properties().apply {
+  val localPropertiesFile = rootProject.file("local.properties")
+  if (localPropertiesFile.exists()) {
+    localPropertiesFile.inputStream().use(::load)
+  }
+}
+
+val backendBaseUrl = providers.gradleProperty("BACKEND_BASE_URL").orNull
+  ?: System.getenv("BACKEND_BASE_URL")
+  ?: localProperties.getProperty("BACKEND_BASE_URL")
+  ?: "http://10.0.2.2:8000/"
+require(backendBaseUrl.endsWith("/")) { "BACKEND_BASE_URL must end with a trailing slash" }
+val escapedBackendBaseUrl = backendBaseUrl.replace("\\", "\\\\").replace("\"", "\\\"")
 
 plugins {
   alias(libs.plugins.android.application)
@@ -20,7 +35,7 @@ android {
     versionCode = 1
     versionName = "1.0"
 
-    buildConfigField("String", "BACKEND_BASE_URL", "\"http://192.168.1.104:8000/\"")
+    buildConfigField("String", "BACKEND_BASE_URL", "\"$escapedBackendBaseUrl\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
