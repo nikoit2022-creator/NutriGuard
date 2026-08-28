@@ -31,7 +31,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.DocumentScanner
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -332,36 +331,6 @@ fun ScanHomeScreen(
                     )
 
                     Spacer(modifier = Modifier.height(18.dp))
-
-                    // Primary Action Button
-                    Button(
-                        onClick = {
-                            if (isOcrMode) {
-                                startIngredientPhotoCapture()
-                            } else {
-                                startBarcodeScan()
-                            }
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(50.dp),
-                        shape = RoundedCornerShape(NutriGuardRadius.medium),
-                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
-                    ) {
-                        Icon(
-                            imageVector = if (isOcrMode) Icons.Default.CameraAlt else Icons.Default.QrCodeScanner,
-                            contentDescription = null,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = if (isOcrMode) "Scan Ingredient Label" else "Scan Barcode",
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
 
                     // Secondary Action: Upload Photo
                     OutlinedButton(
