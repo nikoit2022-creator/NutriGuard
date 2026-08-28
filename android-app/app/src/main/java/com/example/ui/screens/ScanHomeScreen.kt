@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.graphics.BitmapFactory
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -66,6 +67,9 @@ import com.example.ui.theme.RiskOrange
 import com.example.ui.theme.RiskRed
 import com.example.ui.theme.RiskYellow
 import com.example.ui.viewmodel.MainViewModel
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 
 @Composable
 fun ScanHomeScreen(
@@ -81,6 +85,39 @@ fun ScanHomeScreen(
     var showManualEntry by remember { mutableStateOf(false) }
     var barcodeInput by remember { mutableStateOf("") }
     var rawTextInput by remember { mutableStateOf("") }
+
+    val barcodeScannerOptions = remember {
+        GmsBarcodeScannerOptions.Builder()
+            .setBarcodeFormats(
+                Barcode.FORMAT_EAN_13,
+                Barcode.FORMAT_EAN_8,
+                Barcode.FORMAT_UPC_A,
+                Barcode.FORMAT_UPC_E
+            )
+            .enableAutoZoom()
+            .build()
+    }
+    val barcodeScanner = remember(context, barcodeScannerOptions) {
+        GmsBarcodeScanning.getClient(context, barcodeScannerOptions)
+    }
+    val startBarcodeScan: () -> Unit = {
+        barcodeScanner.startScan()
+            .addOnSuccessListener { barcode ->
+                val value = normalizeScannedBarcode(barcode.rawValue)
+                if (value != null) {
+                    viewModel.scanBarcode(value)
+                    onNavigateToResult()
+                } else {
+                    Toast.makeText(context, "No barcode value was detected.", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .addOnCanceledListener {
+                // Stay on the scan screen when the user closes the scanner.
+            }
+            .addOnFailureListener {
+                Toast.makeText(context, "Unable to start barcode scanner.", Toast.LENGTH_SHORT).show()
+            }
+    }
 
     val imagePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -217,8 +254,7 @@ fun ScanHomeScreen(
                                     viewModel.analyzeOcrText(sampleText)
                                     onNavigateToResult()
                                 } else {
-                                    viewModel.scanBarcode("012345678905")
-                                    onNavigateToResult()
+                                    startBarcodeScan()
                                 }
                             },
                         contentAlignment = Alignment.Center
@@ -261,8 +297,7 @@ fun ScanHomeScreen(
                                 viewModel.analyzeOcrText(sampleText)
                                 onNavigateToResult()
                             } else {
-                                viewModel.scanBarcode("012345678905")
-                                onNavigateToResult()
+                                startBarcodeScan()
                             }
                         },
                         modifier = Modifier
@@ -630,3 +665,6 @@ private fun SampleProductCard(
     }
 }
 
+
+internal fun normalizeScannedBarcode(rawValue: String?): String? =
+    rawValue?.trim()?.takeIf { it.isNotEmpty() }
