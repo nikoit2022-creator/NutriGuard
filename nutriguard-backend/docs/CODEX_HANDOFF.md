@@ -1,45 +1,26 @@
 # CODEX_HANDOFF
 
-Use this file at the end of each task to leave a concise, factual handoff for the next agent.
+## Current canonical state
 
-Do not record passwords, API keys, tokens, secrets, or `.env` values here.
+Date: 2026-08-28
 
-## Latest Task
+- GitHub `main` is the only source of truth.
+- Android source is located at `android-app/`.
+- Backend source is located at `nutriguard-backend/`.
+- The recovered Gradle 9.3.1 wrapper is tracked.
+- Android JVM verification before repository cleanup: 9 tests passed; `BUILD SUCCESSFUL`.
+- Recovery branches remain available for audit but must not be merged wholesale.
 
-Date: 2026-08-19
+## Repository cleanup
 
-What was investigated or changed:
+The cleanup branch normalizes the Android directory name, removes the obsolete tracked ZIP archive, adds repository-level documentation and adds Android/backend CI workflows. Application behavior is intentionally unchanged.
 
-- Checked for existing `AGENTS.md` and `docs/CODEX_HANDOFF.md`.
-- Identified `/home/vboxuser/nutrigard/nutriguard-backend` as the effective repository root in this workspace.
-- Created `AGENTS.md` with repository-level instructions requiring future agents to read both control files at task start and update this handoff file at task end.
-- Created this handoff document with the required reporting sections.
+## Unresolved items
 
-Files involved:
+- The Android backend base URL is still environment-specific and should be addressed separately.
+- The repository does not yet contain a standalone human-authored API contract; `nutriguard-backend/openapi.json` is the tracked wire-schema snapshot.
+- Backend CI must confirm the documented test suite against the current dependency set.
 
-- `AGENTS.md`
-- `docs/CODEX_HANDOFF.md`
-- `README.md`
+## Recommended next step
 
-Commands/tests run and their results:
-
-- `pwd` from `/home/vboxuser` -> returned `/home/vboxuser`.
-- `rg --files -g 'AGENTS.md' -g 'docs/CODEX_HANDOFF.md'` from `/home/vboxuser` -> no matching files found.
-- `git rev-parse --show-toplevel` from `/home/vboxuser` -> failed: not a git repository.
-- `rg --files /home/vboxuser | head -n 200` -> showed candidate project trees, including `nutrigard/nutriguard-backend`.
-- `git rev-parse --show-toplevel` from `/home/vboxuser/nutrigard/nutriguard-backend` -> failed: not a git repository.
-- `rg --files -g 'AGENTS.md' -g 'docs/CODEX_HANDOFF.md'` from `/home/vboxuser/nutrigard/nutriguard-backend` -> no matching files found.
-- `rg --files -g 'README.md' -g 'docs/**'` from `/home/vboxuser/nutrigard/nutriguard-backend` -> found `README.md` only.
-- `ls -la` from `/home/vboxuser/nutrigard/nutriguard-backend` -> confirmed repository layout and absence of `docs/`.
-- `sed -n '1,200p' README.md` from `/home/vboxuser/nutrigard/nutriguard-backend` -> reviewed project context.
-- `sed -n '1,200p' AGENTS.md` from `/home/vboxuser/nutrigard/nutriguard-backend` -> verified repository instructions after creation.
-- `sed -n '1,260p' docs/CODEX_HANDOFF.md` from `/home/vboxuser/nutrigard/nutriguard-backend` -> verified handoff contents after creation.
-
-Unresolved issues:
-
-- The workspace does not expose `.git` metadata for this project, so repository root had to be inferred from directory structure.
-- Future tasks should continue using `/home/vboxuser/nutrigard/nutriguard-backend` as the root unless the environment changes.
-
-Exact recommended next step:
-
-- Before starting the next repository task, read `AGENTS.md` and `docs/CODEX_HANDOFF.md`, then proceed using `/home/vboxuser/nutrigard/nutriguard-backend` as the repository root.
+Run both CI workflows on the cleanup pull request, review the rename as a file move, and merge only when Android and backend verification pass.
