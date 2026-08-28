@@ -15,11 +15,10 @@ View your app in AI Studio: https://ai.studio/apps/91df2d7b-047e-4d9b-8293-f6ef1
 
 1. Open Android Studio
 2. Select **Open** and choose the directory containing this project
-3. Allow Android Studio to fix any incompatibilities as it imports the project.
+3. Allow Android Studio to finish importing and syncing the project.
 4. Create a file named `.env` in the project directory and set `GEMINI_API_KEY` in that file to your Gemini API key (see `.env.example` for an example)
-5. Remove this line from the app's `build.gradle.kts` file: `signingConfig = signingConfigs.getByName("debugConfig")`
-6. Run the app on an emulator or physical device
-7. If you have already published your app in AI Studio, please [request upload key reset](https://support.google.com/googleplay/android-developer/answer/9842756#zippy=%2Crequest-an-upload-key-reset) in Google Play Console.
+5. Run the app on an emulator or physical device. Debug builds use Android's standard automatically generated debug keystore; no project-local keystore or Gradle edit is required.
+6. If you have already published your app in AI Studio, please [request upload key reset](https://support.google.com/googleplay/android-developer/answer/9842756#zippy=%2Crequest-an-upload-key-reset) in Google Play Console.
 
 ## Backend connection
 
@@ -36,4 +35,4 @@ For a physical phone on the same network as the backend, add the reachable backe
 BACKEND_BASE_URL=http://YOUR_BACKEND_IP:8000/
 ```
 
-The URL must end with `/`. Never commit machine-specific addresses or credentials.
+The URL must end with `/`. Debug builds permit cleartext HTTP for local-network development; release builds keep the stricter network policy. Never commit machine-specific addresses or credentials.
