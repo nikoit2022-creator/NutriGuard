@@ -16,6 +16,7 @@ from app.services.ocr_normalizer import (
     match_against_database,
     normalize_and_extract_tokens,
 )
+from app.services.text_localization import to_bilingual_display_text
 
 
 @dataclass
@@ -58,9 +59,15 @@ def fallback_local_analysis(
     has_preservatives = any(kw in lower for kw in ("benzoate", "nitrit", "sorbate"))
     nova = 4 if (len(ingredient_list) > 5 or has_sweeteners or has_preservatives) else 3
 
+    # `title` is a fixed, already-safe English string ("Scanned Product",
+    # "Scanned Label Product") at every callsite except the documented
+    # gemini_result_parser quirk, where it is Gemini's own extracted
+    # productName -- run it through the bilingual guard so a "null"
+    # placeholder or an untranslatable-script name from that path never
+    # reaches the client.
     product = AnalyzedProductData(
         barcode=f"ocr_{int(time.time() * 1000)}",
-        product_name=title,
+        product_name=to_bilingual_display_text(title, fallback="Scanned Product"),
         brand="Scanned Label Product",
         category="Analyzed Food",
         image_url=None,

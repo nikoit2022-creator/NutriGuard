@@ -12,6 +12,15 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V4 (bug fix):** AI-derived product/ingredient text (from Gemini OCR/
+image analysis) is now guarded to always be English or Bulgarian:
+strengthened Gemini prompts plus a deterministic backend safety net that
+scrubs "null"/"None" placeholders, blocks non-Latin/non-Cyrillic script
+leakage, translates common German/French/Albanian food-label terms, and
+lets Bulgarian ingredient names still match the English scientific
+database by canonical name/E-number. Brand names are never translated.
+Root cause, fix, and regression tests are in section 6, item 8 below.
+
 **V3 (bug fix):** `POST /api/v1/scan/label-image` now actually uses a
 successful Gemini image analysis. Previously it discarded the Gemini
 JSON (only extracting `productName`/`rawIngredientText` via regex before
@@ -294,6 +303,52 @@ than silently resolved:
    regression coverage (valid JSON used end-to-end; invalid JSON,
    network timeout, and missing API key all correctly fall back; and a
    simultaneous Gemini+fallback failure correctly returns 503).
+
+8. **AI-derived product/ingredient text is now guarded to be English or
+   Bulgarian only (bilingual-output fix).** The Gemini prompts
+   (`app/integrations/gemini.py`) now explicitly require English-or-
+   Bulgarian-only output, translation of any other source language,
+   preservation of the canonical English ingredient name (for scientific-
+   database matching) and the E-number, and forbid placeholder text
+   ("null"/"None") in place of a real value or JSON `null`. Because a
+   prompt is not a guarantee, a deterministic backend safety net was
+   added in `app/services/text_localization.py` and wired into
+   `fallback_analysis.fallback_local_analysis`,
+   `gemini_image_parser.parse_gemini_image_json_result`, and
+   `ocr_normalizer.create_synthetic_ingredient` (every place an AI- or
+   OCR-derived string becomes a `productName`/`brand`/ingredient
+   `commonName` in the API response):
+     - literal `"null"`/`"None"`/`"N/A"`/empty-string placeholders are
+       replaced with `null`s (Pydantic optionals) or an appropriate
+       English fallback (required fields) — never returned as the
+       literal placeholder text;
+     - text in a script that is neither Latin nor Cyrillic (Greek,
+       Arabic, CJK, Thai, Hebrew, ...) is replaced with a safe English
+       fallback rather than ever reaching the client untranslated;
+     - a small, explicitly non-exhaustive glossary of common German/
+       French/Albanian food-label words is translated to English;
+     - Bulgarian text is preserved as-is for display, while a separate
+       Bulgarian→English alias table (`search_aliases_for`) lets
+       `ocr_normalizer.match_against_database` still resolve a
+       Bulgarian ingredient word against the (English) scientific
+       database by its canonical name/E-number;
+     - `brand` is never translated (only placeholder-scrubbed), per the
+       requirement that brand names are preserved verbatim.
+   **Known, accepted limitation:** an unrecognised Latin-script word in
+   a language this module has no glossary entry for (e.g. an unlisted
+   German/French/Albanian/Italian/Spanish term) is passed through
+   unchanged — a full offline machine translator is out of scope for a
+   deterministic backend layer; correctness for that general case
+   depends on the Gemini prompt being followed. `rawIngredientText`
+   (the verbatim OCR/Gemini transcript) is intentionally **not**
+   translated or filtered — it exists to show what was actually read
+   from the label, not as a "name" or "descriptive value", and every
+   existing test that asserts it verbatim continues to do so unchanged.
+   See `tests/unit/test_text_localization.py`,
+   `tests/unit/test_ocr_normalizer.py`,
+   `tests/unit/test_fallback_and_gemini_parser.py`,
+   `tests/unit/test_gemini_image_parser.py`, and
+   `tests/integration/test_bilingual_analysis.py`.
 
 No other ambiguities were found that required deviating from the
 contract; where the contract was silent on an implementation detail

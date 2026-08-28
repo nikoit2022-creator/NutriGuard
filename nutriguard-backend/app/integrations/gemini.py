@@ -23,10 +23,34 @@ class GeminiUnavailableError(Exception):
     than propagating it to the client."""
 
 
+_LANGUAGE_RULES = """
+Language rules (strict -- the output is shown directly to end users, do not deviate):
+- Every text value you return (productName, brand names ARE the one exception -- see below,
+  ingredient commonName, scientificName, category, description, and every other string field)
+  must be written in English or Bulgarian ONLY. No other language may appear anywhere in the output.
+- If the source label is in English: return the English text as-is.
+- If the source label is in Bulgarian: return the correct Bulgarian text as-is; you do not need
+  to translate it to English.
+- If the source label is in ANY OTHER language (German, French, Albanian, or anything else):
+  translate every product/ingredient name and description to English before returning it.
+  Never return the original non-English/non-Bulgarian text for these fields.
+- Brand names are the one exception: NEVER translate a brand name. Return it exactly as printed
+  on the label, in its original language/spelling.
+- For every ingredient, ALWAYS also provide its canonical English common name (the standard
+  English scientific/food name used in ingredient databases, e.g. "Aspartame", "Sodium Benzoate")
+  in `commonName`, even if the label itself is in Bulgarian or another language -- this is required
+  for matching against an English-language scientific database, regardless of what the source
+  label's original text said.
+- ALWAYS preserve the E-number (e.g. "E951") in `eNumber` whenever the label shows or implies one,
+  even if you also translated the ingredient's name.
+- Never invent a value. If a field is genuinely unknown, use JSON null (for optional fields) --
+  never the literal text "null", "None", "N/A", or any other placeholder string.
+"""
+
 _TEXT_PROMPT_TEMPLATE = """
 You are a scientific food database parser. Analyze the following food ingredient text and return a JSON object ONLY with no markdown formatting.
 Text: "{raw_text}"
-
+""" + _LANGUAGE_RULES + """
 Required format:
 {{
   "productName": "Estimated Product Name",
@@ -74,7 +98,9 @@ _IMAGE_PROMPT = (
     "Extract all ingredients from this food label image and analyze them scientifically. "
     "Return JSON with keys: productName, brand, sugarGrams, sodiumMg, saturatedFatGrams, "
     "hasArtificialSweeteners, hasPreservatives, isGlutenFree, isLactoseFree, isVegan, "
-    "isVegetarian, isHalal, isKosher, novaGroup, rawIngredientText, ingredients array."
+    "isVegetarian, isHalal, isKosher, novaGroup, rawIngredientText, ingredients array "
+    "(each with commonName, scientificName, eNumber, category, description, etc.).\n"
+    + _LANGUAGE_RULES
 )
 
 

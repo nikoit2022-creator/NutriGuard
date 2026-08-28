@@ -84,3 +84,72 @@ def test_synthetic_ingredient_hypertension_flag_from_sodium_keyword():
 def test_synthetic_ingredient_extracts_e_number():
     syn = create_synthetic_ingredient("some e621 flavor enhancer")
     assert syn.e_number == "E621"
+
+
+# -- bilingual output requirements -------------------------------------------
+
+def test_synthetic_ingredient_preserves_bulgarian_display_name():
+    syn = create_synthetic_ingredient("Натриев бензоат")
+    assert syn.common_name == "Натриев бензоат"
+    assert syn.id.startswith("synth_")
+
+
+def test_synthetic_ingredient_translates_known_german_term():
+    syn = create_synthetic_ingredient("Zucker")
+    assert syn.common_name == "Sugar"
+
+
+def test_synthetic_ingredient_never_leaks_unsupported_script_name():
+    # A third-language ingredient name (Greek here) written in a script
+    # that cannot be deterministically translated must never reach the
+    # client as-is -- it falls back to the E-number, or a safe English
+    # label when there is no E-number either.
+    syn_with_e_number = create_synthetic_ingredient("ζάχαρη E950")
+    assert syn_with_e_number.common_name == "E950"
+
+    syn_without_e_number = create_synthetic_ingredient("ζάχαρη")
+    assert syn_without_e_number.common_name == "Unidentified Ingredient"
+
+
+def test_synthetic_ingredient_null_and_none_placeholders_never_become_the_name():
+    assert create_synthetic_ingredient("null").common_name == "Unidentified Ingredient"
+    assert create_synthetic_ingredient("None").common_name == "Unidentified Ingredient"
+
+
+def test_synthetic_ingredient_ids_do_not_collide_for_different_non_ascii_names():
+    # Two different non-Latin-script names with no E-number must not both
+    # collapse to the same synthetic id (a plain ASCII-strip of the name
+    # would produce "synth_" for both, silently merging two ingredients).
+    syn_a = create_synthetic_ingredient("糖")
+    syn_b = create_synthetic_ingredient("塩")
+    assert syn_a.id != syn_b.id
+    assert syn_a.id != "synth_"
+
+
+def test_match_against_database_by_bulgarian_search_alias():
+    """API Contract requirement: a Bulgarian label's ingredient name is
+    matched against the (English) scientific database via its English
+    canonical name/E-number, without needing the OCR token itself to be
+    in English."""
+
+    class FakeIngredient:
+        id = "e951_aspartame"
+        common_name = "Aspartame"
+        scientific_name = "L-alpha-aspartyl..."
+        e_number = "E951"
+
+    result = match_against_database(["Аспартам"], [FakeIngredient()])
+    assert len(result.matched_ingredients) == 1
+    assert result.matched_ingredients[0].id == "e951_aspartame"
+
+
+def test_match_against_database_by_e_number_after_bulgarian_alias():
+    class FakeIngredient:
+        id = "e211_sodium_benzoate"
+        common_name = "Sodium Benzoate"
+        scientific_name = "Sodium salt of benzoic acid"
+        e_number = "E211"
+
+    result = match_against_database(["Натриев бензоат"], [FakeIngredient()])
+    assert len(result.matched_ingredients) == 1
+    assert result.matched_ingredients[0].e_number == "E211"

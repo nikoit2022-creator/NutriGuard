@@ -3,13 +3,24 @@ Deterministic port of `com.example.service.ocr.OcrNormalizer`.
 
 Tokenization rules, matching heuristics, and synthetic-ingredient risk
 heuristics are copied verbatim from the Kotlin source (API Contract
-section 7.3).
+section 7.3), with one documented extension (see README "Deviations"):
+database matching also tries each token's English/Bulgarian-aware
+search aliases (`text_localization.search_aliases_for`), and the
+synthetic-ingredient display name goes through the bilingual output
+guard (`text_localization.to_bilingual_display_text`) so an unmatched
+ingredient never echoes placeholder junk or untranslatable-script text
+back to the client.
 """
 import re
 from dataclasses import dataclass
 from typing import Any
 
 from app.models.enums import RiskLevel
+from app.services.text_localization import (
+    search_aliases_for,
+    safe_slug,
+    to_bilingual_display_text,
+)
 
 _BRACKET_OR_PERCENT = re.compile(r"\[.*?\]|\(.*?%\)")
 _NON_WORD_EDGES = re.compile(r"^\W+|\W+$")
@@ -56,14 +67,22 @@ def match_against_database(tokens: list[str], db_ingredients: list[Any]) -> Norm
             )
 
         if found is None:
-            for ing in db_ingredients:
-                common = ing.common_name.lower()
-                sci = (ing.scientific_name or "").lower()
-                if (
-                    (common and (lower_token in common or common in lower_token))
-                    or (sci and lower_token in sci)
-                ):
-                    found = ing
+            # Try the raw token first, then any English/Bulgarian search
+            # aliases for it (e.g. a Bulgarian ingredient word resolves
+            # to its English canonical name here without ever altering
+            # the token's own display text -- see text_localization).
+            search_terms = [lower_token] + [a.lower() for a in search_aliases_for(token)]
+            for term in search_terms:
+                for ing in db_ingredients:
+                    common = ing.common_name.lower()
+                    sci = (ing.scientific_name or "").lower()
+                    if (
+                        (common and (term in common or common in term))
+                        or (sci and term in sci)
+                    ):
+                        found = ing
+                        break
+                if found is not None:
                     break
 
         if found is not None:
@@ -131,11 +150,19 @@ def create_synthetic_ingredient(name: str) -> SyntheticIngredient:
     else:
         risk = RiskLevel.SAFE
 
-    slug = re.sub(r"[^a-z0-9_]", "", name.lower().replace(" ", "_"))
+    # Risk/allergen/health-profile heuristics above intentionally match
+    # against the ORIGINAL (possibly non-English) `lower` text -- that
+    # keyword matching is unchanged. Only the *displayed* name is run
+    # through the bilingual output guard, so a placeholder ("null") or
+    # untranslatable-script OCR token never reaches the client as-is.
+    display_name = to_bilingual_display_text(
+        name, fallback=formatted_e or "Unidentified Ingredient"
+    )
+    slug = safe_slug(name, fallback_prefix=formatted_e)
 
     return SyntheticIngredient(
         id=f"synth_{slug}",
-        common_name=name[:1].upper() + name[1:] if name else name,
+        common_name=display_name,
         scientific_name=formatted_e or "Normalized Food Component",
         e_number=formatted_e,
         category=f"Food Additive ({formatted_e})" if formatted_e else "Ingredient",

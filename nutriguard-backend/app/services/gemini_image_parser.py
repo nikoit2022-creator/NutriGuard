@@ -35,6 +35,11 @@ from app.services.ocr_normalizer import (
     match_against_database,
     normalize_and_extract_tokens,
 )
+from app.services.text_localization import (
+    clean_optional,
+    clean_required,
+    to_bilingual_display_text,
+)
 
 
 def _as_float(payload: dict, key: str, default: float) -> float:
@@ -80,8 +85,8 @@ def _resolve_ingredients(
 
     if valid_items:
         for item in valid_items:
-            common_name = str(item.get("commonName") or "").strip()
-            e_number = str(item.get("eNumber") or "").strip() or None
+            common_name = clean_optional(str(item.get("commonName") or "")) or ""
+            e_number = clean_optional(str(item.get("eNumber") or ""))
             if not common_name and not e_number:
                 continue
             token = f"{common_name} ({e_number})" if e_number else common_name
@@ -120,12 +125,27 @@ def parse_gemini_image_json_result(
     if not isinstance(payload, dict):
         return None
 
-    product_name = payload.get("productName")
-    raw_text = payload.get("rawIngredientText")
-    if not isinstance(product_name, str) or not product_name.strip():
+    # A literal "null"/"None" placeholder string is exactly as unusable
+    # as a genuinely missing field -- treat both the same way so a
+    # misbehaving Gemini response falls back to deterministic analysis
+    # instead of persisting placeholder junk as the product name/text.
+    product_name = clean_optional(payload.get("productName")) if isinstance(
+        payload.get("productName"), str
+    ) else None
+    raw_text = clean_optional(payload.get("rawIngredientText")) if isinstance(
+        payload.get("rawIngredientText"), str
+    ) else None
+    if not product_name:
         return None
-    if not isinstance(raw_text, str) or not raw_text.strip():
+    if not raw_text:
         return None
+
+    # productName is a required, already-present field at this point --
+    # still run it through the bilingual guard so an untranslated
+    # third-language name never reaches the client (API Contract
+    # bilingual-output requirement; brand is handled separately below
+    # and is never translated).
+    product_name = to_bilingual_display_text(product_name, fallback="Scanned Product")
 
     gemini_ingredients = payload.get("ingredients")
     if not isinstance(gemini_ingredients, list):
@@ -135,11 +155,16 @@ def parse_gemini_image_json_result(
 
     data = AnalyzedProductData(
         barcode="",  # overridden by the caller (food_analysis.analyze_label_image)
-        product_name=product_name.strip(),
-        brand=str(payload.get("brand") or "Analyzed Brand").strip() or "Analyzed Brand",
+        product_name=product_name,
+        # Brand names are never translated (API Contract bilingual-output
+        # requirement) -- only placeholder junk is scrubbed here.
+        brand=clean_required(
+            payload.get("brand") if isinstance(payload.get("brand"), str) else None,
+            fallback="Analyzed Brand",
+        ),
         category="Analyzed Food",
         image_url=None,
-        raw_ingredient_text=raw_text.strip(),
+        raw_ingredient_text=raw_text,
         nova_group=_as_int(payload, "novaGroup", 3),
         sugar_grams=_as_float(payload, "sugarGrams", 0.0),
         sodium_mg=_as_float(payload, "sodiumMg", 0.0),

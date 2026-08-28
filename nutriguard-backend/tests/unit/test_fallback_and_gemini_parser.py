@@ -55,3 +55,32 @@ def test_gemini_result_parser_uses_only_product_name_from_json():
 def test_gemini_result_parser_falls_back_to_generic_name_on_malformed_json():
     product, _ = parse_gemini_json_result("not valid json at all", "Water, Salt", [])
     assert product.product_name == "Scanned Product"
+
+
+# -- bilingual output requirements -------------------------------------------
+
+def test_fallback_local_analysis_translates_third_language_title():
+    # The `title` passed to fallback_local_analysis is normally a fixed,
+    # already-English string, EXCEPT via the documented
+    # gemini_result_parser quirk, where it is Gemini's own extracted
+    # productName. That value must still never leak an untranslated
+    # third-language name.
+    product, _ = fallback_local_analysis("Zucker Produkt", "Water, Sugar", [])
+    assert product.product_name == "Sugar Product"
+
+
+def test_fallback_local_analysis_null_title_never_becomes_the_product_name():
+    product, _ = fallback_local_analysis("null", "Water, Sugar", [])
+    assert product.product_name == "Scanned Product"
+
+
+def test_gemini_result_parser_translates_third_language_product_name_from_json():
+    fake_json = '{"productName": "Zucker Drink", "brand": "Acme"}'
+    product, _ = parse_gemini_json_result(fake_json, "Water, Sugar", [])
+    assert product.product_name == "Sugar Drink"
+
+
+def test_gemini_result_parser_null_product_name_falls_back_to_generic_name():
+    fake_json = '{"productName": "null", "brand": "Acme"}'
+    product, _ = parse_gemini_json_result(fake_json, "Water, Sugar", [])
+    assert product.product_name == "Scanned Product"
