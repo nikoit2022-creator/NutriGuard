@@ -76,10 +76,10 @@ Thumbs.db
 
 # Android app resources are required build inputs, not temporary images -
 # do not let the blanket image rules above drop them from the repo.
-!nutriguard (4)/app/src/main/res/**/*.jpg
-!nutriguard (4)/app/src/main/res/**/*.jpeg
-!nutriguard (4)/app/src/main/res/**/*.png
-!nutriguard (4)/app/src/main/res/**/*.webp
+!android-app/app/src/main/res/**/*.jpg
+!android-app/app/src/main/res/**/*.jpeg
+!android-app/app/src/main/res/**/*.png
+!android-app/app/src/main/res/**/*.webp
 
 # Local archive / source material
 /files/

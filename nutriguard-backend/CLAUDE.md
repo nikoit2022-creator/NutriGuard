@@ -19,7 +19,7 @@ agent for the NutriGuard backend**. It applies to everything under
 
 ## 1. Repository / backend location
 
-- Git root: `/home/vboxuser/nutrigard` (the repo also contains the
+- Git root: `the repository root` (the repo also contains the
   Android client source and archival material outside this directory —
   those are out of scope for backend work; see section 11).
 - Backend root: `nutriguard-backend/` — treat this as the working
