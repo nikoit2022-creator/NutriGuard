@@ -35,4 +35,4 @@ For a physical phone on the same network as the backend, add the reachable backe
 BACKEND_BASE_URL=http://YOUR_BACKEND_IP:8000/
 ```
 
-The URL must end with `/`. Never commit machine-specific addresses or credentials.
+The URL must end with `/`. Debug builds permit cleartext HTTP for local-network development; release builds keep the stricter network policy. Never commit machine-specific addresses or credentials.
