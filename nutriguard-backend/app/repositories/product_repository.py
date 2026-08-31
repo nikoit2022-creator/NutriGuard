@@ -1,4 +1,5 @@
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.product import Product
@@ -36,3 +37,22 @@ async def upsert(db: AsyncSession, product: Product) -> Product:
     merged = await db.merge(product)
     await db.flush()
     return merged
+
+
+async def insert_new(db: AsyncSession, product: Product) -> Product | None:
+    """
+    Attempts to INSERT a brand-new product row (used only by barcode
+    discovery — see app/services/food_analysis.py). Returns `None` (after
+    rolling back cleanly) if a row for this barcode already exists —
+    e.g. a concurrent discovery request for the same barcode won the
+    race. Makes no merge/overwrite decision itself (no business logic,
+    per the repository layer's job); the caller re-fetches with
+    `get_by_barcode` and decides how to proceed.
+    """
+    db.add(product)
+    try:
+        await db.flush()
+        return product
+    except IntegrityError:
+        await db.rollback()
+        return None

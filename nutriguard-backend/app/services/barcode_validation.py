@@ -1,0 +1,114 @@
+"""
+Barcode format validation and normalization for GTIN-family barcodes
+(EAN-8, EAN-13, UPC-A, UPC-E).
+
+The Android client does not perform any client-side checksum validation
+today — it hands whatever the camera/ML Kit scanner (or manual text
+entry) produced straight to `POST /scan/barcode` as an opaque string,
+and the backend's own OCR/label-image pipeline mints synthetic,
+non-numeric barcodes (`ocr_...`, `img_...`) for products it creates from
+label content. Both of those MUST keep working exactly as before for the
+*local database* lookup (see `product_repository.get_by_barcode`), which
+is why validation here is used to gate one thing only: whether a barcode
+is a plausible real-world GTIN worth spending an external HTTP request
+on. Anything that fails this check is never sent to a barcode provider —
+it falls straight through to the "not found / label scan required"
+response, matching the "reject invalid barcodes before contacting
+providers" requirement.
+
+Standard mod-10 (GS1) check digit, and the standard UPC-E -> UPC-A
+zero-suppression expansion, per the public GS1 General Specifications.
+No proprietary/Android-specific validation logic exists to mirror (grep
+confirms no checksum validation anywhere in `android-app/`); this
+reimplements the same public GS1 standard the Android scanner's own
+barcode library (ML Kit / ZXing) already relies on internally.
+"""
+import re
+from dataclasses import dataclass
+
+_STRIP_CHARS = re.compile(r"[\s-]")
+
+
+@dataclass(frozen=True)
+class BarcodeInfo:
+    """A validated, normalized barcode, in every representation a
+    provider adapter might need."""
+
+    raw: str
+    format: str  # "EAN_13" | "EAN_8" | "UPC_A" | "UPC_E"
+    gtin13: str  # zero-padded to 13 digits — what Open Food Facts / UPCitemdb expect
+    gtin14: str  # zero-padded to 14 digits — canonical GS1 Digital Link form
+
+
+def _checksum_ok(digits: str) -> bool:
+    """Standard GS1 mod-10 check digit for a digit string of length >= 2
+    (the last digit is the check digit, weights alternate 3/1 starting
+    from the rightmost digit of the body)."""
+    body, check = digits[:-1], digits[-1]
+    total = 0
+    for i, ch in enumerate(reversed(body)):
+        weight = 3 if i % 2 == 0 else 1
+        total += int(ch) * weight
+    expected = (10 - (total % 10)) % 10
+    return expected == int(check)
+
+
+def _expand_upc_e_to_upc_a(digits8: str) -> str | None:
+    """Standard zero-suppressed UPC-E (number system digit + 6 data
+    digits + check digit) -> full 12-digit UPC-A, per the GS1 General
+    Specifications expansion table. Returns None for a number system
+    digit UPC-E doesn't support (only 0 and 1 are defined)."""
+    number_system, data, check = digits8[0], digits8[1:7], digits8[7]
+    if number_system not in ("0", "1"):
+        return None
+
+    last = data[5]
+    if last in ("0", "1", "2"):
+        expanded_body = data[0:2] + last + "0000" + data[2:5]
+    elif last == "3":
+        expanded_body = data[0:3] + "00000" + data[3:5]
+    elif last == "4":
+        expanded_body = data[0:4] + "00000" + data[4]
+    else:  # 5, 6, 7, 8, 9
+        expanded_body = data[0:5] + "0000" + last
+
+    return number_system + expanded_body + check
+
+
+def validate_and_normalize(raw: str | None) -> BarcodeInfo | None:
+    """Returns a `BarcodeInfo` for a structurally valid EAN-8/EAN-13/
+    UPC-A/UPC-E barcode (correct length + correct GS1 check digit), or
+    `None` for anything else (wrong length, non-numeric, synthetic
+    `ocr_.../img_...` ids, bad checksum). `None` means "do not contact
+    any barcode provider for this value" — it does NOT affect the local
+    DB lookup, which already happened earlier and accepts any string."""
+    if not raw:
+        return None
+    candidate = _STRIP_CHARS.sub("", raw.strip())
+    if not candidate.isdigit():
+        return None
+
+    if len(candidate) == 13:
+        if not _checksum_ok(candidate):
+            return None
+        return BarcodeInfo(raw=raw, format="EAN_13", gtin13=candidate, gtin14="0" + candidate)
+
+    if len(candidate) == 12:
+        if not _checksum_ok(candidate):
+            return None
+        return BarcodeInfo(raw=raw, format="UPC_A", gtin13="0" + candidate, gtin14="00" + candidate)
+
+    if len(candidate) == 8:
+        # Could be EAN-8 or an explicit (number-system + check-digit)
+        # UPC-E. Try EAN-8 first; it's the far more common 8-digit
+        # format and has its own directly-checkable checksum.
+        if _checksum_ok(candidate):
+            return BarcodeInfo(
+                raw=raw, format="EAN_8", gtin13="00000" + candidate, gtin14="000000" + candidate
+            )
+        upc_a = _expand_upc_e_to_upc_a(candidate)
+        if upc_a is not None and _checksum_ok(upc_a):
+            return BarcodeInfo(raw=raw, format="UPC_E", gtin13="0" + upc_a, gtin14="00" + upc_a)
+        return None
+
+    return None

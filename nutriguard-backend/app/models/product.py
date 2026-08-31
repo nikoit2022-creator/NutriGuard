@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, Numeric, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, Numeric, String, Text, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import Base
@@ -53,3 +53,20 @@ class Product(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
+
+    # --- Discovery provenance (additive, backward compatible) ---------
+    # Not part of the public API contract (ProductOut deliberately does
+    # not expose these — see app/schemas/product.py); used only by
+    # app/services/barcode_discovery.py and app/repositories/
+    # product_repository.py to decide whether newly discovered data is
+    # allowed to overwrite what's already stored for a barcode.
+    #
+    # "local"/"ocr"/"label_image" (this app's own analysis pipelines,
+    # always is_verified=True) vs. a provider name ("open_food_facts",
+    # "upcitemdb", ...) for a barcode-discovery result (is_verified
+    # always False — see barcode_discovery.py's confidence model).
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="local", server_default="local")
+    source_confidence: Mapped[float | None] = mapped_column(Numeric(4, 2), nullable=True)
+    is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    discovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

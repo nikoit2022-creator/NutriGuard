@@ -50,6 +50,42 @@ class Settings(BaseSettings):
     RATE_LIMIT_PROFILE_PER_HOUR: int = 60
     RATE_LIMIT_AUTH_PER_MINUTE: int = 10
 
+    # --- Barcode product discovery (multi-source lookup on a local miss) ---
+    # Master switch: when false, an unknown barcode goes straight to the
+    # structured "not found / label scan required" response with zero
+    # external calls, regardless of the per-provider flags below.
+    BARCODE_DISCOVERY_ENABLED: bool = True
+
+    OPEN_FOOD_FACTS_ENABLED: bool = True
+    OPEN_FOOD_FACTS_BASE_URL: str = "https://world.openfoodfacts.org"
+    OPEN_FOOD_FACTS_USER_AGENT: str = "NutriGuard-Backend/1.0 (+https://github.com/nikoit2022-creator/NutriGuard)"
+
+    GS1_RESOLVER_ENABLED: bool = True
+    # GS1's own global Digital Link resolver. Treated strictly as a
+    # resolver for an official manufacturer/GS1-registered resource, not
+    # as a product database — see app/integrations/barcode_providers/gs1_resolver.py.
+    GS1_RESOLVER_BASE_URL: str = "https://id.gs1.org"
+
+    UPCITEMDB_ENABLED: bool = True
+    # Free "trial" endpoint by default: works with no credentials (rate
+    # limited). A paid UPCitemdb plan can be used by setting
+    # UPCITEMDB_BASE_URL to the prod/v1 host and providing the keys below.
+    UPCITEMDB_BASE_URL: str = "https://api.upcitemdb.com/prod/trial"
+    UPCITEMDB_API_KEY: str = ""
+    UPCITEMDB_USER_KEY: str = ""
+
+    # Per-request connect/read timeout for any barcode provider call.
+    BARCODE_PROVIDER_TIMEOUT_SECONDS: float = 5.0
+    # Extra attempts (beyond the first) on a transient failure (timeout /
+    # network error / 5xx) for a single provider. Never retries on a 4xx,
+    # a rate-limit response, or a malformed body — those move on to the
+    # next provider immediately instead.
+    BARCODE_PROVIDER_MAX_RETRIES: int = 1
+    # How long a previously discovered (externally sourced, unverified)
+    # product is considered fresh before a later scan is eligible to
+    # re-verify/refresh it from providers again.
+    BARCODE_DISCOVERY_CACHE_SECONDS: int = 30 * 24 * 60 * 60  # 30 days
+
     @property
     def cors_origins_list(self) -> List[str]:
         if self.CORS_ORIGINS.strip() == "*":
