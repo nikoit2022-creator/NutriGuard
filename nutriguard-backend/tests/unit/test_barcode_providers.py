@@ -17,7 +17,10 @@ from app.services.barcode_validation import validate_and_normalize
 from tests.fixtures.barcode_provider_responses import (
     GS1_LINKSET_EMPTY,
     GS1_LINKSET_FOUND,
+    OFF_BULGARIAN_RECORD,
+    OFF_EXPLICIT_ENGLISH_FIELD_ON_NON_ENGLISH_RECORD,
     OFF_FOUND_FULL,
+    OFF_FRENCH_ONLY,
     OFF_MALFORMED,
     OFF_NOT_FOUND,
     UPCITEMDB_FOUND,
@@ -102,6 +105,70 @@ async def test_off_transient_5xx_retries_then_succeeds():
     result = await provider.fetch(BARCODE)
     assert result is not None
     assert result.product_name == "Fizzy Orange Soda"
+
+
+# --- Open Food Facts language policy (PR #7 review, finding 4) -------------
+# "Latin-script detection is not language detection": a French/German/
+# Albanian name is Latin script too, so only an explicit `_en`/`_bg`
+# field, or the default field when OFF's own declared `lang`/`lc` is
+# en/bg, may become the primary display name/ingredient text.
+
+
+@pytest.mark.asyncio
+async def test_off_french_only_record_is_not_used_as_identity():
+    """No product_name_en/_bg, and the declared language is French --
+    the language-neutral default field must NOT be used, so this
+    provider result must not claim a usable identity at all (letting
+    orchestration fall through to UPCitemdb instead)."""
+    provider = OpenFoodFactsProvider(transport=_json_transport(OFF_FRENCH_ONLY))
+    result = await provider.fetch(BARCODE)
+    assert result is not None
+    assert result.product_name is None
+    assert result.raw_ingredient_text is None
+    assert result.has_basic_identity is False
+
+
+@pytest.mark.asyncio
+async def test_off_explicit_english_field_used_even_on_non_english_record():
+    """The record's own declared language is German, but it supplies an
+    explicit English translation -- that must always be preferred,
+    regardless of `lang`."""
+    provider = OpenFoodFactsProvider(transport=_json_transport(OFF_EXPLICIT_ENGLISH_FIELD_ON_NON_ENGLISH_RECORD))
+    result = await provider.fetch(BARCODE)
+    assert result is not None
+    assert result.product_name == "Hazelnut Spread"
+    assert result.raw_ingredient_text == "Sugar, palm oil, hazelnuts, cocoa"
+
+
+@pytest.mark.asyncio
+async def test_off_bulgarian_declared_record_uses_default_field():
+    """No explicit product_name_bg, but the record's own declared
+    language IS Bulgarian -- the default field is accepted (and
+    preserved verbatim, in Cyrillic, per the bilingual display policy)."""
+    provider = OpenFoodFactsProvider(transport=_json_transport(OFF_BULGARIAN_RECORD))
+    result = await provider.fetch(BARCODE)
+    assert result is not None
+    assert result.product_name == "Кисело Мляко"
+    assert result.raw_ingredient_text == "Прясно мляко, млечни закваски"
+    assert result.language == "bg"
+
+
+@pytest.mark.asyncio
+async def test_off_english_declared_record_uses_default_field():
+    off_english_default = {
+        "code": "1234567890128",
+        "status": "success",
+        "result": {"id": "product_found"},
+        "product": {
+            "product_name": "Plain English Snack",
+            "ingredients_text": "Wheat flour, sugar, salt",
+            "lang": "en",
+        },
+    }
+    provider = OpenFoodFactsProvider(transport=_json_transport(off_english_default))
+    result = await provider.fetch(BARCODE)
+    assert result is not None
+    assert result.product_name == "Plain English Snack"
 
 
 # --- GS1 Digital Link resolver ----------------------------------------------

@@ -12,6 +12,38 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V6 (bug fixes, PR #7 review):** Six correctness issues in the V4/V5
+barcode discovery feature, fixed before merge:
+1. Unknown dietary flags (vegan/vegetarian/gluten-free/lactose-free/
+   halal/kosher) now default to `false`, never `true` — missing data is
+   never shown as a positive certification claim.
+2. A discovery whose nutrition/ingredients are materially incomplete
+   (identity-only UPCitemdb fallback, or an Open Food Facts entry with
+   no `nutriments`/`ingredients_text`) no longer gets a Health Score
+   computed from zero-filled placeholders. It's flagged
+   (`Product.has_verified_nutrition=False`) and returns the same
+   structured `labelScanRequired` response as a true not-found — on
+   first discovery AND on every later cache hit of that row.
+3. Migration `cf5522508f9a` now backfills existing rows (all
+   pre-dating barcode discovery, i.e. local/OCR/label-image products)
+   as `is_verified=true`; only an external discovery ever writes
+   `false`, and always explicitly.
+4. Open Food Facts field selection now enforces English/Bulgarian by
+   the record's own *declared* language (`lang`/`lc`), not by script —
+   a French/German/Albanian name is Latin script too and no longer
+   leaks through as a primary display name.
+5. Barcodes are now looked up and stored under one canonical GTIN-13
+   key, so whitespace/dash variants and UPC-A/EAN-13-equivalent scans
+   of the same product converge on one row instead of duplicating; the
+   EAN-8/UPC-E 8-digit ambiguity is resolved by an explicit, tested
+   precedence rule.
+6. Provenance writes (`product_source_repository.record_discovery`) use
+   a SAVEPOINT per provider instead of a full rollback on conflict, so
+   one provider's uniqueness race can no longer discard another
+   provider's already-flushed row from the same discovery.
+
+See section 6, item 8 and section 10 for the full detail on each.
+
 **V4 (feature):** `POST /api/v1/scan/barcode` now attempts multi-source
 product discovery on a local-database miss instead of immediately
 returning 404: Open Food Facts, then a GS1 Digital Link resolution for
@@ -102,7 +134,7 @@ source .venv/bin/activate
 pytest -q
 ```
 
-The full suite (**135 tests**) runs against an in-memory SQLite database
+The full suite (**155 tests**) runs against an in-memory SQLite database
 via `aiosqlite` — no Docker or Postgres required, and it runs in a few
 seconds. This is intentional: SQLite is good enough to validate all
 business logic and API behavior, while the actual deployment always
@@ -127,11 +159,12 @@ Coverage:
 - `tests/integration/test_barcode_contract_change.py` — V2 regression suite: unknown barcode returns 404 with zero side effects, known barcode returns the real stored product, hand-verified Health Score end-to-end, Warning Engine end-to-end after enabling a profile flag, and a spy-based test proving the synthetic-ingredient/fallback pipeline is never invoked for a barcode lookup.
 - `tests/unit/test_gemini_image_parser.py` — V3 regression suite: valid Gemini JSON is parsed field-for-field, DB-matched vs. synthetic ingredient resolution, missing/invalid JSON and missing required fields all correctly return `None` (triggering fallback upstream).
 - `tests/integration/test_label_image_gemini_fix.py` — V3 end-to-end: valid Gemini JSON drives the full response (nutrition, flags, NOVA group, ingredients, Health Score); invalid JSON, network timeout, and missing API key all correctly fall back to `fallback_local_analysis`; a simultaneous Gemini+fallback failure returns `503 AI_SERVICE_UNAVAILABLE`.
-- `tests/unit/test_barcode_validation.py` — EAN-8/EAN-13/UPC-A/UPC-E checksum validation and GTIN-13/GTIN-14 normalization, including that the backend's own OCR/image synthetic barcode ids are correctly rejected (never sent to a provider).
-- `tests/unit/test_barcode_providers.py` — each provider adapter (Open Food Facts, GS1 Digital Link resolver, UPCitemdb) against mocked HTTP responses: success, not-found, malformed body, rate limit, and transient-error retry.
+- `tests/unit/test_barcode_validation.py` — EAN-8/EAN-13/UPC-A/UPC-E checksum validation and GTIN-13/GTIN-14 normalization, including that the backend's own OCR/image synthetic barcode ids are correctly rejected (never sent to a provider); whitespace/dash/UPC-A-vs-EAN-13-equivalent representations share one canonical GTIN-13; the EAN-8/UPC-E ambiguity's explicit precedence rule (with a constructed colliding example).
+- `tests/unit/test_barcode_providers.py` — each provider adapter (Open Food Facts, GS1 Digital Link resolver, UPCitemdb) against mocked HTTP responses: success, not-found, malformed body, rate limit, and transient-error retry; Open Food Facts' English/Bulgarian language-gated field selection (French-only record rejected, explicit `_en` field honored even on a non-English record, Bulgarian-declared record accepted).
 - `tests/unit/test_barcode_discovery_service.py` — orchestration: provider priority, error isolation (a timeout/rate-limit/error from one provider never blocks the next), the UPCitemdb-fallback-only rule, conflicting-identity flagging, GS1 confidence corroboration, and the English/Bulgarian display-name policy.
 - `tests/unit/test_barcode_discovery_migration.py` — the barcode-discovery Alembic migration has a single head, a valid parent revision, and defines both `upgrade`/`downgrade`.
-- `tests/integration/test_barcode_discovery_flow.py` — full `POST /scan/barcode` discovery flow: local-hit short-circuit, Open Food Facts success, Open Food Facts miss → UPCitemdb fallback, provider timeout/rate-limit/malformed-response fallback, all-providers-unavailable structured 404, invalid-barcode rejection with zero network calls, repeated-discovery dedup, verified-local-data protection, and conflicting-source preservation.
+- `tests/integration/test_barcode_discovery_flow.py` — full `POST /scan/barcode` discovery flow: local-hit short-circuit, Open Food Facts success, Open Food Facts miss → UPCitemdb fallback (correctly incomplete, V6), provider timeout/rate-limit/malformed-response isolation, all-providers-unavailable structured 404, invalid-barcode rejection with zero network calls, repeated-discovery dedup, verified-local-data protection, conflicting-source preservation, equivalent-barcode-representation dedup, and provenance-conflict race-safety.
+- `tests/unit/test_food_analysis_discovery_bridge.py` — unknown dietary flags default to `false` (never `true`); materially incomplete nutrition/ingredients are flagged `has_verified_nutrition=False` in every combination (missing nutrition, missing ingredients, missing both); complete data is scored normally.
 
 ## 4. Implemented endpoints
 
@@ -355,6 +388,47 @@ than silently resolved:
    and `tests/unit/test_barcode_discovery_service.py` for the full
    regression coverage.
 
+8. **Six correctness fixes to the V4/V5 barcode discovery feature,
+   found in PR #7 read-only review and fixed before merge (V6).** None
+   of these change the public API contract further than V4/V5 already
+   did — they correct *internal* logic that was silently wrong:
+   - Unknown dietary flags now default `false` (see
+     `_to_analyzed_data_from_discovery`), never `true` — a missing
+     value must never read as a positive certification.
+   - A materially incomplete discovery
+     (`Product.has_verified_nutrition=False`) never reaches the Health
+     Score Calculator — not on first discovery, not on any later cache
+     hit of that row — and returns the same structured
+     `labelScanRequired` response a true not-found does (via
+     `_label_scan_required_details`), rather than a score computed from
+     zero-filled placeholders.
+   - Migration `cf5522508f9a` backfills existing (local/OCR/label-image)
+     rows as `is_verified=true`/`has_verified_nutrition=true`; the ORM
+     model's own Python-side default matches, so only an *external*
+     discovery ever needs to explicitly write `false`.
+   - Open Food Facts field selection (`_language_gated_field`) now
+     checks the record's own declared `lang`/`lc`, not merely
+     Latin-vs-other script — a French/German/Albanian name is Latin
+     script too and no longer leaks through OFF's language-neutral
+     `product_name`/`ingredients_text` fields.
+   - Barcode storage/lookup uses one canonical GTIN-13 key
+     (`product_repository.get_by_barcode_or_canonical`); the EAN-8/
+     UPC-E 8-digit ambiguity is resolved by an explicit, tested
+     precedence rule (`BarcodeInfo.ambiguous_upc_e`) instead of an
+     implicit accident of control flow.
+   - `product_source_repository.record_discovery` uses a SAVEPOINT
+     (`db.begin_nested()`) per provider instead of a full
+     `db.rollback()` on a uniqueness conflict, verified against both
+     SQLite and PostgreSQL — a conflict on one provider's row can no
+     longer discard another provider's already-flushed row from the
+     same discovery loop.
+
+   See `tests/unit/test_food_analysis_discovery_bridge.py`,
+   `tests/unit/test_barcode_validation.py`,
+   `tests/unit/test_barcode_providers.py`, and the new tests in
+   `tests/integration/test_barcode_discovery_flow.py` for the full
+   regression coverage of each.
+
 No other ambiguities were found that required deviating from the
 contract; where the contract was silent on an implementation detail
 (e.g., exact rate-limit numbers, refresh-token rotation strategy), a
@@ -497,9 +571,14 @@ ingredients/nutrition (compact JSON)/allergens/language, its upstream
 id, small curated metadata, and an `is_conflicting` flag.
 
 `Product` itself gained a handful of additive, backward-compatible
-columns (`source`, `source_confidence`, `is_verified`, `discovered_at`,
-`last_verified_at`) used only for internal merge decisions — **not**
-part of the public API contract (`ProductOut` was not changed).
+columns (`source`, `source_confidence`, `is_verified`,
+`has_verified_nutrition`, `discovered_at`, `last_verified_at`) used only
+for internal merge/scoring-gate decisions — **not** part of the public
+API contract (`ProductOut` was not changed). `is_verified` defaults to
+**true** (every pre-existing/local/OCR/label-image row is verified by
+construction); only an external discovery explicitly writes `false`.
+`has_verified_nutrition` defaults to true too, and is explicitly set
+`false` only for a materially incomplete discovery — see §10.5.
 
 Provider trust weights are fixed constants in code
 (`barcode_discovery.PROVIDER_BASE_TRUST`: Open Food Facts 0.75, GS1
@@ -546,6 +625,17 @@ The response shape (`error.code`/`message`/`details`/`timestamp`) is
 unchanged from the existing `ErrorResponse` contract — only `details`,
 already a documented untyped field, is populated.
 
+A second, related shape covers a barcode whose *identity* WAS found and
+persisted, but whose nutrition/ingredient data was too incomplete to
+compute a real Health Score for (V6 — see item 8 in section 6): still
+`404 PRODUCT_NOT_FOUND`, `labelScanRequired: true`, but with a
+`discoveredIdentity` object (barcode/productName/brand/imageUrl) instead
+of `providersChecked`, so a client can still show the user *something*
+even without a score. This is what a UPCitemdb-only fallback (identity,
+no nutrition) always produces, and what a repeat scan of that same
+barcode keeps producing — it's cached, not re-discovered every time, but
+never scored either.
+
 ### 10.6 Validation, deduplication, and safety rules
 
 - Barcodes are validated as EAN-8/EAN-13/UPC-A/UPC-E via the standard
@@ -555,12 +645,33 @@ already a documented untyped field, is populated.
   performs no barcode validation of its own today (confirmed by
   inspection), so this only ever *adds* protection — it never rejects
   anything the client currently accepts for the local-database lookup
-  path, which is unaffected by this validation.
+  path, which is unaffected by this validation. The EAN-8/UPC-E 8-digit
+  ambiguity (some digit strings validate as both) is resolved by an
+  explicit, tested precedence rule (EAN-8 wins; `BarcodeInfo.ambiguous_upc_e`
+  flags when this happened) rather than an implicit accident of control
+  flow.
+- Barcode storage and lookup use one **canonical GTIN-13 key**
+  (`product_repository.get_by_barcode_or_canonical`): the raw string the
+  client sent is tried first (matching a legacy row or a non-GTIN
+  synthetic `ocr_.../img_...` id verbatim), then the canonical form —
+  so "036000291452" (UPC-A), "0036000291452" (its EAN-13-zero-padded
+  equivalent), and "036-000-291452" (same digits, dashes) all resolve to
+  the same row. Every barcode-discovered product is persisted under its
+  canonical form (`discovered.barcode.gtin13`), so the response's
+  `product.barcode` may not byte-for-byte equal a UPC-A/dashed input —
+  deliberate, and covered by
+  `tests/integration/test_barcode_discovery_flow.py::test_equivalent_barcode_representations_resolve_to_one_product`.
 - Persisting a discovered product is race-safe:
-  `product_repository.insert_new` attempts a plain INSERT and, on a
-  primary-key conflict (a concurrent discovery of the same barcode won
-  the race), rolls back and re-reads the now-existing row rather than
-  erroring or duplicating.
+  `product_repository.insert_new` wraps its INSERT in a SAVEPOINT and,
+  on a primary-key conflict (a concurrent discovery of the same barcode
+  won the race), re-reads the now-existing row rather than erroring or
+  duplicating — verified against both SQLite and PostgreSQL. Provenance
+  writes (`product_source_repository.record_discovery`) use the same
+  SAVEPOINT pattern, per provider, specifically so a conflict on one
+  provider's row can never discard another provider's row already
+  flushed earlier in the same discovery loop (a plain `db.rollback()`
+  would do exactly that — this was fixed after review; see
+  `tests/integration/test_barcode_discovery_flow.py::test_provenance_conflict_does_not_roll_back_earlier_source_in_same_transaction`).
 - **Verified local data is never overwritten.** A product created
   through this app's own label-scan pipelines (`analyze_ocr_text` /
   `analyze_label_image`) is marked `is_verified=True` and is never
@@ -581,6 +692,7 @@ already a documented untyped field, is populated.
 ```bash
 pytest tests/unit/test_barcode_validation.py tests/unit/test_barcode_providers.py \
        tests/unit/test_barcode_discovery_service.py tests/unit/test_barcode_discovery_migration.py \
+       tests/unit/test_food_analysis_discovery_bridge.py \
        tests/integration/test_barcode_discovery_flow.py -q
 ```
 

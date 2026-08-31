@@ -52,9 +52,14 @@ def test_migration_adds_product_sources_table_and_product_provenance_columns():
     is caught."""
     source = (BACKEND_ROOT / "alembic" / "versions" / "cf5522508f9a_barcode_discovery_provenance.py").read_text()
     assert "create_table('product_sources'" in source
-    for column in ("source", "source_confidence", "is_verified", "discovered_at", "last_verified_at"):
+    for column in (
+        "source", "source_confidence", "is_verified", "discovered_at", "last_verified_at", "has_verified_nutrition",
+    ):
         assert f"'products', sa.Column('{column}'" in source
     # Backward compatibility: new NOT NULL columns on an existing table
     # must carry a server_default so existing rows don't break the migration.
     assert "server_default='local'" in source
-    assert "server_default=sa.text('false')" in source
+    # is_verified/has_verified_nutrition must backfill existing (local/
+    # OCR/label) rows as verified -- see the review-fix regression test
+    # in tests/integration/test_barcode_discovery_flow.py.
+    assert source.count("server_default=sa.text('true')") == 2

@@ -87,11 +87,16 @@ async def record_discovery(
     different provider for the same barcode keeps its own row, so
     disagreements between sources stay visible (see `is_conflicting`).
 
-    MUST be called only after the corresponding `Product` write has
-    already been committed (see food_analysis.py) — an IntegrityError
-    here is handled with its own rollback, which would otherwise also
-    discard an uncommitted Product insert earlier in the same
-    transaction.
+    `food_analysis.py` calls this once per contributing provider, in a
+    loop, all within one transaction. A uniqueness conflict on ONE
+    provider's row must never discard provenance rows already flushed
+    for OTHER providers earlier in that same loop — a plain
+    `db.rollback()` here would do exactly that (it rolls back the whole
+    transaction, not just this statement). Wrapping the insert attempt
+    in a SAVEPOINT (`begin_nested`) instead means a conflict only undoes
+    this one row's insert; every prior iteration's work survives.
+    Verified against both SQLite (the test suite) and PostgreSQL (the
+    production dialect) — see the PR description for the manual check.
     """
     existing = await get_by_barcode_and_provider(db, barcode, result.provider)
     if existing is not None:
@@ -107,12 +112,12 @@ async def record_discovery(
         row, result, confidence=confidence, is_conflicting=is_conflicting,
         used_for_persisted_product=used_for_persisted_product,
     )
-    db.add(row)
     try:
-        await db.flush()
+        async with db.begin_nested():
+            db.add(row)
+            await db.flush()
         return row
     except IntegrityError:
-        await db.rollback()
         existing = await get_by_barcode_and_provider(db, barcode, result.provider)
         if existing is not None:
             return existing

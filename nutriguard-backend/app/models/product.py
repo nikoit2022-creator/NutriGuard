@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, Numeric, String, Text, false
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, Numeric, String, Text, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import Base
@@ -61,12 +61,29 @@ class Product(Base):
     # product_repository.py to decide whether newly discovered data is
     # allowed to overwrite what's already stored for a barcode.
     #
-    # "local"/"ocr"/"label_image" (this app's own analysis pipelines,
-    # always is_verified=True) vs. a provider name ("open_food_facts",
-    # "upcitemdb", ...) for a barcode-discovery result (is_verified
-    # always False — see barcode_discovery.py's confidence model).
+    # "local"/"ocr"/"label_image" (this app's own analysis pipelines) vs.
+    # a provider name ("open_food_facts", "upcitemdb", ...) for a
+    # barcode-discovery result. `is_verified` DEFAULTS TO TRUE: every
+    # existing/local/OCR/label-image product is verified by construction
+    # (it came from the user's own device), and every code path that
+    # creates a row from an *external* discovery MUST explicitly pass
+    # `is_verified=False` (see food_analysis._to_product_model /
+    # _persist_discovered_product) rather than relying on a default —
+    # the default exists to fail safe (toward "verified", i.e. "protected
+    # from being overwritten") if a future call site forgets to set it
+    # for a genuinely local row, never the other way around.
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="local", server_default="local")
     source_confidence: Mapped[float | None] = mapped_column(Numeric(4, 2), nullable=True)
-    is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
     discovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # False only for a barcode-discovery result whose nutrition and/or
+    # ingredient data was too incomplete to compute a real Health Score
+    # (identity-only UPCitemdb fallback, or an Open Food Facts entry with
+    # no nutriments/ingredients_text). Gates BOTH the initial discovery
+    # response and every later cache-hit lookup of the same row — see
+    # food_analysis.analyze_barcode — so an incomplete cached product can
+    # never accidentally be scored on a repeat scan either. Always True
+    # for local/OCR/label-image products, which always run the real
+    # scoring pipeline against actual label content.
+    has_verified_nutrition: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())

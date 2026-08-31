@@ -36,8 +36,15 @@ class BarcodeInfo:
 
     raw: str
     format: str  # "EAN_13" | "EAN_8" | "UPC_A" | "UPC_E"
-    gtin13: str  # zero-padded to 13 digits — what Open Food Facts / UPCitemdb expect
+    gtin13: str  # zero-padded to 13 digits — the canonical storage/lookup key (see product_repository)
     gtin14: str  # zero-padded to 14 digits — canonical GS1 Digital Link form
+    # True only for an 8-digit value that validates as BOTH EAN-8 (used)
+    # AND, independently, as a UPC-E encoding that expands to a
+    # checksum-valid UPC-A -- see `validate_and_normalize`'s EAN-8/UPC-E
+    # precedence rule. Surfaced (rather than silently resolved) so a
+    # caller can log/flag it; the barcode itself is still resolved
+    # deterministically as EAN-8.
+    ambiguous_upc_e: bool = False
 
 
 def _checksum_ok(digits: str) -> bool:
@@ -99,15 +106,31 @@ def validate_and_normalize(raw: str | None) -> BarcodeInfo | None:
         return BarcodeInfo(raw=raw, format="UPC_A", gtin13="0" + candidate, gtin14="00" + candidate)
 
     if len(candidate) == 8:
-        # Could be EAN-8 or an explicit (number-system + check-digit)
-        # UPC-E. Try EAN-8 first; it's the far more common 8-digit
-        # format and has its own directly-checkable checksum.
-        if _checksum_ok(candidate):
-            return BarcodeInfo(
-                raw=raw, format="EAN_8", gtin13="00000" + candidate, gtin14="000000" + candidate
-            )
+        # EAN-8 and an explicit (number-system + check-digit) UPC-E are
+        # both valid 8-digit encodings, checked independently of one
+        # another -- an 8-digit string can, for some inputs, validate as
+        # BOTH (see tests/unit/test_barcode_validation.py for a
+        # constructed example). This is a genuine, explicit ambiguity in
+        # the input, not a bug: GS1 defines no way to distinguish them
+        # from the digits alone (a real scanner knows which symbology it
+        # read; a bare 8-digit string does not carry that). The
+        # documented precedence rule: EAN-8 wins when both validate --
+        # it is by far the more common 8-digit retail format -- and the
+        # collision is surfaced via `ambiguous_upc_e` rather than
+        # silently dropped, so a caller can log/flag it if it matters.
+        ean8_valid = _checksum_ok(candidate)
         upc_a = _expand_upc_e_to_upc_a(candidate)
-        if upc_a is not None and _checksum_ok(upc_a):
+        upc_e_valid = upc_a is not None and _checksum_ok(upc_a)
+
+        if ean8_valid:
+            return BarcodeInfo(
+                raw=raw,
+                format="EAN_8",
+                gtin13="00000" + candidate,
+                gtin14="000000" + candidate,
+                ambiguous_upc_e=upc_e_valid,
+            )
+        if upc_e_valid:
             return BarcodeInfo(raw=raw, format="UPC_E", gtin13="0" + upc_a, gtin14="00" + upc_a)
         return None
 

@@ -1,7 +1,20 @@
 """
-Minimal, self-contained text-safety helpers for barcode-discovery output
-— placeholder scrubbing and English/Bulgarian-only script enforcement
-for provider-supplied text (product names, brand, category).
+Minimal, self-contained text-safety helpers for barcode-discovery
+output: placeholder scrubbing, plus a Latin/Cyrillic **script** safety
+net (rejects Greek/Arabic/CJK/Thai/Hebrew/... text a client should never
+see untranslated).
+
+IMPORTANT — this is NOT the English/Bulgarian *language* policy, and
+must never be treated as one: a French, German, or Albanian name is
+Latin script too, so `is_safe_script`/`to_safe_display_text` cannot
+reject it. The real language enforcement — "only accept an explicit
+`_en`/`_bg` field, or a language-neutral field when the source's own
+declared language is English/Bulgarian" — lives at the data source
+(see `app/integrations/barcode_providers/open_food_facts.py`'s
+`_language_gated_field`), which is the only place that actually knows
+what language a value is in. This module is purely a defensive backstop
+for providers with no language signal at all (UPCitemdb) and for
+catching placeholder junk/genuinely-wrong scripts everywhere else.
 
 NOTE: a more complete version of this exact idea (translation of a small
 German/French/Albanian glossary, Bulgarian search-alias matching for

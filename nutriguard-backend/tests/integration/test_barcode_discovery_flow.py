@@ -140,7 +140,12 @@ async def test_open_food_facts_successful_discovery(app_client, monkeypatch, db_
 
 
 @pytest.mark.asyncio
-async def test_open_food_facts_miss_falls_back_to_upcitemdb(app_client, monkeypatch):
+async def test_open_food_facts_miss_falls_back_to_upcitemdb(app_client, monkeypatch, db_session):
+    """UPCitemdb is identity-only by construction (see upcitemdb.py) --
+    a fallback that only reaches UPCitemdb is therefore always
+    materially incomplete (V6): it persists the identity (so a repeat
+    scan doesn't re-hit providers) but must return `labelScanRequired`,
+    never a confident score built from placeholder nutrition."""
     _patch_providers(monkeypatch, off=FakeProvider("open_food_facts", 0.75, None), upc=FakeProvider("upcitemdb", 0.45, _upc_result()))
 
     headers = await _register_device(app_client, "discovery-off-miss-upc-hit")
@@ -148,16 +153,35 @@ async def test_open_food_facts_miss_falls_back_to_upcitemdb(app_client, monkeypa
         "/api/v1/scan/barcode", json={"barcode": VALID_UNKNOWN_BARCODE_2}, headers=headers
     )
 
-    assert resp.status_code == 200
+    assert resp.status_code == 404
     body = resp.json()
-    assert body["product"]["productName"] == "Acme Cereal"
-    # UPCitemdb-only identity has no verified nutrition -> an INFO warning must say so.
-    conditions = [w["condition"] for w in body["warnings"]]
-    assert "Data Completeness" in conditions
+    assert body["error"]["code"] == "PRODUCT_NOT_FOUND"
+    details = body["error"]["details"]
+    assert details["labelScanRequired"] is True
+    assert details["discoveredIdentity"]["productName"] == "Acme Cereal"
+    assert "healthScore" not in body
+    assert "product" not in body
+
+    row = (
+        await db_session.execute(select(Product).where(Product.barcode == VALID_UNKNOWN_BARCODE_2))
+    ).scalar_one()
+    assert row.has_verified_nutrition is False
+    assert row.product_name == "Acme Cereal"
+
+    # A repeat scan must behave identically -- a local cache hit on the
+    # same (still-incomplete) row, never a fabricated score.
+    resp2 = await app_client.post(
+        "/api/v1/scan/barcode", json={"barcode": VALID_UNKNOWN_BARCODE_2}, headers=headers
+    )
+    assert resp2.status_code == 404
+    assert resp2.json()["error"]["details"]["labelScanRequired"] is True
 
 
 @pytest.mark.asyncio
-async def test_provider_timeout_then_successful_fallback(app_client, monkeypatch):
+async def test_provider_timeout_then_isolated_fallback_still_refuses_fake_score(app_client, monkeypatch):
+    """Proves provider isolation (OFF's timeout never propagates/crashes
+    the request, UPCitemdb is still tried) AND V6 (the UPCitemdb-only
+    result it falls through to is correctly treated as incomplete)."""
     _patch_providers(
         monkeypatch,
         off=FakeProvider("open_food_facts", 0.75, ProviderTimeoutError("timed out")),
@@ -168,12 +192,14 @@ async def test_provider_timeout_then_successful_fallback(app_client, monkeypatch
     resp = await app_client.post(
         "/api/v1/scan/barcode", json={"barcode": "9780201379624"}, headers=headers
     )
-    assert resp.status_code == 200
-    assert resp.json()["product"]["productName"] == "Timeout Fallback Item"
+    assert resp.status_code == 404
+    details = resp.json()["error"]["details"]
+    assert details["labelScanRequired"] is True
+    assert details["discoveredIdentity"]["productName"] == "Timeout Fallback Item"
 
 
 @pytest.mark.asyncio
-async def test_provider_rate_limit_then_successful_fallback(app_client, monkeypatch):
+async def test_provider_rate_limit_then_isolated_fallback_still_refuses_fake_score(app_client, monkeypatch):
     from app.integrations.barcode_providers.base import ProviderRateLimitedError
 
     _patch_providers(
@@ -186,12 +212,14 @@ async def test_provider_rate_limit_then_successful_fallback(app_client, monkeypa
     resp = await app_client.post(
         "/api/v1/scan/barcode", json={"barcode": "9501101530003"}, headers=headers
     )
-    assert resp.status_code == 200
-    assert resp.json()["product"]["productName"] == "Rate Limit Fallback Item"
+    assert resp.status_code == 404
+    details = resp.json()["error"]["details"]
+    assert details["labelScanRequired"] is True
+    assert details["discoveredIdentity"]["productName"] == "Rate Limit Fallback Item"
 
 
 @pytest.mark.asyncio
-async def test_malformed_upstream_response_isolated_and_falls_back(app_client, monkeypatch):
+async def test_malformed_upstream_response_isolated_fallback_still_refuses_fake_score(app_client, monkeypatch):
     from app.integrations.barcode_providers.base import ProviderMalformedResponseError
 
     _patch_providers(
@@ -204,8 +232,28 @@ async def test_malformed_upstream_response_isolated_and_falls_back(app_client, m
     resp = await app_client.post(
         "/api/v1/scan/barcode", json={"barcode": "4801981123452"}, headers=headers
     )
+    assert resp.status_code == 404
+    details = resp.json()["error"]["details"]
+    assert details["labelScanRequired"] is True
+    assert details["discoveredIdentity"]["productName"] == "Malformed Fallback Item"
+
+
+@pytest.mark.asyncio
+async def test_complete_open_food_facts_discovery_still_returns_a_real_score(app_client, monkeypatch):
+    """Contrast case for V6: when Open Food Facts itself supplies real
+    nutrition AND ingredient text, the normal scoring pipeline still
+    runs and a genuine 200 with a Health Score is returned."""
+    off = FakeProvider("open_food_facts", 0.75, _off_result(name="Complete Discovery Item"))
+    _patch_providers(monkeypatch, off=off)
+
+    headers = await _register_device(app_client, "discovery-complete-score")
+    resp = await app_client.post(
+        "/api/v1/scan/barcode", json={"barcode": "7622210410337"}, headers=headers
+    )
     assert resp.status_code == 200
-    assert resp.json()["product"]["productName"] == "Malformed Fallback Item"
+    body = resp.json()
+    assert body["product"]["productName"] == "Complete Discovery Item"
+    assert isinstance(body["healthScore"], int)
 
 
 @pytest.mark.asyncio
@@ -429,3 +477,159 @@ async def test_conflicting_provider_data_is_preserved_not_silently_merged(app_cl
     # Both sources' own claims stay on disk for review, not overwritten into one row.
     assert by_provider["upcitemdb"].product_name == "Totally Unrelated Snack"
     assert by_provider["open_food_facts"].product_name == "Fizzy Orange Soda"
+
+
+# --- Migration backfill (PR #7 review, finding 3) ----------------------------
+
+
+def test_migration_backfills_existing_rows_as_verified():
+    """Structural check mirroring the manual real-Postgres verification
+    (see PR description): the migration's ADD COLUMN statements for
+    is_verified/has_verified_nutrition must default existing rows to
+    verified=true, not false -- local/OCR/label-image products (the
+    only kind that could possibly predate this migration) are
+    trustworthy by construction. Real DDL execution against Postgres
+    isn't run via `pytest` -- see tests/unit/test_barcode_discovery_migration.py
+    and the PR description for that verification."""
+    from pathlib import Path
+
+    migration_path = (
+        Path(__file__).resolve().parents[2]
+        / "alembic"
+        / "versions"
+        / "cf5522508f9a_barcode_discovery_provenance.py"
+    )
+    source = migration_path.read_text()
+    assert "sa.Column('is_verified', sa.Boolean(), server_default=sa.text('true')" in source
+    assert "sa.Column('has_verified_nutrition', sa.Boolean(), server_default=sa.text('true')" in source
+
+
+# --- Canonical barcode representation (PR #7 review, finding 5) -------------
+
+
+@pytest.mark.asyncio
+async def test_equivalent_barcode_representations_resolve_to_one_product(app_client, monkeypatch, db_session):
+    """Scanning the UPC-A form, then later the dashed/EAN-13-equivalent
+    form of the exact same barcode, must resolve to the SAME persisted
+    row -- never a second discovery, never a duplicate product."""
+    off = FakeProvider("open_food_facts", 0.75, _off_result(name="Canonical Form Item"))
+    _patch_providers(monkeypatch, off=off)
+
+    headers = await _register_device(app_client, "discovery-canonical-form")
+
+    resp1 = await app_client.post(
+        "/api/v1/scan/barcode", json={"barcode": "036000291452"}, headers=headers  # UPC-A
+    )
+    assert resp1.status_code == 200
+    assert resp1.json()["isFromDatabaseCache"] is False
+    canonical_barcode = resp1.json()["product"]["barcode"]
+    assert canonical_barcode == "0036000291452"  # canonical GTIN-13 form, not the raw UPC-A input
+
+    # A provider call here would prove a second discovery happened --
+    # make it fail loudly so the test catches a regression.
+    monkeypatch.setattr(
+        barcode_discovery, "OpenFoodFactsProvider", lambda: FakeProvider("open_food_facts", 0.75, Exception("must not be called again"))
+    )
+
+    resp2 = await app_client.post(
+        "/api/v1/scan/barcode", json={"barcode": "0036000291452"}, headers=headers  # explicit EAN-13 form
+    )
+    assert resp2.status_code == 200
+    assert resp2.json()["isFromDatabaseCache"] is True
+    assert resp2.json()["product"]["barcode"] == canonical_barcode
+
+    resp3 = await app_client.post(
+        "/api/v1/scan/barcode", json={"barcode": "036-000-291452"}, headers=headers  # dashed UPC-A
+    )
+    assert resp3.status_code == 200
+    assert resp3.json()["isFromDatabaseCache"] is True
+    assert resp3.json()["product"]["barcode"] == canonical_barcode
+
+    count = (
+        await db_session.execute(
+            select(func.count()).select_from(Product).where(Product.barcode == canonical_barcode)
+        )
+    ).scalar_one()
+    assert count == 1
+
+
+# --- Provenance race-safety (PR #7 review, finding 6) -----------------------
+
+
+@pytest.mark.asyncio
+async def test_provenance_conflict_does_not_roll_back_earlier_source_in_same_transaction(db_session, monkeypatch):
+    """Directly exercises `product_source_repository.record_discovery`'s
+    savepoint-based conflict handling: a uniqueness conflict on a SECOND
+    provider's row, within the SAME uncommitted transaction as a FIRST
+    provider's already-flushed row, must not discard that first row. A
+    plain `db.rollback()` (the pre-fix behavior) would have discarded
+    it; only a SAVEPOINT (or an upsert) keeps it -- see
+    product_source_repository.py."""
+    from app.repositories import product_source_repository
+
+    barcode = "6291041500213"
+    product = Product(
+        barcode=barcode,
+        product_name="Race Test Product",
+        brand="",
+        category="cat",
+        raw_ingredient_text="",
+        ingredient_ids="",
+        health_score=0,
+        nova_group=0,
+        sugar_grams=0,
+        sodium_mg=0,
+        saturated_fat_grams=0,
+        allergens_detected="None",
+        is_verified=False,
+        has_verified_nutrition=False,
+    )
+    db_session.add(product)
+    await db_session.flush()
+
+    # Provider A's provenance row: flushed, but the transaction is NOT
+    # committed yet -- mirrors _persist_discovered_product's provenance
+    # loop, which commits only once, after every provider is processed.
+    result_a = _off_result(name="Race Test Product")
+    await product_source_repository.record_discovery(
+        db_session, barcode=barcode, result=result_a, confidence=0.75,
+        is_conflicting=False, used_for_persisted_product=True,
+    )
+
+    # Simulate a genuinely concurrent writer that already inserted
+    # provider B's row (a real race would do this on another
+    # connection/session); record_discovery's own pre-check is made to
+    # miss it exactly once, exactly like a stale read in a real race.
+    concurrent_row = ProductSource(
+        barcode=barcode, provider="upcitemdb", confidence=0.45,
+        is_conflicting=False, used_for_persisted_product=False,
+    )
+    db_session.add(concurrent_row)
+    await db_session.flush()
+
+    original_lookup = product_source_repository.get_by_barcode_and_provider
+    call_count = {"n": 0}
+
+    async def _stale_read_once(db, barcode_, provider):
+        call_count["n"] += 1
+        if call_count["n"] == 1 and provider == "upcitemdb":
+            return None  # stale/racy read: "not found" even though it now exists
+        return await original_lookup(db, barcode_, provider)
+
+    monkeypatch.setattr(product_source_repository, "get_by_barcode_and_provider", _stale_read_once)
+
+    result_b = _upc_result(name="Race Test Product Alt")
+    # Must recover from the IntegrityError this deliberately provokes,
+    # not raise it.
+    recovered = await product_source_repository.record_discovery(
+        db_session, barcode=barcode, result=result_b, confidence=0.45,
+        is_conflicting=False, used_for_persisted_product=False,
+    )
+    assert recovered.provider == "upcitemdb"
+
+    # The key assertion: provider A's row, flushed earlier in this same
+    # still-uncommitted transaction, must have survived provider B's
+    # conflict-recovery -- and the whole transaction must still commit.
+    await db_session.commit()
+    rows = await product_source_repository.list_for_barcode(db_session, barcode)
+    assert {r.provider for r in rows} == {"open_food_facts", "upcitemdb"}

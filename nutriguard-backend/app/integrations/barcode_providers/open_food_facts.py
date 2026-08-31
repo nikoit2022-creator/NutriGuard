@@ -108,6 +108,41 @@ def _additive_flags(product: dict) -> tuple[bool | None, bool | None]:
     return has_sweeteners, has_preservatives
 
 
+_SUPPORTED_LANGUAGES = {"en", "bg"}
+
+
+def _declared_language(product: dict) -> str:
+    """OFF's own stated language for its language-neutral fields
+    (`product_name`, `ingredients_text`, ...) — `lang` (preferred) or
+    `lc` ("language of the community"/data entry). Never inferred from
+    the text itself: script (Latin vs. Cyrillic vs. other) is NOT a
+    language, and treating it as one is exactly the bug this function
+    exists to avoid — French, German, Albanian, etc. are all Latin
+    script too."""
+    value = product.get("lang") or product.get("lc")
+    return value.strip().lower() if isinstance(value, str) else ""
+
+
+def _language_gated_field(product: dict, *, en_key: str, bg_key: str, default_key: str, lang: str) -> str | None:
+    """English/Bulgarian selection policy: an explicit `<field>_en` or
+    `<field>_bg` key is always safe to use (OFF itself asserts the
+    language via the key name). The language-neutral `<field>` key is
+    only used when OFF's own declared record language (`lang`/`lc`) is
+    English or Bulgarian — never merely because the text happens to be
+    in a Latin/Cyrillic script, which every European language shares.
+    Returns None rather than falling back to a French/German/Albanian/
+    etc. value — the caller (barcode_discovery.py / the UPCitemdb
+    fallback) is responsible for what happens when no field qualifies."""
+    explicit = product.get(en_key) or product.get(bg_key)
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit
+    if lang in _SUPPORTED_LANGUAGES:
+        value = product.get(default_key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
 def _ingredient_tokens(product: dict) -> list[str]:
     ingredients = product.get("ingredients")
     if isinstance(ingredients, list) and ingredients:
@@ -161,21 +196,27 @@ class OpenFoodFactsProvider(BarcodeProductProvider):
             # returning nothing (a real "not found" is always explicit).
             raise ProviderMalformedResponseError("open_food_facts response had no `product` object.")
 
-        # Language policy: prefer the English record when OFF has one
-        # (canonical internal matching name), then a Bulgarian record
-        # (the app's other supported display language), then whatever
-        # OFF considers the product's default name. A third-language
-        # name that slips through here is still caught downstream by
-        # `text_localization.to_bilingual_display_text` before it ever
-        # reaches a client — see barcode_discovery.py.
-        product_name = (
-            product.get("product_name_en")
-            or product.get("product_name_bg")
-            or product.get("product_name")
-            or product.get("generic_name")
-            or None
+        # Language policy (English/Bulgarian only — see
+        # _language_gated_field docstring): explicit `_en`/`_bg` fields
+        # first; the language-neutral default field only when OFF's own
+        # declared record language is English or Bulgarian. A record in
+        # any other language (French, German, Albanian, ...) yields None
+        # here rather than leaking through — script-safety downstream in
+        # barcode_discovery.py is a secondary placeholder/junk-scrubbing
+        # net, not a substitute for this language check.
+        lang = _declared_language(product)
+        product_name = _language_gated_field(
+            product, en_key="product_name_en", bg_key="product_name_bg", default_key="product_name", lang=lang
+        ) or _language_gated_field(
+            product, en_key="generic_name_en", bg_key="generic_name_bg", default_key="generic_name", lang=lang
         )
-        raw_text = product.get("ingredients_text") or product.get("ingredients_text_en") or None
+        raw_text = _language_gated_field(
+            product,
+            en_key="ingredients_text_en",
+            bg_key="ingredients_text_bg",
+            default_key="ingredients_text",
+            lang=lang,
+        )
         nutriments = product.get("nutriments") or {}
         has_sweeteners, has_preservatives = _additive_flags(product)
 
@@ -206,7 +247,7 @@ class OpenFoodFactsProvider(BarcodeProductProvider):
             ),
             allergens=_allergens(product),
             dietary_flags=_dietary_flags(product),
-            language=product.get("lang") or product.get("lc"),
+            language=lang or None,
             source_url=f"{settings.OPEN_FOOD_FACTS_BASE_URL}/product/{barcode.gtin13}",
             external_last_modified=last_modified,
             raw_metadata={"code": body.get("code")},

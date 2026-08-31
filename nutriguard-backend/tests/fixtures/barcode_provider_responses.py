@@ -37,6 +37,56 @@ OFF_FOUND_FULL = {
     },
 }
 
+OFF_FRENCH_ONLY = {
+    "code": "3017620422003",
+    "status": "success",
+    "result": {"id": "product_found"},
+    "product": {
+        # No product_name_en / product_name_bg at all -- only the
+        # language-neutral default field, in French, with lang/lc
+        # correctly declaring it as such.
+        "product_name": "Pâte à Tartiner aux Noisettes",
+        "ingredients_text": "Sucre, huile de palme, noisettes, cacao maigre",
+        "brands": "Nutchoc",
+        "nutriments": {"sugars_100g": 56.0, "sodium_100g": 0.03, "saturated-fat_100g": 10.6},
+        "lang": "fr",
+        "lc": "fr",
+    },
+}
+
+OFF_EXPLICIT_ENGLISH_FIELD_ON_NON_ENGLISH_RECORD = {
+    "code": "3017620422010",
+    "status": "success",
+    "result": {"id": "product_found"},
+    "product": {
+        # Record's own declared language is German, but it also
+        # supplies an explicit English translation -- that explicit
+        # field must always be accepted regardless of `lang`.
+        "product_name": "Nuss-Nougat-Creme",
+        "product_name_en": "Hazelnut Spread",
+        "ingredients_text": "Zucker, Palmoel, Haselnuesse, Kakao",
+        "ingredients_text_en": "Sugar, palm oil, hazelnuts, cocoa",
+        "brands": "Nutchoc",
+        "nutriments": {"sugars_100g": 56.0, "sodium_100g": 0.03, "saturated-fat_100g": 10.6},
+        "lang": "de",
+        "lc": "de",
+    },
+}
+
+OFF_BULGARIAN_RECORD = {
+    "code": "3800020827980",
+    "status": "success",
+    "result": {"id": "product_found"},
+    "product": {
+        "product_name": "Кисело Мляко",
+        "ingredients_text": "Прясно мляко, млечни закваски",
+        "brands": "Danone",
+        "nutriments": {"sugars_100g": 4.0, "sodium_100g": 0.05, "saturated-fat_100g": 3.0},
+        "lang": "bg",
+        "lc": "bg",
+    },
+}
+
 OFF_NOT_FOUND = {
     "code": "0000000000000",
     "status": "failure",
