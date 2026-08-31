@@ -25,9 +25,60 @@ when Gemini succeeds — see `gemini_image_parser.py`. `analyze_ocr_text`
 is intentionally NOT touched by this fix: it preserves a separate,
 documented quirk (see `gemini_result_parser.py`) that is out of scope
 for this task.
+
+BARCODE PRODUCT DISCOVERY (V5, documented, see README "Deviations"):
+`analyze_barcode` no longer stops at a bare "not found" the moment the
+local database misses. It now attempts multi-source discovery (Open
+Food Facts, a GS1 Digital Link resolution, UPCitemdb as an
+identity-only fallback — see `barcode_discovery.py`) before giving up.
+A discovered product is normalized, persisted, and returned through the
+same `FullProductAnalysisOut` contract; a barcode no provider recognizes
+still returns 404 `PRODUCT_NOT_FOUND`, now carrying a structured
+`details` payload (`labelScanRequired: true` + which providers were
+tried) instead of a bare, uninformative 404. This still never fabricates
+data from the barcode alone — a barcode with genuinely no data anywhere
+gets the same "scan the label instead" signal as before, just a more
+actionable one.
+
+V6 (PR #7 review fixes, documented, see README "Deviations"):
+  - Unknown dietary flags (vegan/vegetarian/gluten-free/lactose-free/
+    halal/kosher) from a barcode discovery now default to False, never
+    True — see `_to_analyzed_data_from_discovery`'s docstring. Missing
+    data must never read as a positive certification claim.
+  - A discovery whose nutrition and/or ingredients are materially
+    incomplete (`Product.has_verified_nutrition=False`) never reaches
+    the Health Score Calculator, in `analyze_barcode` OR on any later
+    cache hit of the same persisted row — it returns the same
+    structured `labelScanRequired` response `_not_found_details`
+    already established, via `_label_scan_required_details`, instead of
+    a confident-looking score computed from placeholder zeros.
+  - Barcode storage/lookup uses a canonical GTIN-13 key
+    (`product_repository.get_by_barcode_or_aliases` +
+    `barcode_validation.alias_keys`), so whitespace/dash variants and
+    UPC-A/EAN-13-equivalent representations of the same barcode
+    converge on one row instead of creating duplicates — including a
+    pre-existing/legacy row stored under a non-canonical alias.
+
+V7 (PR #7 review, round 2 fixes, documented, see README "Deviations"):
+  - `nutrition_known` now requires ALL THREE core numeric inputs the
+    Health Score Calculator consumes (sugar/sodium/saturated fat), not
+    just one — a partial answer is exactly as unreliable as no answer.
+  - Open Food Facts' `ingredients[].text` (language-specific label text)
+    is only used when the record's declared language is English/
+    Bulgarian; for any other language, only the always-English
+    `ingredients[].id` taxonomy identifier is used, never the raw
+    foreign-language text — closes a gap where an unsupported-language
+    record's `ingredients_text` was correctly gated but its structured
+    `ingredients` array fallback was not.
+  - `get_by_barcode_or_aliases` now checks every alias representation
+    of a barcode (not just the raw input and the canonical GTIN-13), so
+    a pre-existing/legacy row stored under a non-canonical form (e.g. a
+    12-digit UPC-A row, found via a later 13-digit EAN-13-equivalent
+    scan) is still found instead of duplicated.
 """
 import time
 import uuid
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -36,20 +87,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AIServiceUnavailableError, ImageUnreadableError, ProductNotFoundError
 from app.integrations.gemini import GeminiUnavailableError, gemini_service
-from app.models.enums import ScanType
+from app.models.enums import ScanType, WarningSeverity
 from app.models.product import Product
 from app.models.scan_history import ScanHistory
 from app.repositories import (
     health_profile_repository,
     ingredient_repository,
     product_repository,
+    product_source_repository,
     scan_history_repository,
 )
-from app.services import health_score, warning_engine
+from app.services import barcode_discovery, health_score, warning_engine
+from app.services import barcode_validation
+from app.services.barcode_validation import validate_and_normalize
 from app.services.fallback_analysis import AnalyzedProductData, fallback_local_analysis
 from app.services.gemini_image_parser import parse_gemini_image_json_result
 from app.services.gemini_result_parser import parse_gemini_json_result
-from app.services.ocr_normalizer import create_synthetic_ingredient
+from app.services.ocr_normalizer import create_synthetic_ingredient, match_against_database, normalize_and_extract_tokens
+from app.services.warning_engine import HealthWarning
 
 logger = structlog.get_logger(__name__)
 
@@ -81,7 +136,17 @@ def _ingredient_ids_string(ingredients: list[Any]) -> str:
     return ",".join(ing.id for ing in ingredients)
 
 
-def _to_product_model(barcode: str, data: AnalyzedProductData, ingredients: list[Any]) -> Product:
+def _to_product_model(
+    barcode: str,
+    data: AnalyzedProductData,
+    ingredients: list[Any],
+    *,
+    source: str = "label_scan",
+    source_confidence: float | None = None,
+    is_verified: bool = True,
+    has_verified_nutrition: bool = True,
+) -> Product:
+    now = datetime.now(timezone.utc)
     return Product(
         barcode=barcode,
         product_name=data.product_name,
@@ -105,7 +170,265 @@ def _to_product_model(barcode: str, data: AnalyzedProductData, ingredients: list
         is_kosher=data.is_kosher,
         allergens_detected=data.allergens_detected,
         timestamp=int(time.time() * 1000),
+        source=source,
+        source_confidence=source_confidence,
+        is_verified=is_verified,
+        has_verified_nutrition=has_verified_nutrition,
+        discovered_at=now if source != "label_scan" else None,
+        last_verified_at=now,
     )
+
+
+def _apply_discovered_fields(
+    existing: Product,
+    data: AnalyzedProductData,
+    ingredients: list[Any],
+    *,
+    source: str,
+    confidence: float,
+    has_verified_nutrition: bool,
+) -> None:
+    """Overwrites a previously-discovered (never a verified/local) row
+    with a higher-confidence re-discovery. Never called for a row whose
+    `is_verified` is True — see `_persist_discovered_product`."""
+    existing.product_name = data.product_name
+    existing.brand = data.brand
+    existing.category = data.category
+    existing.image_url = data.image_url
+    existing.raw_ingredient_text = data.raw_ingredient_text
+    existing.ingredient_ids = _ingredient_ids_string(ingredients)
+    existing.nova_group = data.nova_group
+    existing.sugar_grams = data.sugar_grams
+    existing.sodium_mg = data.sodium_mg
+    existing.saturated_fat_grams = data.saturated_fat_grams
+    existing.has_artificial_sweeteners = data.has_artificial_sweeteners
+    existing.has_preservatives = data.has_preservatives
+    existing.is_gluten_free = data.is_gluten_free
+    existing.is_lactose_free = data.is_lactose_free
+    existing.is_vegan = data.is_vegan
+    existing.is_vegetarian = data.is_vegetarian
+    existing.is_halal = data.is_halal
+    existing.is_kosher = data.is_kosher
+    existing.allergens_detected = data.allergens_detected
+    existing.source = source
+    existing.source_confidence = confidence
+    existing.has_verified_nutrition = has_verified_nutrition
+    existing.last_verified_at = datetime.now(timezone.utc)
+    existing.timestamp = int(time.time() * 1000)
+
+
+def _to_analyzed_data_from_discovery(
+    discovered: "barcode_discovery.DiscoveredProduct", db_ingredients: list[Any]
+) -> tuple[AnalyzedProductData, list[Any], bool]:
+    """
+    Bridges a validated `DiscoveredProduct` (external, provider-sourced)
+    into the same `AnalyzedProductData` shape the OCR/Gemini pipelines
+    use, so it goes through the identical ingredient-matching, Health
+    Score, and Warning Engine code paths — see module docstring, V5/V6.
+
+    Returns `(data, ingredients, has_verified_nutrition)`.
+    `has_verified_nutrition` is False whenever the discovery is
+    materially incomplete (no real nutrition figures AND/OR no
+    ingredient text — see `DiscoveredProduct.nutrition_known` /
+    `.ingredients_known`); the caller (`_persist_discovered_product` /
+    `analyze_barcode`) uses this to skip the Health Score/Warning
+    pipeline entirely for such a row — see V6 in the module docstring —
+    rather than trust a score computed from placeholder numbers.
+
+    Dietary flags/allergens: OFF's own structured tags (`dietary_flags`/
+    `allergens` on `DiscoveredProduct`) are used where present. Anything
+    OFF did NOT state defaults to False (NOT True) for every one of
+    is_gluten_free/is_lactose_free/is_vegan/is_vegetarian/is_halal/
+    is_kosher — "unknown" must never be presented as a positive
+    certification claim. False is the conservative direction here: for
+    a health- or religion-relevant dietary flag, a false negative
+    (a genuinely gluten-free product not marked as such) is far safer
+    than a false positive (a product silently claimed gluten-free/halal/
+    kosher with zero evidence for it) — the same asymmetry the
+    Personalized Warning Engine already assumes when it warns a user off
+    a product that isn't flagged as meeting their requirement.
+    """
+    is_complete = discovered.nutrition_known and discovered.ingredients_known
+
+    ingredient_list: list[Any] = []
+    if discovered.ingredients_known:
+        tokens = normalize_and_extract_tokens(discovered.raw_ingredient_text)
+        norm = match_against_database(tokens, db_ingredients)
+        ingredient_list = list(norm.matched_ingredients)
+        for unk in norm.unknown_ingredients:
+            ingredient_list.append(create_synthetic_ingredient(unk))
+
+    n = discovered.nutrition
+    nova_group = n.nova_group
+    if nova_group is None:
+        # Only guessed when there's real ingredient/nutrition data to
+        # base the guess on (same heuristic `fallback_local_analysis`
+        # uses for OCR text with no explicit NOVA signal); an
+        # incomplete discovery gets an explicit "unclassified" 0
+        # instead of a guess dressed up as a real NOVA group — moot for
+        # scoring either way since an incomplete row never reaches the
+        # Health Score Calculator (see docstring above), but this keeps
+        # the stored value honest for anyone inspecting the row directly.
+        nova_group = (
+            (4 if (len(ingredient_list) > 5 or n.has_artificial_sweeteners or n.has_preservatives) else 3)
+            if is_complete
+            else 0
+        )
+
+    flags = discovered.dietary_flags
+    allergens_text = ", ".join(discovered.allergens) if discovered.allergens else "None"
+
+    data = AnalyzedProductData(
+        barcode=discovered.barcode.gtin13,
+        product_name=discovered.product_name,
+        brand=discovered.brand or "Unknown Brand",
+        category=discovered.category,
+        image_url=discovered.image_url,
+        raw_ingredient_text=discovered.raw_ingredient_text,
+        nova_group=nova_group,
+        sugar_grams=n.sugar_grams if n.sugar_grams is not None else 0.0,
+        sodium_mg=n.sodium_mg if n.sodium_mg is not None else 0.0,
+        saturated_fat_grams=n.saturated_fat_grams if n.saturated_fat_grams is not None else 0.0,
+        has_artificial_sweeteners=bool(n.has_artificial_sweeteners),
+        has_preservatives=bool(n.has_preservatives),
+        is_gluten_free=flags.get("is_gluten_free", False),
+        is_lactose_free=flags.get("is_lactose_free", False),
+        is_vegan=flags.get("is_vegan", False),
+        is_vegetarian=flags.get("is_vegetarian", False),
+        is_halal=flags.get("is_halal", False),
+        is_kosher=flags.get("is_kosher", False),
+        allergens_detected=allergens_text,
+    )
+    return data, ingredient_list, is_complete
+
+
+def _not_found_details(barcode: str, attempts: list["barcode_discovery.ProviderAttempt"]) -> dict:
+    return {
+        "labelScanRequired": True,
+        "reason": "Barcode not found in the local database or any configured external source.",
+        "providersChecked": [{"provider": a.provider, "outcome": a.outcome} for a in attempts],
+        "suggestedAction": "Use POST /scan/label-image or POST /scan/ocr-text to analyze the product's label directly.",
+    }
+
+
+def _label_scan_required_details(product: Product) -> dict:
+    """Structured response for a barcode whose *identity* is known (was
+    discovered and persisted — see `_persist_discovered_product`) but
+    whose nutrition/ingredient data is too incomplete to compute a real
+    Health Score. Deliberately shaped like `_not_found_details` (same
+    `labelScanRequired`/`suggestedAction` keys) so a client can handle
+    both with one code path, plus the identity fields worth showing the
+    user even without a score."""
+    return {
+        "labelScanRequired": True,
+        "reason": (
+            "This product's identity was found, but its nutrition and/or ingredient data is "
+            "too incomplete for a reliable Health Score."
+        ),
+        "discoveredIdentity": {
+            "barcode": product.barcode,
+            "productName": product.product_name,
+            "brand": product.brand or None,
+            "imageUrl": product.image_url,
+        },
+        "suggestedAction": "Use POST /scan/label-image or POST /scan/ocr-text to analyze the product's label directly.",
+    }
+
+
+async def _persist_discovered_product(
+    db: AsyncSession, discovered: "barcode_discovery.DiscoveredProduct"
+) -> tuple[Product, list[HealthWarning]]:
+    """
+    Normalizes + validates + persists a multi-source discovery result.
+    Concurrency-safe (see `product_repository.insert_new`) and never
+    overwrites an existing verified (local/OCR/label-image) row, nor an
+    existing externally-discovered row of equal-or-higher confidence —
+    see the module docstring's V5/V6 entries and README "Deviations".
+
+    Always persists identity/provenance when a provider found *something*
+    — including a materially-incomplete, `has_verified_nutrition=False`
+    result — so a repeat scan doesn't re-hit external providers every
+    time and so the identity is available for `_label_scan_required_details`.
+    It is the caller's (`analyze_barcode`'s) job to check
+    `product.has_verified_nutrition` and refuse to compute/return a
+    Health Score for such a row.
+    """
+    all_db_ingredients = await ingredient_repository.get_all(db)
+    data, ingredients, has_verified_nutrition = _to_analyzed_data_from_discovery(discovered, all_db_ingredients)
+    # Canonical GTIN-13 storage key (see product_repository.get_by_barcode_or_aliases)
+    # — every equivalent representation of this barcode converges on one row.
+    canonical_barcode = discovered.barcode.gtin13
+
+    candidate = _to_product_model(
+        canonical_barcode,
+        data,
+        ingredients,
+        source=discovered.primary_provider,
+        source_confidence=discovered.confidence,
+        is_verified=False,
+        has_verified_nutrition=has_verified_nutrition,
+    )
+
+    inserted = await product_repository.insert_new(db, candidate)
+    used_for_persisted_product = True
+    if inserted is not None:
+        product = inserted
+    else:
+        # Lost a race with a concurrent discovery of the same barcode.
+        existing = await product_repository.get_by_barcode(db, canonical_barcode)
+        if existing is None:
+            raise AIServiceUnavailableError("Could not persist the discovered product.")
+        if existing.is_verified or (existing.source_confidence or 0) >= discovered.confidence:
+            product = existing
+            used_for_persisted_product = False
+        else:
+            _apply_discovered_fields(
+                existing,
+                data,
+                ingredients,
+                source=discovered.primary_provider,
+                confidence=discovered.confidence,
+                has_verified_nutrition=has_verified_nutrition,
+            )
+            await db.flush()
+            product = existing
+
+    # Checkpoint the product row on its own before touching provenance
+    # rows, so a later (unrelated) provenance-write race can never
+    # unwind this insert/update — see product_source_repository.py.
+    await db.commit()
+
+    for result in discovered.contributing:
+        is_primary = result.provider == discovered.primary_provider
+        confidence = (
+            discovered.confidence if is_primary else barcode_discovery.PROVIDER_BASE_TRUST.get(result.provider, 0.3)
+        )
+        await product_source_repository.record_discovery(
+            db,
+            barcode=canonical_barcode,
+            result=result,
+            confidence=confidence,
+            is_conflicting=discovered.is_conflicting,
+            used_for_persisted_product=is_primary and used_for_persisted_product,
+        )
+    await db.commit()
+
+    extra_warnings: list[HealthWarning] = []
+    if discovered.is_conflicting:
+        extra_warnings.append(
+            HealthWarning(
+                title="Conflicting Source Data",
+                description=(
+                    "Independent external sources disagreed about this product's identity; "
+                    "the highest-confidence match was used and the disagreement was preserved "
+                    "for review."
+                ),
+                condition="Data Completeness",
+                trigger_factor=discovered.primary_provider,
+                severity=WarningSeverity.INFO,
+            )
+        )
+    return product, extra_warnings
 
 
 async def fetch_ingredients_for_product(db: AsyncSession, product: Product) -> list[Any]:
@@ -177,21 +500,59 @@ def _score_and_warnings(product: Product, ingredients: list[Any], profile: Simpl
 
 async def analyze_barcode(db: AsyncSession, user_id: uuid.UUID, barcode: str) -> dict:
     """
-    API Contract 6.1 (revised): a barcode is an identifier, looked up
-    against the trusted product source only. Unknown barcodes MUST NOT
-    fabricate a product, ingredients, nutrition values, or a health
-    score — they return PRODUCT_NOT_FOUND. Use `analyze_ocr_text` or
-    `analyze_label_image` to analyze actual label content (those
-    endpoints are unaffected by this change).
+    API Contract 6.1 (revised, V2 + V5): a barcode is an identifier,
+    looked up against trusted product sources — the local database
+    first, then (V5) multi-source external discovery on a local miss
+    (`barcode_discovery.discover_product` — Open Food Facts, a GS1
+    Digital Link resolution, UPCitemdb as an identity-only fallback).
+    This still never fabricates a product from the barcode alone: a
+    barcode no source recognizes returns PRODUCT_NOT_FOUND with a
+    structured "label scan required" payload, not an invented product.
+    Use `analyze_ocr_text` or `analyze_label_image` to analyze actual
+    label content (those endpoints are unaffected by this change).
     """
-    product = await product_repository.get_by_barcode(db, barcode)
+    barcode_info = validate_and_normalize(barcode)
+    alias_keys = barcode_validation.alias_keys(barcode_info) if barcode_info is not None else []
+    # Tries the raw string first (matches a legacy row or a non-GTIN
+    # synthetic ocr_.../img_... id verbatim), then every alias for the
+    # same physical barcode — so "036000291452" (UPC-A), "0036000291452"
+    # (its EAN-13 equivalent), and "036-000-291452" (same digits,
+    # dashes) all resolve to the same persisted row REGARDLESS of which
+    # exact form a pre-existing/legacy row happens to be stored under
+    # (see product_repository.get_by_barcode_or_aliases).
+    product = await product_repository.get_by_barcode_or_aliases(db, barcode, alias_keys)
+    was_cache_hit = product is not None
+    extra_warnings: list[HealthWarning] = []
+
     if product is None:
-        raise ProductNotFoundError(f"No product found for barcode {barcode}.")
+        if barcode_info is None:
+            raise ProductNotFoundError(
+                f"No product found for barcode {barcode}.",
+                details=_not_found_details(barcode, []),
+            )
+        outcome = await barcode_discovery.discover_product(barcode_info)
+        if outcome.product is None:
+            raise ProductNotFoundError(
+                f"No product found for barcode {barcode}.",
+                details=_not_found_details(barcode, outcome.attempts),
+            )
+        product, extra_warnings = await _persist_discovered_product(db, outcome.product)
+
+    # Applies equally to a product just discovered above AND to a cache
+    # hit of a previously-discovered-but-incomplete row: neither ever
+    # gets a fabricated/placeholder-derived Health Score (V6) — see
+    # `has_verified_nutrition`'s docstring on the Product model.
+    if not product.has_verified_nutrition:
+        raise ProductNotFoundError(
+            f"Product {product.barcode} was found but lacks sufficient verified data for a Health Score.",
+            details=_label_scan_required_details(product),
+        )
 
     ingredients = await fetch_ingredients_for_product(db, product)
 
     profile = await _get_profile_namespace(db, user_id)
     score, warnings = _score_and_warnings(product, ingredients, profile)
+    warnings = list(warnings) + extra_warnings
     product.health_score = score
     await db.flush()
 
@@ -213,7 +574,7 @@ async def analyze_barcode(db: AsyncSession, user_id: uuid.UUID, barcode: str) ->
         "ingredients": ingredients,
         "health_score": score,
         "warnings": warnings,
-        "is_from_database_cache": True,  # always true here: a match was found via a real lookup
+        "is_from_database_cache": was_cache_hit,
     }
 
 
