@@ -17,6 +17,15 @@ os.environ.setdefault("REDIS_ENABLED", "false")
 os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production")
 os.environ.setdefault("GEMINI_API_KEY", "")  # force fallback-only behavior in tests
 os.environ.setdefault("ENVIRONMENT", "test")
+# Barcode discovery makes real outbound HTTP calls by default (see
+# app/services/barcode_discovery.py) -- off by default for the whole
+# suite, same rationale as GEMINI_API_KEY above: no test should depend
+# on network access. Tests that specifically exercise discovery opt
+# back in per-test via `monkeypatch.setattr(settings, "BARCODE_DISCOVERY_ENABLED", True)`
+# (settings is a mutable singleton -- see app/core/config.py) and always
+# replace the provider classes with mocks/fakes too (see
+# tests/integration/test_barcode_discovery_flow.py).
+os.environ.setdefault("BARCODE_DISCOVERY_ENABLED", "false")
 
 import pytest
 import pytest_asyncio

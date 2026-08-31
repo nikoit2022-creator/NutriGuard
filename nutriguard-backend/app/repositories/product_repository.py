@@ -1,4 +1,5 @@
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.product import Product
@@ -36,3 +37,62 @@ async def upsert(db: AsyncSession, product: Product) -> Product:
     merged = await db.merge(product)
     await db.flush()
     return merged
+
+
+async def get_by_barcode_or_aliases(db: AsyncSession, raw: str, alias_keys: list[str]) -> Product | None:
+    """
+    Barcode-scan lookup used by `food_analysis.analyze_barcode`: tries
+    the exact string the client sent first (matches a legacy/pre-
+    canonicalization row, or a non-GTIN synthetic `ocr_.../img_...` id
+    verbatim), then every plausible alias key for the same physical
+    barcode (`alias_keys` — see `barcode_validation.alias_keys`, which
+    computes these; this function takes a plain list rather than
+    importing that service module itself, per the project's layering
+    rule that repositories don't depend on services).
+
+    This is what makes "036000291452" (UPC-A), "0036000291452" (its
+    EAN-13-zero-padded equivalent), and "036-000-291452" (same digits,
+    dashes) all resolve to the same row regardless of which one was
+    scanned first, AND regardless of which one a pre-existing/legacy
+    row happens to be stored under — new rows are always persisted
+    under the canonical GTIN-13 (`alias_keys[0]`, see `insert_new`), but
+    a row from before that convention (or written by another path)
+    might not be, and must still be found rather than duplicated.
+    """
+    product = await get_by_barcode(db, raw)
+    if product is not None:
+        return product
+    for key in alias_keys:
+        if key == raw:
+            continue
+        product = await get_by_barcode(db, key)
+        if product is not None:
+            return product
+    return None
+
+
+async def insert_new(db: AsyncSession, product: Product) -> Product | None:
+    """
+    Attempts to INSERT a brand-new product row (used only by barcode
+    discovery — see app/services/food_analysis.py). Returns `None` if a
+    row for this barcode already exists — e.g. a concurrent discovery
+    request for the same barcode (or an equivalent representation, once
+    canonicalized) won the race. Makes no merge/overwrite decision
+    itself (no business logic, per the repository layer's job); the
+    caller re-fetches with `get_by_barcode` and decides how to proceed.
+
+    Uses a SAVEPOINT (`begin_nested`) rather than a full `db.rollback()`
+    so a conflict here can never discard other work already flushed
+    earlier in the same transaction (verified against both SQLite and
+    PostgreSQL) — see `product_source_repository.record_discovery` for
+    the same pattern applied to provenance rows, which is where this
+    actually matters in practice (barcode inserts happen once per
+    request, provenance inserts happen in a loop).
+    """
+    try:
+        async with db.begin_nested():
+            db.add(product)
+            await db.flush()
+        return product
+    except IntegrityError:
+        return None
