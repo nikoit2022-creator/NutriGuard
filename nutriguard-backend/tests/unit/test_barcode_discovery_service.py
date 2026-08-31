@@ -86,6 +86,29 @@ async def test_off_success_is_used_and_upc_not_consulted(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_partial_nutrition_is_not_considered_known(monkeypatch):
+    """PR #7 review, round 2, finding 1: `nutrition_known` requires ALL
+    THREE core numeric Health Score inputs, not just one. Sugar present,
+    sodium/saturated fat absent -> still `nutrition_known=False`, even
+    though ingredients ARE known (so this is genuinely testing the
+    nutrition gate in isolation, not the ingredients gate)."""
+    off = _result(
+        "open_food_facts",
+        "Partial Nutrition Item",
+        brand="Sunburst",
+        raw_ingredient_text="sugar, water, salt",
+        nutrition=NutritionFacts(sugar_grams=12.0, sodium_mg=None, saturated_fat_grams=None),
+    )
+    _patch_providers(monkeypatch, off=off, gs1=None, upc=None)
+
+    outcome = await barcode_discovery.discover_product(BARCODE)
+
+    assert outcome.product is not None
+    assert outcome.product.ingredients_known is True
+    assert outcome.product.nutrition_known is False
+
+
+@pytest.mark.asyncio
 async def test_off_miss_falls_back_to_upcitemdb(monkeypatch):
     upc = _result("upcitemdb", "Acme Cereal", brand="Acme")
     _patch_providers(monkeypatch, off=None, gs1=None, upc=upc)

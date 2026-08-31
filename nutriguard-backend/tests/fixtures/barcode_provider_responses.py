@@ -73,6 +73,29 @@ OFF_EXPLICIT_ENGLISH_FIELD_ON_NON_ENGLISH_RECORD = {
     },
 }
 
+OFF_FRENCH_INGREDIENTS_WITH_ENGLISH_NAME = {
+    "code": "3029330003533",
+    "status": "success",
+    "result": {"id": "product_found"},
+    "product": {
+        # Explicit English identity is present and usable...
+        "product_name_en": "Hazelnut Spread",
+        "brands": "Nutchoc",
+        # ...but there's no ingredients_text_en/_bg, and the record's
+        # own declared language is French -- ingredients_text (and the
+        # `ingredients[].text` array) must NOT be used as the ingredient
+        # source; only the array's always-English `.id` values may be.
+        "ingredients_text": "Sucre, huile de palme, noisettes, cacao maigre",
+        "ingredients": [
+            {"id": "en:sugar", "text": "Sucre"},
+            {"id": "en:palm-oil", "text": "huile de palme"},
+        ],
+        "nutriments": {"sugars_100g": 56.0, "sodium_100g": 0.03, "saturated-fat_100g": 10.6},
+        "lang": "fr",
+        "lc": "fr",
+    },
+}
+
 OFF_BULGARIAN_RECORD = {
     "code": "3800020827980",
     "status": "success",

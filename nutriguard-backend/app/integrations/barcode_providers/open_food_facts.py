@@ -143,18 +143,46 @@ def _language_gated_field(product: dict, *, en_key: str, bg_key: str, default_ke
     return None
 
 
-def _ingredient_tokens(product: dict) -> list[str]:
+def _clean_taxonomy_id(raw_id: str) -> str | None:
+    """OFF's `ingredients[].id` is always its own canonical taxonomy
+    identifier in English (e.g. `"en:sodium-benzoate"`), REGARDLESS of
+    the record's declared language — unlike `.text`, which is the
+    literal, language-specific label text. Safe to use even when the
+    record's declared language is unsupported."""
+    cleaned = raw_id.split(":", 1)[-1].replace("-", " ").strip()
+    return cleaned or None
+
+
+def _ingredient_tokens(product: dict, lang: str) -> list[str]:
+    """Same language policy as `_language_gated_field`, applied
+    per-token: `.text` (the literal, language-specific ingredient
+    label) is only used when the record's declared language is
+    English/Bulgarian. For any other declared language, only the
+    English taxonomy `.id` is used — never the raw foreign-language
+    `.text` — so an unsupported-language record can still contribute
+    identifiable (English) ingredient tokens without ever leaking
+    untranslated French/German/Albanian/etc. text into
+    `raw_ingredient_text` (PR #7 review, round 2, finding 2)."""
     ingredients = product.get("ingredients")
-    if isinstance(ingredients, list) and ingredients:
-        tokens = []
-        for item in ingredients:
-            if isinstance(item, dict):
-                text = item.get("text") or item.get("id")
-                if isinstance(text, str) and text.strip():
-                    tokens.append(text.strip())
-        if tokens:
-            return tokens
-    return []
+    if not isinstance(ingredients, list) or not ingredients:
+        return []
+
+    tokens: list[str] = []
+    for item in ingredients:
+        if not isinstance(item, dict):
+            continue
+        text: str | None = None
+        if lang in _SUPPORTED_LANGUAGES:
+            candidate = item.get("text")
+            if isinstance(candidate, str) and candidate.strip():
+                text = candidate.strip()
+        if text is None:
+            raw_id = item.get("id")
+            if isinstance(raw_id, str) and raw_id.strip():
+                text = _clean_taxonomy_id(raw_id)
+        if text:
+            tokens.append(text)
+    return tokens
 
 
 class OpenFoodFactsProvider(BarcodeProductProvider):
@@ -236,7 +264,7 @@ class OpenFoodFactsProvider(BarcodeProductProvider):
             category=_first_csv(product.get("categories")),
             image_url=product.get("image_front_url") or product.get("image_url"),
             raw_ingredient_text=raw_text,
-            ingredients_tokens=_ingredient_tokens(product),
+            ingredients_tokens=_ingredient_tokens(product, lang),
             nutrition=NutritionFacts(
                 sugar_grams=_to_float(nutriments.get("sugars_100g")),
                 sodium_mg=_sodium_mg(nutriments),

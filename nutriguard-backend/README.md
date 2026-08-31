@@ -44,6 +44,28 @@ barcode discovery feature, fixed before merge:
 
 See section 6, item 8 and section 10 for the full detail on each.
 
+**V7 (bug fixes, PR #7 review round 2):** Three further correctness
+gaps found in a second review of V6, fixed before merge:
+1. `nutrition_known` required only ONE of the three core numeric Health
+   Score inputs (sugar/sodium/saturated fat) to be present, so a
+   discovery with only sugar known still zero-filled the other two and
+   passed the completeness gate. Now requires all three.
+2. Open Food Facts' `ingredients_text` was correctly language-gated,
+   but the structured `ingredients[]` array's `.text` values were used
+   unconditionally regardless of the record's declared language — an
+   unsupported-language record could still leak untranslated ingredient
+   text back into analysis via that fallback. Now only the array's
+   always-English `.id` taxonomy identifiers are used when the record's
+   declared language isn't English/Bulgarian.
+3. Barcode lookup only checked the raw input and the canonical GTIN-13,
+   so a pre-existing/legacy row stored under a non-canonical
+   representation (e.g. a bare 12-digit UPC-A) was missed by an
+   equivalent EAN-13 scan and could be duplicated. Lookup now checks
+   every alias representation of a barcode
+   (`barcode_validation.alias_keys`), not just one.
+
+See section 6, item 9 and section 10 for the full detail on each.
+
 **V4 (feature):** `POST /api/v1/scan/barcode` now attempts multi-source
 product discovery on a local-database miss instead of immediately
 returning 404: Open Food Facts, then a GS1 Digital Link resolution for
@@ -134,7 +156,7 @@ source .venv/bin/activate
 pytest -q
 ```
 
-The full suite (**155 tests**) runs against an in-memory SQLite database
+The full suite (**159 tests**) runs against an in-memory SQLite database
 via `aiosqlite` — no Docker or Postgres required, and it runs in a few
 seconds. This is intentional: SQLite is good enough to validate all
 business logic and API behavior, while the actual deployment always
@@ -412,7 +434,7 @@ than silently resolved:
      script too and no longer leaks through OFF's language-neutral
      `product_name`/`ingredients_text` fields.
    - Barcode storage/lookup uses one canonical GTIN-13 key
-     (`product_repository.get_by_barcode_or_canonical`); the EAN-8/
+     (`product_repository.get_by_barcode_or_aliases`); the EAN-8/
      UPC-E 8-digit ambiguity is resolved by an explicit, tested
      precedence rule (`BarcodeInfo.ambiguous_upc_e`) instead of an
      implicit accident of control flow.
@@ -428,6 +450,41 @@ than silently resolved:
    `tests/unit/test_barcode_providers.py`, and the new tests in
    `tests/integration/test_barcode_discovery_flow.py` for the full
    regression coverage of each.
+
+9. **Three further correctness gaps from a second PR #7 review (V7),
+   fixed before merge.** All three were the V6 fixes not being applied
+   as strictly/completely as intended, not new contract changes:
+   - `barcode_discovery.py`'s `nutrition_known` used `any(...)` over the
+     three core numeric Health Score inputs (sugar/sodium/saturated
+     fat) — a single field being present was enough to pass the
+     completeness gate, silently zero-filling the other two. Changed to
+     `all(...)`: every one of the three must be present. Covered by
+     `test_partial_nutrition_is_not_considered_known` (unit) and
+     `test_partial_nutrition_with_ingredients_still_refuses_a_score`
+     (integration).
+   - `open_food_facts.py`'s `_ingredient_tokens` consumed the
+     structured `ingredients[].text` field unconditionally, regardless
+     of the record's declared language — the same leak item 8's
+     language gate closed for `ingredients_text`, just reachable
+     through the `ingredients[]` array fallback instead. Fixed by
+     preferring `ingredients[].text` only when the record's declared
+     language is English/Bulgarian, and otherwise using only
+     `ingredients[].id` (OFF's own always-English taxonomy identifier,
+     e.g. `"en:sodium-benzoate"` — never the literal foreign-language
+     label text). Covered by
+     `test_off_ingredient_tokens_use_english_taxonomy_id_not_foreign_text`.
+   - `get_by_barcode_or_canonical` (now `get_by_barcode_or_aliases`)
+     only checked the raw scanned string and the canonical GTIN-13 —
+     missing a pre-existing/legacy row stored under a *different* valid
+     alias (e.g. a bare 12-digit UPC-A row, found via a later
+     EAN-13-zero-padded-equivalent scan), which could then be
+     duplicated. Fixed with `barcode_validation.alias_keys`, which
+     computes every plausible legacy storage key for a given barcode
+     (UPC-A ⇄ EAN-13-zero-padded, specifically); the lookup now checks
+     all of them. New rows are still always persisted under the single
+     canonical `gtin13` — aliases are for *finding* a pre-existing row,
+     never for *choosing* where a new one is written. Covered by
+     `test_legacy_upc_a_row_is_found_by_a_later_equivalent_ean13_scan`.
 
 No other ambiguities were found that required deviating from the
 contract; where the contract was silent on an implementation detail
@@ -651,7 +708,7 @@ never scored either.
   flags when this happened) rather than an implicit accident of control
   flow.
 - Barcode storage and lookup use one **canonical GTIN-13 key**
-  (`product_repository.get_by_barcode_or_canonical`): the raw string the
+  (`product_repository.get_by_barcode_or_aliases`): the raw string the
   client sent is tried first (matching a legacy row or a non-GTIN
   synthetic `ocr_.../img_...` id verbatim), then the canonical form —
   so "036000291452" (UPC-A), "0036000291452" (its EAN-13-zero-padded

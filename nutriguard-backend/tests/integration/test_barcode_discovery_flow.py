@@ -140,6 +140,38 @@ async def test_open_food_facts_successful_discovery(app_client, monkeypatch, db_
 
 
 @pytest.mark.asyncio
+async def test_partial_nutrition_with_ingredients_still_refuses_a_score(app_client, monkeypatch):
+    """PR #7 review, round 2, finding 1: ingredients present (so the
+    ingredients gate alone would pass) but only ONE of the three core
+    nutrition fields (sugar) present -- must still be treated as
+    incomplete and return labelScanRequired, never a score computed
+    with sodium/saturated-fat silently zero-filled."""
+    off = FakeProvider(
+        "open_food_facts",
+        0.75,
+        _off_result(
+            name="Partial Nutrition Item",
+            raw_ingredient_text="Water, Sugar, Citric Acid",
+            nutrition=NutritionFacts(sugar_grams=12.0, sodium_mg=None, saturated_fat_grams=None),
+        ),
+    )
+    _patch_providers(monkeypatch, off=off)
+
+    headers = await _register_device(app_client, "discovery-partial-nutrition")
+    resp = await app_client.post(
+        "/api/v1/scan/barcode", json={"barcode": "8901058851397"}, headers=headers
+    )
+
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["error"]["code"] == "PRODUCT_NOT_FOUND"
+    assert body["error"]["details"]["labelScanRequired"] is True
+    assert body["error"]["details"]["discoveredIdentity"]["productName"] == "Partial Nutrition Item"
+    assert "healthScore" not in body
+    assert "product" not in body
+
+
+@pytest.mark.asyncio
 async def test_open_food_facts_miss_falls_back_to_upcitemdb(app_client, monkeypatch, db_session):
     """UPCitemdb is identity-only by construction (see upcitemdb.py) --
     a fallback that only reaches UPCitemdb is therefore always
@@ -551,6 +583,66 @@ async def test_equivalent_barcode_representations_resolve_to_one_product(app_cli
         )
     ).scalar_one()
     assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_upc_a_row_is_found_by_a_later_equivalent_ean13_scan(app_client, monkeypatch, db_session):
+    """PR #7 review, round 2, finding 3: a pre-existing row stored under
+    the 12-digit UPC-A form (e.g. written before this canonicalization
+    scheme existed, or by any other path) must still be found by a
+    later scan of the EAN-13-zero-padded equivalent -- not just the
+    other way around. `get_by_barcode_or_aliases` must check every
+    alias, not only the raw input and the canonical GTIN-13."""
+    legacy_row = Product(
+        barcode="036000291452",  # legacy: stored as bare UPC-A, not the canonical GTIN-13
+        product_name="Legacy UPC-A Product",
+        brand="LegacyBrand",
+        category="cat",
+        raw_ingredient_text="water",
+        ingredient_ids="",
+        health_score=90,
+        nova_group=1,
+        sugar_grams=0,
+        sodium_mg=0,
+        saturated_fat_grams=0,
+        allergens_detected="None",
+        source="open_food_facts",
+        is_verified=False,
+        source_confidence=0.75,
+        has_verified_nutrition=True,
+    )
+    db_session.add(legacy_row)
+    await db_session.flush()
+    await db_session.commit()
+
+    # A provider call here would prove a (wrong) second discovery
+    # happened instead of finding the legacy row.
+    monkeypatch.setattr(
+        barcode_discovery,
+        "OpenFoodFactsProvider",
+        lambda: FakeProvider("open_food_facts", 0.75, Exception("must not be called -- legacy row should be found")),
+    )
+    monkeypatch.setattr(settings, "BARCODE_DISCOVERY_ENABLED", True)
+
+    headers = await _register_device(app_client, "discovery-legacy-alias")
+    resp = await app_client.post(
+        "/api/v1/scan/barcode", json={"barcode": "0036000291452"}, headers=headers  # EAN-13-equivalent scan
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["isFromDatabaseCache"] is True
+    assert body["product"]["barcode"] == "036000291452"  # the legacy row itself, not a new canonical one
+    assert body["product"]["productName"] == "Legacy UPC-A Product"
+
+    count = (
+        await db_session.execute(
+            select(func.count()).select_from(Product).where(
+                Product.barcode.in_(["036000291452", "0036000291452"])
+            )
+        )
+    ).scalar_one()
+    assert count == 1  # no duplicate second row under the canonical form
 
 
 # --- Provenance race-safety (PR #7 review, finding 6) -----------------------

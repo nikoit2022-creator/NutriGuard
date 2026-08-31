@@ -135,3 +135,28 @@ def validate_and_normalize(raw: str | None) -> BarcodeInfo | None:
         return None
 
     return None
+
+
+def alias_keys(info: BarcodeInfo) -> list[str]:
+    """
+    Every plausible storage key a PRE-EXISTING row for this exact
+    physical barcode could already be under, canonical form first.
+    Used only to find a legacy row (e.g. one stored before/without this
+    module's canonical-GTIN-13 convention, or written by some other
+    path) — new rows are always persisted under `gtin13` itself (see
+    `product_repository.insert_new` / `food_analysis.py`), never under
+    an alias.
+
+    UPC-A and its EAN-13-zero-padded form are the same physical barcode
+    (PR #7 review, round 2, finding 3): scanning "0036000291452"
+    (EAN-13) must still find a legacy row stored as "036000291452"
+    (UPC-A), and vice versa. EAN-8/UPC-E have no such shorter/longer
+    alias to consider — an EAN-8 is a genuinely distinct (shorter)
+    symbology, not a zero-padding variant of a 13-digit GTIN.
+    """
+    keys = [info.gtin13]
+    if info.format in ("EAN_13", "UPC_A") and info.gtin13.startswith("0"):
+        twelve_digit = info.gtin13[1:]
+        if twelve_digit and twelve_digit != info.gtin13:
+            keys.append(twelve_digit)
+    return keys

@@ -221,7 +221,15 @@ async def discover_product(barcode: BarcodeInfo) -> DiscoveryOutcome:
     if not raw_ingredient_text and primary.ingredients_tokens:
         raw_ingredient_text = ", ".join(primary.ingredients_tokens)
 
-    nutrition_known = any(
+    # Every one of these three is a direct numeric input to
+    # health_score.calculate (sugar_grams/sodium_mg/saturated_fat_grams)
+    # — ALL three, not just one, must be present for "nutrition known"
+    # (PR #7 review, round 2, finding 1). A partial answer (e.g. sugar
+    # only) is exactly as unreliable as no answer: the missing fields
+    # would still be zero-filled and silently rewarded by the
+    # calculator (0 sodium/saturated fat both mean zero deduction) if
+    # this only required ONE field to be present.
+    nutrition_known = all(
         v is not None
         for v in (
             primary.nutrition.sugar_grams,

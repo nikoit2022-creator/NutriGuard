@@ -39,24 +39,35 @@ async def upsert(db: AsyncSession, product: Product) -> Product:
     return merged
 
 
-async def get_by_barcode_or_canonical(db: AsyncSession, raw: str, canonical: str | None) -> Product | None:
+async def get_by_barcode_or_aliases(db: AsyncSession, raw: str, alias_keys: list[str]) -> Product | None:
     """
     Barcode-scan lookup used by `food_analysis.analyze_barcode`: tries
     the exact string the client sent first (matches a legacy/pre-
     canonicalization row, or a non-GTIN synthetic `ocr_.../img_...` id
-    verbatim), then — only if that misses and `canonical` is a real,
-    different GTIN-13 — the canonical form every barcode-discovered
-    product is actually stored under (see `insert_new` /
-    `food_analysis._persist_discovered_product`). This is what makes
-    "036000291452" (UPC-A), "0036000291452" (its EAN-13-padded
-    equivalent), and "036-000-291452" (same digits, dashes) all resolve
-    to the same row regardless of which one was scanned first.
+    verbatim), then every plausible alias key for the same physical
+    barcode (`alias_keys` — see `barcode_validation.alias_keys`, which
+    computes these; this function takes a plain list rather than
+    importing that service module itself, per the project's layering
+    rule that repositories don't depend on services).
+
+    This is what makes "036000291452" (UPC-A), "0036000291452" (its
+    EAN-13-zero-padded equivalent), and "036-000-291452" (same digits,
+    dashes) all resolve to the same row regardless of which one was
+    scanned first, AND regardless of which one a pre-existing/legacy
+    row happens to be stored under — new rows are always persisted
+    under the canonical GTIN-13 (`alias_keys[0]`, see `insert_new`), but
+    a row from before that convention (or written by another path)
+    might not be, and must still be found rather than duplicated.
     """
     product = await get_by_barcode(db, raw)
     if product is not None:
         return product
-    if canonical and canonical != raw:
-        return await get_by_barcode(db, canonical)
+    for key in alias_keys:
+        if key == raw:
+            continue
+        product = await get_by_barcode(db, key)
+        if product is not None:
+            return product
     return None
 
 

@@ -20,6 +20,7 @@ from tests.fixtures.barcode_provider_responses import (
     OFF_BULGARIAN_RECORD,
     OFF_EXPLICIT_ENGLISH_FIELD_ON_NON_ENGLISH_RECORD,
     OFF_FOUND_FULL,
+    OFF_FRENCH_INGREDIENTS_WITH_ENGLISH_NAME,
     OFF_FRENCH_ONLY,
     OFF_MALFORMED,
     OFF_NOT_FOUND,
@@ -169,6 +170,29 @@ async def test_off_english_declared_record_uses_default_field():
     result = await provider.fetch(BARCODE)
     assert result is not None
     assert result.product_name == "Plain English Snack"
+
+
+@pytest.mark.asyncio
+async def test_off_ingredient_tokens_use_english_taxonomy_id_not_foreign_text():
+    """PR #7 review, round 2, finding 2: `ingredients_text` is correctly
+    gated (None, since the record is French-declared with no _en/_bg
+    ingredients field), but the structured `ingredients[]` array must
+    ALSO never leak its French `.text` values -- only the array's
+    always-English `.id` taxonomy identifiers are usable when the
+    record's declared language is unsupported."""
+    provider = OpenFoodFactsProvider(transport=_json_transport(OFF_FRENCH_INGREDIENTS_WITH_ENGLISH_NAME))
+    result = await provider.fetch(BARCODE)
+
+    assert result is not None
+    assert result.product_name == "Hazelnut Spread"
+    assert result.raw_ingredient_text is None  # ingredients_text itself stays correctly gated
+    assert result.ingredients_tokens == ["sugar", "palm oil"]
+    assert "Sucre" not in result.ingredients_tokens
+    assert "huile de palme" not in result.ingredients_tokens
+    # ...and therefore nothing French ever reaches the joined fallback
+    # text `barcode_discovery.py` would build from these tokens.
+    joined = ", ".join(result.ingredients_tokens)
+    assert "Sucre" not in joined and "huile" not in joined
 
 
 # --- GS1 Digital Link resolver ----------------------------------------------

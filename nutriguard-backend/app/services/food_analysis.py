@@ -53,9 +53,28 @@ V6 (PR #7 review fixes, documented, see README "Deviations"):
     already established, via `_label_scan_required_details`, instead of
     a confident-looking score computed from placeholder zeros.
   - Barcode storage/lookup uses a canonical GTIN-13 key
-    (`product_repository.get_by_barcode_or_canonical`), so whitespace/
-    dash variants and UPC-A/EAN-13-equivalent representations of the
-    same barcode converge on one row instead of creating duplicates.
+    (`product_repository.get_by_barcode_or_aliases` +
+    `barcode_validation.alias_keys`), so whitespace/dash variants and
+    UPC-A/EAN-13-equivalent representations of the same barcode
+    converge on one row instead of creating duplicates — including a
+    pre-existing/legacy row stored under a non-canonical alias.
+
+V7 (PR #7 review, round 2 fixes, documented, see README "Deviations"):
+  - `nutrition_known` now requires ALL THREE core numeric inputs the
+    Health Score Calculator consumes (sugar/sodium/saturated fat), not
+    just one — a partial answer is exactly as unreliable as no answer.
+  - Open Food Facts' `ingredients[].text` (language-specific label text)
+    is only used when the record's declared language is English/
+    Bulgarian; for any other language, only the always-English
+    `ingredients[].id` taxonomy identifier is used, never the raw
+    foreign-language text — closes a gap where an unsupported-language
+    record's `ingredients_text` was correctly gated but its structured
+    `ingredients` array fallback was not.
+  - `get_by_barcode_or_aliases` now checks every alias representation
+    of a barcode (not just the raw input and the canonical GTIN-13), so
+    a pre-existing/legacy row stored under a non-canonical form (e.g. a
+    12-digit UPC-A row, found via a later 13-digit EAN-13-equivalent
+    scan) is still found instead of duplicated.
 """
 import time
 import uuid
@@ -79,6 +98,7 @@ from app.repositories import (
     scan_history_repository,
 )
 from app.services import barcode_discovery, health_score, warning_engine
+from app.services import barcode_validation
 from app.services.barcode_validation import validate_and_normalize
 from app.services.fallback_analysis import AnalyzedProductData, fallback_local_analysis
 from app.services.gemini_image_parser import parse_gemini_image_json_result
@@ -335,7 +355,7 @@ async def _persist_discovered_product(
     """
     all_db_ingredients = await ingredient_repository.get_all(db)
     data, ingredients, has_verified_nutrition = _to_analyzed_data_from_discovery(discovered, all_db_ingredients)
-    # Canonical GTIN-13 storage key (see product_repository.get_by_barcode_or_canonical)
+    # Canonical GTIN-13 storage key (see product_repository.get_by_barcode_or_aliases)
     # — every equivalent representation of this barcode converges on one row.
     canonical_barcode = discovered.barcode.gtin13
 
@@ -492,13 +512,15 @@ async def analyze_barcode(db: AsyncSession, user_id: uuid.UUID, barcode: str) ->
     label content (those endpoints are unaffected by this change).
     """
     barcode_info = validate_and_normalize(barcode)
-    canonical_barcode = barcode_info.gtin13 if barcode_info is not None else None
+    alias_keys = barcode_validation.alias_keys(barcode_info) if barcode_info is not None else []
     # Tries the raw string first (matches a legacy row or a non-GTIN
-    # synthetic ocr_.../img_... id verbatim), then the canonical GTIN-13
-    # form — so "036000291452" (UPC-A), "0036000291452" (its EAN-13
-    # equivalent), and "036-000-291452" (same digits, dashes) all
-    # resolve to the same persisted row (see product_repository).
-    product = await product_repository.get_by_barcode_or_canonical(db, barcode, canonical_barcode)
+    # synthetic ocr_.../img_... id verbatim), then every alias for the
+    # same physical barcode — so "036000291452" (UPC-A), "0036000291452"
+    # (its EAN-13 equivalent), and "036-000-291452" (same digits,
+    # dashes) all resolve to the same persisted row REGARDLESS of which
+    # exact form a pre-existing/legacy row happens to be stored under
+    # (see product_repository.get_by_barcode_or_aliases).
+    product = await product_repository.get_by_barcode_or_aliases(db, barcode, alias_keys)
     was_cache_hit = product is not None
     extra_warnings: list[HealthWarning] = []
 
