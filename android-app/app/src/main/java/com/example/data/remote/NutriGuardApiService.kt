@@ -98,6 +98,17 @@ class NutriGuardApiService(
                         )
                     }
                 }
+                if (resp.code == 401 || resp.code == 403) {
+                    // AuthInterceptor already retried once with a refreshed/
+                    // re-authenticated token (see its docs); reaching here
+                    // means that also failed, so the device genuinely
+                    // couldn't be authenticated -- not just "a server error".
+                    Log.e(TAG, "NutriGuard Backend authentication failure HTTP ${resp.code}")
+                    throw BarcodeAuthException(
+                        resp.code,
+                        "Your session could not be verified. Please restart the app and try again."
+                    )
+                }
                 Log.e(TAG, "NutriGuard Backend error HTTP ${resp.code}")
                 throw BarcodeServerException(
                     resp.code,

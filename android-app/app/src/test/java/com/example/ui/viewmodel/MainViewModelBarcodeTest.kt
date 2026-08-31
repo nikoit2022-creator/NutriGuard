@@ -1,5 +1,6 @@
 package com.example.ui.viewmodel
 
+import com.example.data.remote.BarcodeAuthException
 import com.example.data.remote.BarcodeNetworkException
 import com.example.data.remote.BarcodeServerException
 import com.example.data.remote.BarcodeTimeoutException
@@ -183,6 +184,25 @@ class MainViewModelBarcodeTest {
         testDispatcher.scheduler.advanceUntilIdle()
 
         assertTrue(viewModel.barcodeLookupState.value is BarcodeLookupUiState.Failed)
+    }
+
+    @Test
+    fun `authentication failure is distinct from a generic server error`() = runTest(testDispatcher) {
+        val fake = FakeProductAnalysisSource()
+        fake.barcodeResult = Result.failure(
+            BarcodeAuthException(401, "Your session could not be verified. Please restart the app and try again.")
+        )
+        val viewModel = MainViewModel(fake)
+
+        viewModel.scanBarcode("4006381333931")
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        val state = viewModel.barcodeLookupState.value
+        assertTrue(state is BarcodeLookupUiState.Failed)
+        assertEquals(
+            "Your session could not be verified. Please restart the app and try again.",
+            (state as BarcodeLookupUiState.Failed).message
+        )
     }
 
     @Test

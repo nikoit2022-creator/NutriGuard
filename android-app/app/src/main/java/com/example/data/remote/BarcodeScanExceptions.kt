@@ -29,6 +29,16 @@ class BarcodeTimeoutException(message: String, cause: Throwable? = null) : Barco
 /** A non-2xx response that isn't the structured "label scan required" case. */
 class BarcodeServerException(val statusCode: Int, message: String) : BarcodeScanException(message)
 
+/**
+ * A 401/403 that survived [com.example.data.auth.AuthInterceptor]'s
+ * transparent refresh/device-re-auth retry -- i.e. the device could not
+ * be (re-)authenticated at all, not merely "an access token happened to
+ * expire". Kept distinct from [BarcodeServerException] because blindly
+ * retrying the same request again would just fail the same way; the
+ * caller should tell the user their session couldn't be verified.
+ */
+class BarcodeAuthException(val statusCode: Int, message: String) : BarcodeScanException(message)
+
 /** A 2xx (or otherwise unexpected-shape) body that could not be parsed. */
 class BarcodeParseException(message: String, cause: Throwable? = null) : BarcodeScanException(message, cause)
 

@@ -11,6 +11,7 @@ import com.example.data.model.ProductEntity
 import com.example.data.model.RiskLevel
 import com.example.data.model.ScanHistoryEntity
 import com.example.data.model.UserHealthProfile
+import com.example.data.remote.BarcodeAuthException
 import com.example.data.remote.BarcodeNetworkException
 import com.example.data.remote.BarcodeScanException
 import com.example.data.remote.BarcodeTimeoutException
@@ -132,6 +133,14 @@ class MainViewModel(
             } catch (e: BarcodeNetworkException) {
                 _barcodeLookupState.value = BarcodeLookupUiState.Failed(
                     e.message ?: "Unable to reach the server. Please check your connection.",
+                    barcode
+                )
+            } catch (e: BarcodeAuthException) {
+                // Distinct from BarcodeServerException: AuthInterceptor already
+                // tried a token refresh/device re-auth once and it still failed,
+                // so a plain retry of the same request would fail identically.
+                _barcodeLookupState.value = BarcodeLookupUiState.Failed(
+                    e.message ?: "Your session could not be verified. Please restart the app and try again.",
                     barcode
                 )
             } catch (e: BarcodeScanException) {
