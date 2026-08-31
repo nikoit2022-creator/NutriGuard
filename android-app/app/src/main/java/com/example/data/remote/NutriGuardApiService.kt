@@ -16,6 +16,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
 
 class NutriGuardApiService(
@@ -26,6 +27,94 @@ class NutriGuardApiService(
         .build()
 ) {
     private val baseUrl: String = BuildConfig.BACKEND_BASE_URL.trimEnd('/')
+
+    // Barcode discovery may query several external providers sequentially
+    // server-side (Open Food Facts, GS1, UPCitemdb) before answering, so
+    // it needs materially more headroom than a typical request -- but
+    // this must never shorten the base client's timeouts (60s), which
+    // image upload also relies on. `callTimeout` bounds the WHOLE
+    // request (connect + write + server processing + read), which is
+    // exactly what "give the backend flow enough time end-to-end" means
+    // here; connect/read/write on the derived client stay inherited
+    // from `httpClient`, only capped tighter by the overall call bound.
+    private val barcodeHttpClient: OkHttpClient by lazy {
+        httpClient.newBuilder()
+            .callTimeout(BARCODE_CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .build()
+    }
+
+    /**
+     * Sends a scanned/typed barcode to the NutriGuard FastAPI backend endpoint:
+     * POST /api/v1/scan/barcode
+     *
+     * On success, returns the same [ParsedScanData] shape [scanLabelImage]
+     * does (the backend uses one contract, `FullProductAnalysisOut`, for
+     * both). On a structured "not found / label scan required" response
+     * throws [LabelScanRequiredException]; on any other failure throws a
+     * more specific [BarcodeScanException] subtype so callers can react
+     * to *why* it failed instead of treating every error alike.
+     */
+    suspend fun scanBarcode(barcode: String): ParsedScanData = withContext(Dispatchers.IO) {
+        val jsonPayload = JSONObject().apply { put("barcode", barcode) }
+        val endpointUrl = "$baseUrl/api/v1/scan/barcode"
+        Log.d(TAG, "Executing scanBarcode POST request to: $endpointUrl")
+
+        val request = Request.Builder()
+            .url(endpointUrl)
+            .post(jsonPayload.toString().toRequestBody("application/json".toMediaType()))
+            .header("Accept", "application/json")
+            .build()
+
+        val response = try {
+            barcodeHttpClient.newCall(request).execute()
+        } catch (e: SocketTimeoutException) {
+            Log.w(TAG, "Barcode lookup timed out calling $endpointUrl")
+            throw BarcodeTimeoutException(
+                "The product lookup is taking too long. Please check your connection and try again.",
+                e
+            )
+        } catch (e: IOException) {
+            Log.e(TAG, "Network connection failure to $endpointUrl: ${e.localizedMessage}", e)
+            throw BarcodeNetworkException(
+                "Unable to reach the NutriGuard server. Check your network connection and try again.",
+                e
+            )
+        }
+
+        response.use { resp ->
+            val responseBody = resp.body?.string() ?: ""
+
+            if (!resp.isSuccessful) {
+                if (resp.code == 404) {
+                    val backendError = BackendErrorDto.fromJson(responseBody)
+                    val details = backendError?.details
+                    if (backendError?.code == "PRODUCT_NOT_FOUND" && details?.labelScanRequired == true) {
+                        throw LabelScanRequiredException(
+                            reason = details.reason
+                                ?: "This product could not be fully identified from its barcode.",
+                            suggestedAction = details.suggestedAction,
+                            providersChecked = details.providersChecked,
+                            discoveredIdentity = details.discoveredIdentity
+                        )
+                    }
+                }
+                Log.e(TAG, "NutriGuard Backend error HTTP ${resp.code}")
+                throw BarcodeServerException(
+                    resp.code,
+                    "NutriGuard backend returned an unexpected error (HTTP ${resp.code}). Please try again."
+                )
+            }
+
+            try {
+                val jsonObject = JSONObject(responseBody)
+                val dto = ScanLabelImageResponseDto.fromJson(jsonObject)
+                return@withContext dto.toParsedEntities()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to parse backend barcode response JSON: ${e.localizedMessage}", e)
+                throw BarcodeParseException("Received an unexpected response from the server.", e)
+            }
+        }
+    }
 
     /**
      * Sends an image bitmap to the NutriGuard FastAPI backend endpoint:
@@ -80,6 +169,9 @@ class NutriGuardApiService(
 
     companion object {
         private const val TAG = "NutriGuardApiService"
+
+        /** Whole-request bound for POST /scan/barcode -- see [barcodeHttpClient]. */
+        internal const val BARCODE_CALL_TIMEOUT_SECONDS = 30L
 
         /**
          * Builds the multipart form part for the label-image scan request.

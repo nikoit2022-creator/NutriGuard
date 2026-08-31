@@ -33,15 +33,18 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.DocumentScanner
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SearchOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -50,6 +53,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -64,6 +68,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import com.example.data.remote.dto.cleanOrNull
 import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.NutriGuardSpacing
@@ -71,6 +76,7 @@ import com.example.ui.theme.RiskGreen
 import com.example.ui.theme.RiskOrange
 import com.example.ui.theme.RiskRed
 import com.example.ui.theme.RiskYellow
+import com.example.ui.viewmodel.BarcodeLookupUiState
 import com.example.ui.viewmodel.MainViewModel
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
@@ -87,6 +93,7 @@ fun ScanHomeScreen(
 ) {
     val context = LocalContext.current
     val recentScans by viewModel.scanHistory.collectAsState()
+    val barcodeLookupState by viewModel.barcodeLookupState.collectAsState()
     val isDark = isSystemInDarkTheme()
 
     var isOcrMode by remember { mutableStateOf(false) }
@@ -94,6 +101,29 @@ fun ScanHomeScreen(
     var barcodeInput by remember { mutableStateOf("") }
     var rawTextInput by remember { mutableStateOf("") }
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+    var lastSubmittedBarcode by remember { mutableStateOf<String?>(null) }
+
+    val isSearchingBarcode = barcodeLookupState is BarcodeLookupUiState.Searching
+
+    // Navigate to Product Details exactly once per successful lookup --
+    // never eagerly, and never for a LabelScanRequired/Failed outcome
+    // (see MainViewModel.scanBarcode's docs).
+    LaunchedEffect(viewModel) {
+        viewModel.navigateToResultEvent.collect {
+            onNavigateToResult()
+        }
+    }
+
+    // Single entry point for every barcode-triggered lookup (scanner,
+    // manual entry, recent scans, sample cards): stays on this screen
+    // and shows a "Searching product..." state instead of navigating
+    // immediately, and ignores a resubmission while one is in flight.
+    val submitBarcode: (String) -> Unit = { value ->
+        if (!isSearchingBarcode) {
+            lastSubmittedBarcode = value
+            viewModel.scanBarcode(value)
+        }
+    }
 
     val barcodeScannerOptions = remember {
         GmsBarcodeScannerOptions.Builder()
@@ -114,8 +144,7 @@ fun ScanHomeScreen(
             .addOnSuccessListener { barcode ->
                 val value = normalizeScannedBarcode(barcode.rawValue)
                 if (value != null) {
-                    viewModel.scanBarcode(value)
-                    onNavigateToResult()
+                    submitBarcode(value)
                 } else {
                     Toast.makeText(context, "No barcode value was detected.", Toast.LENGTH_SHORT).show()
                 }
@@ -293,7 +322,7 @@ fun ScanHomeScreen(
                                 EmeraldPrimary.copy(alpha = 0.6f),
                                 RoundedCornerShape(20.dp)
                             )
-                            .clickable {
+                            .clickable(enabled = !isSearchingBarcode) {
                                 if (isOcrMode) {
                                     startIngredientPhotoCapture()
                                 } else {
@@ -358,6 +387,41 @@ fun ScanHomeScreen(
             }
         }
 
+        // Barcode lookup state: stays on this screen the whole time --
+        // see MainViewModel.BarcodeLookupUiState.
+        item {
+            when (val lookupState = barcodeLookupState) {
+                is BarcodeLookupUiState.Searching -> {
+                    BarcodeSearchingCard()
+                }
+
+                is BarcodeLookupUiState.LabelScanRequired -> {
+                    LabelScanRequiredCard(
+                        state = lookupState,
+                        onScanLabel = {
+                            viewModel.dismissBarcodeLookupState()
+                            isOcrMode = true
+                            startIngredientPhotoCapture()
+                        },
+                        onDismiss = { viewModel.dismissBarcodeLookupState() }
+                    )
+                }
+
+                is BarcodeLookupUiState.Failed -> {
+                    BarcodeLookupFailedCard(
+                        message = lookupState.message,
+                        onRetry = {
+                            viewModel.dismissBarcodeLookupState()
+                            (lastSubmittedBarcode ?: lookupState.barcode).let(submitBarcode)
+                        },
+                        onDismiss = { viewModel.dismissBarcodeLookupState() }
+                    )
+                }
+
+                is BarcodeLookupUiState.Idle -> Unit
+            }
+        }
+
         // Recent Scans Section (if available)
         if (recentScans.isNotEmpty()) {
             item {
@@ -382,11 +446,10 @@ fun ScanHomeScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(NutriGuardRadius.medium))
-                                .clickable {
+                                .clickable(enabled = !isSearchingBarcode) {
                                     val barcode = scan.barcode
                                     if (!barcode.isNullOrBlank()) {
-                                        viewModel.scanBarcode(barcode)
-                                        onNavigateToResult()
+                                        submitBarcode(barcode)
                                     }
                                 },
                             shape = RoundedCornerShape(NutriGuardRadius.medium),
@@ -497,10 +560,10 @@ fun ScanHomeScreen(
                                 Button(
                                     onClick = {
                                         if (barcodeInput.isNotBlank()) {
-                                            viewModel.scanBarcode(barcodeInput)
-                                            onNavigateToResult()
+                                            submitBarcode(barcodeInput)
                                         }
                                     },
+                                    enabled = !isSearchingBarcode,
                                     shape = RoundedCornerShape(NutriGuardRadius.small),
                                     colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
                                 ) {
@@ -558,10 +621,7 @@ fun ScanHomeScreen(
                         title = "FizzMax Zero",
                         subtitle = "Aspartame, Tartrazine",
                         score = 32,
-                        onClick = {
-                            viewModel.scanBarcode("012345678905")
-                            onNavigateToResult()
-                        }
+                        onClick = { submitBarcode("012345678905") }
                     )
                 }
                 item {
@@ -569,10 +629,7 @@ fun ScanHomeScreen(
                         title = "Smoked Bacon",
                         subtitle = "Sodium Nitrite, MSG",
                         score = 24,
-                        onClick = {
-                            viewModel.scanBarcode("098765432109")
-                            onNavigateToResult()
-                        }
+                        onClick = { submitBarcode("098765432109") }
                     )
                 }
                 item {
@@ -580,10 +637,7 @@ fun ScanHomeScreen(
                         title = "Pure Oat Bar",
                         subtitle = "Organic Rolled Oats",
                         score = 92,
-                        onClick = {
-                            viewModel.scanBarcode("055555555555")
-                            onNavigateToResult()
-                        }
+                        onClick = { submitBarcode("055555555555") }
                     )
                 }
                 item {
@@ -591,10 +645,7 @@ fun ScanHomeScreen(
                         title = "HyperDrive Energy",
                         subtitle = "HFCS, Titanium Dioxide",
                         score = 18,
-                        onClick = {
-                            viewModel.scanBarcode("077777777777")
-                            onNavigateToResult()
-                        }
+                        onClick = { submitBarcode("077777777777") }
                     )
                 }
             }
@@ -676,6 +727,211 @@ private fun SampleProductCard(
     }
 }
 
+
+/**
+ * Shown on the Scan screen (never a navigation) while
+ * `POST /api/v1/scan/barcode` is in flight -- see
+ * `MainViewModel.BarcodeLookupUiState.Searching`.
+ */
+@Composable
+private fun BarcodeSearchingCard() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(NutriGuardRadius.large),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CircularProgressIndicator(
+                color = EmeraldPrimary,
+                strokeWidth = 2.5.dp,
+                modifier = Modifier.size(22.dp)
+            )
+            Spacer(modifier = Modifier.width(14.dp))
+            Column {
+                Text(
+                    text = "Searching product…",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = "Checking our database and trusted product sources",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Shown when the backend answers `PRODUCT_NOT_FOUND` with
+ * `details.labelScanRequired = true` -- the barcode is unknown, or was
+ * found but its data is too incomplete for a confident analysis. Never
+ * navigates anywhere on its own; the user stays on the Scan workflow
+ * and either scans the ingredient label (the reliable fallback) or
+ * dismisses this card.
+ */
+@Composable
+private fun LabelScanRequiredCard(
+    state: BarcodeLookupUiState.LabelScanRequired,
+    onScanLabel: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val identity = state.discoveredIdentity
+    val identityName = identity?.productName?.cleanOrNull()
+    val identityBrand = identity?.brand?.cleanOrNull()
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(NutriGuardRadius.large),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+        ),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.SearchOff,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = "Label Scan Needed",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Only ever a safe, non-placeholder identity -- see
+            // DiscoveredIdentity/BackendErrorDetailsDto parsing, which
+            // already filters "null"/"None"/blank values; cleanOrNull()
+            // here is a deliberate second, UI-side layer of the same
+            // defense (never trust a single filtering pass for text
+            // shown directly to the user).
+            if (identityName != null) {
+                Text(
+                    text = buildString {
+                        append(identityName)
+                        if (identityBrand != null) append(" • $identityBrand")
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+            }
+
+            Text(
+                text = state.reason,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Button(
+                    onClick = onScanLabel,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(NutriGuardRadius.small),
+                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DocumentScanner,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(state.suggestedAction?.cleanOrNull() ?: "Scan Ingredient Label", fontSize = 13.sp)
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Dismiss")
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Shown for a network failure, timeout, or unexpected server/parse
+ * error from the barcode lookup -- distinct from
+ * [BarcodeLookupUiState.LabelScanRequired] (see `MainViewModel`'s
+ * catch blocks): this always offers Retry, never "Scan Ingredient
+ * Label", since the barcode itself was never actually resolved either
+ * way.
+ */
+@Composable
+private fun BarcodeLookupFailedCard(
+    message: String,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(NutriGuardRadius.large),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f))
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.ErrorOutline,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = "Couldn't Complete Lookup",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = message.cleanOrNull() ?: "Something went wrong. Please try again.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Button(
+                    onClick = onRetry,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(NutriGuardRadius.small),
+                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                ) {
+                    Text("Retry", fontSize = 13.sp)
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Dismiss")
+                }
+            }
+        }
+    }
+}
 
 internal fun normalizeScannedBarcode(rawValue: String?): String? =
     rawValue?.trim()?.takeIf { it.isNotEmpty() }
