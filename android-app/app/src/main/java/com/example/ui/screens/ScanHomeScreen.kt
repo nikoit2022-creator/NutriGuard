@@ -53,6 +53,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -101,7 +102,26 @@ fun ScanHomeScreen(
     var barcodeInput by remember { mutableStateOf("") }
     var rawTextInput by remember { mutableStateOf("") }
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+    // The app-owned File backing pendingCameraUri, tracked separately so
+    // it can be deleted -- a gallery-picked content:// Uri (imagePickerLauncher,
+    // below) never has one of these and must never be deleted by this screen.
+    var pendingCameraFile by remember { mutableStateOf<File?>(null) }
     var lastSubmittedBarcode by remember { mutableStateOf<String?>(null) }
+
+    // If this screen is disposed (e.g. the user navigates away) while an
+    // ingredient-label capture was launched but its result was never
+    // delivered, the temp file would otherwise leak forever. Safe to run
+    // unconditionally: cameraLauncher's own callback clears
+    // pendingCameraFile to null as the very first thing it does, before
+    // it reads the file, so if this still sees a non-null file, nothing
+    // is actively reading it.
+    DisposableEffect(Unit) {
+        onDispose {
+            pendingCameraFile?.delete()
+            pendingCameraFile = null
+            pendingCameraUri = null
+        }
+    }
 
     val isSearchingBarcode = barcodeLookupState is BarcodeLookupUiState.Searching
 
@@ -178,6 +198,10 @@ fun ScanHomeScreen(
         contract = ActivityResultContracts.TakePicture()
     ) { captured ->
         val uri = pendingCameraUri
+        val file = pendingCameraFile
+        pendingCameraUri = null
+        pendingCameraFile = null
+
         if (captured && uri != null) {
             try {
                 val bitmap = decodeCapturedBitmap(context, uri)
@@ -189,22 +213,35 @@ fun ScanHomeScreen(
                 }
             } catch (_: Exception) {
                 Toast.makeText(context, "Unable to process the captured image.", Toast.LENGTH_SHORT).show()
+            } finally {
+                // decodeCapturedBitmap has fully read the file into `bitmap`
+                // by this point (or the read/decode itself is what failed) --
+                // either way the on-disk copy is no longer needed.
+                file?.delete()
             }
+        } else {
+            // Cancelled (or captured with no URI, which shouldn't happen in
+            // practice): nothing was ever read from the file.
+            file?.delete()
         }
-        pendingCameraUri = null
     }
 
     val startIngredientPhotoCapture: () -> Unit = {
+        var createdFile: File? = null
         try {
             val photoFile = File.createTempFile("ingredient_label_", ".jpg", context.cacheDir)
+            createdFile = photoFile
             val uri = FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.fileprovider",
                 photoFile
             )
+            pendingCameraFile = photoFile
             pendingCameraUri = uri
             cameraLauncher.launch(uri)
         } catch (_: Exception) {
+            createdFile?.delete()
+            pendingCameraFile = null
             pendingCameraUri = null
             Toast.makeText(context, "Unable to open the camera.", Toast.LENGTH_SHORT).show()
         }
