@@ -112,8 +112,15 @@ class MainViewModel(
      */
     fun scanBarcode(barcode: String) {
         if (_barcodeLookupState.value is BarcodeLookupUiState.Searching) return
+        // Set synchronously, before launch: a coroutine launched on
+        // viewModelScope doesn't necessarily start running before this
+        // function returns (e.g. StandardTestDispatcher, or a second
+        // real UI tap landing before the first coroutine gets a
+        // dispatch slot), so the early-return check above must never
+        // observe a stale Idle from a lookup that's already "in flight"
+        // but hasn't run its first suspend point yet.
+        _barcodeLookupState.value = BarcodeLookupUiState.Searching
         viewModelScope.launch {
-            _barcodeLookupState.value = BarcodeLookupUiState.Searching
             try {
                 val result = repository.analyzeBarcode(barcode)
                 _analysisState.value = AnalysisUiState.Success(result)
