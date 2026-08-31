@@ -27,20 +27,40 @@ data class FullProductAnalysis(
     val isFromDatabaseCache: Boolean
 )
 
+/**
+ * The subset of [FoodAnalysisRepository] `MainViewModel` actually
+ * depends on. Extracted purely so ViewModel/UI tests can swap in an
+ * in-memory fake (no Room, no network — see `FakeProductAnalysisSource`
+ * in the test sources) without constructing real DAOs or an
+ * [NutriGuardApiService]; the DI container still wires the real
+ * [FoodAnalysisRepository] here in production, unchanged.
+ */
+interface ProductAnalysisSource {
+    val allIngredients: Flow<List<IngredientEntity>>
+    val allProducts: Flow<List<ProductEntity>>
+    val scanHistory: Flow<List<ScanHistoryEntity>>
+    val userProfile: Flow<UserHealthProfile?>
+
+    suspend fun saveUserProfile(profile: UserHealthProfile)
+    suspend fun analyzeBarcode(barcode: String): FullProductAnalysis
+    suspend fun analyzeOcrText(rawText: String): FullProductAnalysis
+    suspend fun analyzeImageLabel(bitmap: Bitmap): FullProductAnalysis
+}
+
 class FoodAnalysisRepository(
     private val ingredientDao: IngredientDao,
     private val productDao: ProductDao,
     private val userProfileDao: UserHealthProfileDao,
     private val scanHistoryDao: ScanHistoryDao,
     private val apiService: NutriGuardApiService
-) {
+) : ProductAnalysisSource {
 
-    val allIngredients: Flow<List<IngredientEntity>> = ingredientDao.getAllIngredients()
-    val allProducts: Flow<List<ProductEntity>> = productDao.getAllProducts()
-    val scanHistory: Flow<List<ScanHistoryEntity>> = scanHistoryDao.getAllHistory()
-    val userProfile: Flow<UserHealthProfile?> = userProfileDao.getProfile()
+    override val allIngredients: Flow<List<IngredientEntity>> = ingredientDao.getAllIngredients()
+    override val allProducts: Flow<List<ProductEntity>> = productDao.getAllProducts()
+    override val scanHistory: Flow<List<ScanHistoryEntity>> = scanHistoryDao.getAllHistory()
+    override val userProfile: Flow<UserHealthProfile?> = userProfileDao.getProfile()
 
-    suspend fun saveUserProfile(profile: UserHealthProfile) = withContext(Dispatchers.IO) {
+    override suspend fun saveUserProfile(profile: UserHealthProfile) = withContext(Dispatchers.IO) {
         userProfileDao.saveProfile(profile)
     }
 
@@ -48,7 +68,21 @@ class FoodAnalysisRepository(
         return ingredientDao.searchIngredients(query)
     }
 
-    suspend fun analyzeBarcode(barcode: String): FullProductAnalysis = withContext(Dispatchers.IO) {
+    /**
+     * Barcode -> product analysis. Local Room cache is checked first
+     * (fast path, matches prior behavior for a barcode this device has
+     * already resolved). On a local miss, this now calls the backend's
+     * `POST /api/v1/scan/barcode` (local DB + multi-source discovery
+     * server-side) via [NutriGuardApiService.scanBarcode] instead of
+     * fabricating a sample product for an unrecognized barcode — see
+     * the removed `GeminiAnalysisEngine`-backed synthetic-mock branch
+     * this replaces. Exceptions from `scanBarcode` (including
+     * [com.example.data.remote.LabelScanRequiredException]) are
+     * intentionally NOT caught here; they propagate to the caller
+     * (`MainViewModel`), exactly like [analyzeImageLabel] already does
+     * for its own backend call.
+     */
+    override suspend fun analyzeBarcode(barcode: String): FullProductAnalysis = withContext(Dispatchers.IO) {
         val existing = productDao.getProductByBarcode(barcode)
         val profile = userProfileDao.getProfileSync() ?: UserHealthProfile()
 
@@ -82,56 +116,57 @@ class FoodAnalysisRepository(
                 warnings = warnings,
                 isFromDatabaseCache = true
             )
-        } else {
-            // Unknown Barcode: trigger default analysis or synthetic mock for new barcode
-            val sampleRawText = "Water, High Fructose Corn Syrup, Aspartame (E951), Tartrazine (E102), Sodium Nitrite (E250), Monosodium Glutamate (E621)"
-            val (analyzedProd, ingList) = GeminiAnalysisEngine.analyzeIngredientText(
-                rawIngredientText = sampleRawText,
-                dbIngredients = ingredientDao.getAllIngredients().first()
-            )
-
-            val finalProduct = analyzedProd.copy(
-                barcode = barcode,
-                productName = "Scanned Item ($barcode)",
-                brand = "Newly Identified Product"
-            )
-
-            val scoreBreakdown = HealthScoreCalculator.calculate(
-                ingredients = ingList,
-                sugarGrams = finalProduct.sugarGrams,
-                sodiumMg = finalProduct.sodiumMg,
-                saturatedFatGrams = finalProduct.saturatedFatGrams,
-                hasArtificialSweeteners = finalProduct.hasArtificialSweeteners,
-                hasPreservatives = finalProduct.hasPreservatives,
-                novaGroup = finalProduct.novaGroup
-            )
-
-            val finalSavedProduct = finalProduct.copy(healthScore = scoreBreakdown.totalScore)
-            productDao.insertProduct(finalSavedProduct)
-
-            scanHistoryDao.insertHistory(
-                ScanHistoryEntity(
-                    barcode = barcode,
-                    productName = finalSavedProduct.productName,
-                    brand = finalSavedProduct.brand,
-                    healthScore = scoreBreakdown.totalScore,
-                    scanType = "BARCODE"
-                )
-            )
-
-            val warnings = PersonalizedWarningEngine.generateWarnings(finalSavedProduct, ingList, profile)
-
-            return@withContext FullProductAnalysis(
-                product = finalSavedProduct,
-                ingredients = ingList,
-                healthScore = scoreBreakdown.totalScore,
-                warnings = warnings,
-                isFromDatabaseCache = false
-            )
         }
+
+        // Not cached locally: ask the backend. May throw
+        // LabelScanRequiredException / BarcodeNetworkException /
+        // BarcodeTimeoutException / BarcodeServerException /
+        // BarcodeParseException -- all handled by MainViewModel, never
+        // silently swallowed into a fabricated product here.
+        val parsedData = apiService.scanBarcode(barcode)
+        val analyzedProd = parsedData.product
+        val ingList = parsedData.ingredients
+
+        if (ingList.isNotEmpty()) {
+            ingredientDao.insertAll(ingList)
+        }
+
+        val scoreBreakdown = HealthScoreCalculator.calculate(
+            ingredients = ingList,
+            sugarGrams = analyzedProd.sugarGrams,
+            sodiumMg = analyzedProd.sodiumMg,
+            saturatedFatGrams = analyzedProd.saturatedFatGrams,
+            hasArtificialSweeteners = analyzedProd.hasArtificialSweeteners,
+            hasPreservatives = analyzedProd.hasPreservatives,
+            novaGroup = analyzedProd.novaGroup
+        )
+
+        val personalizedWarnings = PersonalizedWarningEngine.generateWarnings(analyzedProd, ingList, profile)
+        val allWarnings = (parsedData.warnings + personalizedWarnings).distinctBy { "${it.title}_${it.condition}" }
+
+        val finalProd = analyzedProd.copy(healthScore = scoreBreakdown.totalScore)
+        productDao.insertProduct(finalProd)
+
+        scanHistoryDao.insertHistory(
+            ScanHistoryEntity(
+                barcode = finalProd.barcode,
+                productName = finalProd.productName,
+                brand = finalProd.brand,
+                healthScore = scoreBreakdown.totalScore,
+                scanType = "BARCODE"
+            )
+        )
+
+        return@withContext FullProductAnalysis(
+            product = finalProd,
+            ingredients = ingList,
+            healthScore = scoreBreakdown.totalScore,
+            warnings = allWarnings,
+            isFromDatabaseCache = false
+        )
     }
 
-    suspend fun analyzeOcrText(rawText: String): FullProductAnalysis = withContext(Dispatchers.IO) {
+    override suspend fun analyzeOcrText(rawText: String): FullProductAnalysis = withContext(Dispatchers.IO) {
         val dbIngs = ingredientDao.getAllIngredients().first()
         val (analyzedProd, ingList) = GeminiAnalysisEngine.analyzeIngredientText(rawText, dbIngs)
         val profile = userProfileDao.getProfileSync() ?: UserHealthProfile()
@@ -170,7 +205,7 @@ class FoodAnalysisRepository(
         )
     }
 
-    suspend fun analyzeImageLabel(bitmap: Bitmap): FullProductAnalysis = withContext(Dispatchers.IO) {
+    override suspend fun analyzeImageLabel(bitmap: Bitmap): FullProductAnalysis = withContext(Dispatchers.IO) {
         // Step 1: Call NutriGuard FastAPI Backend (POST /api/v1/scan/label-image)
         // No silent fallback to local analysis in strict integration mode
         val parsedData = apiService.scanLabelImage(bitmap)

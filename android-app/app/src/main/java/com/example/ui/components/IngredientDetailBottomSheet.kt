@@ -111,7 +111,7 @@ fun IngredientDetailBottomSheet(
                 color = MaterialTheme.colorScheme.onSurface
             )
 
-            if (ingredient.scientificName.isNotBlank()) {
+            if (ingredient.scientificName.hasDisplayValue()) {
                 Text(
                     text = ingredient.scientificName,
                     style = MaterialTheme.typography.bodyMedium,
@@ -139,7 +139,7 @@ fun IngredientDetailBottomSheet(
                     )
                 }
 
-                if (!ingredient.eNumber.isNullOrBlank()) {
+                if (ingredient.eNumber.hasDisplayValue()) {
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(NutriGuardRadius.small))
@@ -168,9 +168,11 @@ fun IngredientDetailBottomSheet(
             InfoSectionItem("EFSA (European Food Safety) Status", ingredient.efsaStatus)
             InfoSectionItem("FDA (US Food & Drug) Status", ingredient.fdaStatus)
 
-            if (ingredient.whoIarcClassification != null) {
-                InfoSectionItem("WHO / IARC Classification", ingredient.whoIarcClassification, highlightColor = RiskRed)
-            }
+            ingredient.whoIarcClassification
+                ?.takeIf { it.hasDisplayValue() }
+                ?.let {
+                    InfoSectionItem("WHO / IARC Classification", it, highlightColor = RiskRed)
+                }
 
             InfoSectionItem("Countries Banned or Restricted", ingredient.countriesRestrictedOrBanned)
             InfoSectionItem("Acceptable Daily Intake (ADI)", ingredient.acceptableDailyIntake)
@@ -189,7 +191,7 @@ private fun InfoSectionItem(
     content: String,
     highlightColor: Color? = null
 ) {
-    if (content.isBlank()) return
+    if (!content.hasDisplayValue()) return
 
     Column(modifier = Modifier.padding(vertical = 6.dp)) {
         Text(
@@ -207,3 +209,6 @@ private fun InfoSectionItem(
     }
 }
 
+
+private fun String?.hasDisplayValue(): Boolean =
+    !isNullOrBlank() && !equals("null", ignoreCase = true)
