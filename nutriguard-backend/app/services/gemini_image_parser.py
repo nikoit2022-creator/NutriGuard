@@ -27,6 +27,7 @@ or missing the minimum usable fields (`productName` + `rawIngredientText`)
 back to `fallback_local_analysis`.
 """
 import json
+import math
 from typing import Any
 
 from app.services.fallback_analysis import AnalyzedProductData
@@ -109,13 +110,81 @@ def _resolve_ingredients(
     return resolved
 
 
+# Physically/nutritionally defensible upper bounds for a per-100g
+# figure (see `NutritionFacts`'/`Product`'s "per-100g" convention).
+# Generous on purpose -- these exist only to catch an obviously
+# hallucinated/garbled number (e.g. a misplaced decimal or a
+# non-nutrition figure echoed into the wrong field), not to second-guess
+# a plausible real product. Sugar/saturated fat physically cannot
+# exceed the product's own 100g mass; sodium is bounded by the mass of
+# pure salt-equivalent compound in 100g (~39% sodium by weight for
+# NaCl, so 100,000mg is already far beyond any real food label -- kept
+# as a round, generous ceiling rather than a precise salt-chemistry
+# figure).
+_MAX_SUGAR_GRAMS_PER_100G = 100.0
+_MAX_SATURATED_FAT_GRAMS_PER_100G = 100.0
+_MAX_SODIUM_MG_PER_100G = 100_000.0
+
+_NUTRITION_FIELD_BOUNDS: dict[str, float] = {
+    "sugarGrams": _MAX_SUGAR_GRAMS_PER_100G,
+    "sodiumMg": _MAX_SODIUM_MG_PER_100G,
+    "saturatedFatGrams": _MAX_SATURATED_FAT_GRAMS_PER_100G,
+}
+
+
+def _is_trustworthy_nutrition_number(value: Any, *, max_value: float) -> bool:
+    """
+    True only for a genuine, finite, non-negative, in-range JSON
+    number -- deliberately stricter than `_as_float` (which is used
+    only to fill `AnalyzedProductData` for DISPLAY, including on the
+    intentionally-untrusted keyword-heuristic fallback path; it must
+    stay lenient there so a malformed value degrades to a placeholder
+    number rather than crashing). This function alone gates
+    `has_verified_nutrition` and must never be fooled by:
+
+      - a JSON boolean (`bool` is an `int` subclass in Python, so
+        `isinstance(True, int)` is True and `float(True) == 1.0` --
+        checked and rejected explicitly, before the numeric-type check);
+      - `NaN`/`Infinity`/`-Infinity` (Python's `json` module accepts
+        these non-standard tokens by default and hands back a real
+        `float('nan')`/`float('inf')` -- caught by `math.isnan`/
+        `math.isinf`, not merely "did `float()` not raise");
+      - a negative value (nutrition per 100g cannot be negative);
+      - a value outside a physically defensible per-100g range (see
+        `_NUTRITION_FIELD_BOUNDS`);
+      - a numeric STRING (e.g. `"12.5"`) or any other non-`int`/`float`
+        JSON type -- a well-behaved structured response (per the
+        updated `_IMAGE_PROMPT`) emits a real JSON number or `null`,
+        never a quoted number; a string is treated as untrustworthy,
+        not coerced.
+
+    A missing key or an explicit JSON `null` (`value is None`) is
+    exactly the signal the updated `_IMAGE_PROMPT` now asks the model
+    to use for "unreadable/absent on the label" -- both correctly fail
+    this check rather than being silently treated as zero.
+    """
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    numeric = float(value)
+    if math.isnan(numeric) or math.isinf(numeric):
+        return False
+    if numeric < 0 or numeric > max_value:
+        return False
+    return True
+
+
 def nutrition_fields_present(json_string: str) -> bool:
     """
     True only if the Gemini image JSON explicitly provided all three
     core numeric Health Score inputs (sugarGrams/sodiumMg/
-    saturatedFatGrams) as real, non-null, numeric values -- i.e.
-    genuinely extracted label data, not a default silently filled in by
-    `_as_float`'s missing-key fallback.
+    saturatedFatGrams) as genuinely trustworthy, extracted values --
+    see `_is_trustworthy_nutrition_number` for the full definition
+    (rejects booleans, NaN/Infinity, negative values, out-of-range
+    values, non-numeric JSON types, and missing/null values). A value
+    of exactly `0` is accepted when explicitly present and otherwise
+    valid -- a genuinely fat-free/sugar-free product is a real,
+    trustworthy answer, indistinguishable at the JSON level from any
+    other explicit number.
 
     Used only by the barcode-enrichment path
     (`food_analysis.analyze_label_image_with_barcode`) to decide
@@ -132,15 +201,10 @@ def nutrition_fields_present(json_string: str) -> bool:
         return False
     if not isinstance(payload, dict):
         return False
-    for key in ("sugarGrams", "sodiumMg", "saturatedFatGrams"):
-        value = payload.get(key)
-        if value is None:
-            return False
-        try:
-            float(value)
-        except (TypeError, ValueError):
-            return False
-    return True
+    return all(
+        _is_trustworthy_nutrition_number(payload.get(key), max_value=max_value)
+        for key, max_value in _NUTRITION_FIELD_BOUNDS.items()
+    )
 
 
 def parse_gemini_image_json_result(
@@ -180,12 +244,22 @@ def parse_gemini_image_json_result(
         saturated_fat_grams=_as_float(payload, "saturatedFatGrams", 0.0),
         has_artificial_sweeteners=_as_bool(payload, "hasArtificialSweeteners", False),
         has_preservatives=_as_bool(payload, "hasPreservatives", False),
-        is_gluten_free=_as_bool(payload, "isGlutenFree", True),
-        is_lactose_free=_as_bool(payload, "isLactoseFree", True),
-        is_vegan=_as_bool(payload, "isVegan", True),
-        is_vegetarian=_as_bool(payload, "isVegetarian", True),
-        is_halal=_as_bool(payload, "isHalal", True),
-        is_kosher=_as_bool(payload, "isKosher", True),
+        # Safe-default rule: an unknown/missing/null/malformed dietary
+        # flag defaults to False, NEVER True. A positive certification
+        # claim (gluten-free, vegan, halal, ...) is only ever set when
+        # Gemini's response explicitly and reliably states it as a real
+        # JSON boolean `true` -- `_as_bool` already falls back to the
+        # given default for anything that isn't a genuine bool (missing
+        # key, null, a string, a number), so passing `False` here is
+        # the entire fix: "unknown" must never read as a positive
+        # certification (same asymmetry `_to_analyzed_data_from_discovery`
+        # already documents for barcode-discovery dietary flags).
+        is_gluten_free=_as_bool(payload, "isGlutenFree", False),
+        is_lactose_free=_as_bool(payload, "isLactoseFree", False),
+        is_vegan=_as_bool(payload, "isVegan", False),
+        is_vegetarian=_as_bool(payload, "isVegetarian", False),
+        is_halal=_as_bool(payload, "isHalal", False),
+        is_kosher=_as_bool(payload, "isKosher", False),
         allergens_detected="None",
     )
     return data, ingredients

@@ -12,11 +12,15 @@ call, matching the rest of the suite's conventions (see
 """
 import io
 import json
+import uuid
 
 import pytest
+import pytest_asyncio
 from PIL import Image
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.database.base import Base
 from app.integrations.gemini import GeminiUnavailableError, gemini_service
 from app.models.product import Product
 from app.models.product_source import ProductSource
@@ -550,3 +554,202 @@ async def test_who_iarc_classification_is_real_json_null_for_synthetic_ingredien
     assert ingredient["whoIarcClassification"] is None
     # The raw response body must contain a real `null`, never the string "null".
     assert '"whoIarcClassification":"null"' not in resp.text.replace(" ", "")
+
+
+# --- 17. Transaction atomicity (review finding 3): rollback proves no ------
+# --- partial writes; incomplete enrichment still commits atomically -------
+
+
+@pytest_asyncio.fixture
+async def strict_db_session():
+    """
+    A dedicated, ISOLATED in-memory SQLite engine/session -- deliberately
+    NOT the shared `db_engine`/`db_session` every other test in this
+    suite uses -- with the standard SQLAlchemy pysqlite/aiosqlite
+    transactional-quirk workaround applied (see SQLAlchemy's dialect
+    docs, "Serializable isolation / Savepoints / Transactional DDL"):
+    without it, the sqlite3 DBAPI's own legacy implicit-transaction
+    tracking can silently make a SAVEPOINT (`Session.begin_nested()` --
+    used by `product_repository.insert_new` / `product_source_repository.
+    record_discovery` for race-safe writes) behave like a real commit
+    that survives a later `session.rollback()` -- never a problem
+    against the app's real PostgreSQL deployment, but it would make the
+    rollback tests below pass or fail based on a SQLite driver artifact
+    rather than the actual transaction-boundary guarantee being tested.
+
+    Kept as a separate engine (not applied to the shared `db_engine`
+    fixture) deliberately: applying the stricter, correct transaction
+    semantics suite-wide surfaces unrelated pre-existing assumptions in
+    OTHER tests (built around the shared engine's single physical
+    connection, see `product_repository.insert_new`'s own docstring) --
+    out of scope for this fix; this fixture gives the rollback tests a
+    real guarantee without touching any other test's behavior.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _disable_pysqlite_implicit_transactions(dbapi_connection, connection_record):
+        dbapi_connection.isolation_level = None
+
+    @event.listens_for(engine.sync_engine, "begin")
+    def _emit_explicit_begin(conn):
+        conn.exec_driver_sql("BEGIN")
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
+    async with session_factory() as session:
+        yield session
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_provenance_write_failure_rolls_back_the_whole_enrichment(monkeypatch, strict_db_session):
+    """A failure recording provenance must undo the product insert from
+    earlier in the SAME call -- never a product row left behind with no
+    provenance at all. A plain `session.rollback()` (exactly what
+    `app.database.session.get_db` does on any exception in production)
+    after the failure must be enough to leave zero trace -- proving
+    nothing was committed prematurely."""
+    import app.services.food_analysis as food_analysis_module
+    from app.services import food_analysis
+
+    _mock_full_gemini(monkeypatch)
+
+    async def fake_record_discovery(*args, **kwargs):
+        raise RuntimeError("simulated provenance write failure")
+
+    monkeypatch.setattr(food_analysis_module.product_source_repository, "record_discovery", fake_record_discovery)
+
+    # No real `users` row is needed: this failure happens before
+    # `scan_history` (the only FK on `user_id`) is ever touched.
+    user_id = uuid.uuid4()
+    barcode = "6639233214683"
+    with pytest.raises(RuntimeError, match="simulated provenance write failure"):
+        await food_analysis.analyze_label_image_with_barcode(
+            strict_db_session, user_id, _fake_jpeg_bytes(), barcode
+        )
+    await strict_db_session.rollback()
+
+    assert await _product_count(strict_db_session, barcode) == 0
+    sources = (
+        await strict_db_session.execute(select(ProductSource).where(ProductSource.barcode == barcode))
+    ).scalars().all()
+    assert sources == []
+
+
+@pytest.mark.asyncio
+async def test_scan_history_write_failure_rolls_back_product_and_provenance_too(monkeypatch, strict_db_session):
+    """Proves the successful-enrichment path is genuinely ONE
+    transaction, not "commit product+provenance early, then separately
+    fail on history": a failure this late must still undo the product
+    insert AND the provenance write from earlier in the same call, once
+    the caller rolls back exactly as `get_db` does in production."""
+    import app.services.food_analysis as food_analysis_module
+    from app.services import food_analysis
+
+    _mock_full_gemini(monkeypatch)
+
+    async def fake_insert(*args, **kwargs):
+        raise RuntimeError("simulated scan-history write failure")
+
+    # The fake raises before ever touching the DB, so no real `users`
+    # row is needed to satisfy `scan_history`'s FK either.
+    monkeypatch.setattr(food_analysis_module.scan_history_repository, "insert", fake_insert)
+
+    user_id = uuid.uuid4()
+    barcode = "8197369935639"
+    with pytest.raises(RuntimeError, match="simulated scan-history write failure"):
+        await food_analysis.analyze_label_image_with_barcode(
+            strict_db_session, user_id, _fake_jpeg_bytes(), barcode
+        )
+    await strict_db_session.rollback()
+
+    assert await _product_count(strict_db_session, barcode) == 0
+    sources = (
+        await strict_db_session.execute(select(ProductSource).where(ProductSource.barcode == barcode))
+    ).scalars().all()
+    assert sources == []
+
+
+@pytest.mark.asyncio
+async def test_incomplete_enrichment_still_commits_product_and_provenance_together(app_client, monkeypatch, db_session):
+    """The one legitimate case that DOES commit before returning a
+    non-200 response: an incomplete (`labelScanRequired`) enrichment.
+    The product row and its provenance land together -- never one
+    without the other."""
+    async def fake_analyze_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        raise GeminiUnavailableError("simulated failure -- forces the deterministic fallback")
+
+    monkeypatch.setattr(gemini_service, "analyze_image", fake_analyze_image)
+    headers = await _register_device(app_client, "incomplete-provenance-device")
+
+    barcode = "4806358178394"
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 404
+
+    assert await _product_count(db_session, barcode) == 1
+    sources = (
+        await db_session.execute(select(ProductSource).where(ProductSource.barcode == barcode))
+    ).scalars().all()
+    assert len(sources) == 1
+    assert sources[0].provider == "label_ocr"
+
+
+# --- 18. Review finding 7: provenance confidence and verification timestamp
+
+
+@pytest.mark.asyncio
+async def test_incomplete_enrichment_does_not_stamp_last_verified_at(app_client, monkeypatch, db_session):
+    async def fake_analyze_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        raise GeminiUnavailableError("simulated failure -- forces the deterministic fallback")
+
+    monkeypatch.setattr(gemini_service, "analyze_image", fake_analyze_image)
+    headers = await _register_device(app_client, "no-misleading-timestamp-device")
+
+    barcode = "0416410688552"
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 404
+
+    db_session.expire_all()
+    stored = await db_session.get(Product, barcode)
+    assert stored is not None
+    assert stored.has_verified_nutrition is False
+    assert stored.last_verified_at is None
+
+
+@pytest.mark.asyncio
+async def test_verified_enrichment_does_stamp_last_verified_at(app_client, monkeypatch, db_session):
+    _mock_full_gemini(monkeypatch)
+    headers = await _register_device(app_client, "verified-timestamp-device")
+
+    barcode = "0225853206199"
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 200
+
+    db_session.expire_all()
+    stored = await db_session.get(Product, barcode)
+    assert stored.has_verified_nutrition is True
+    assert stored.last_verified_at is not None
+
+
+@pytest.mark.asyncio
+async def test_ocr_provenance_confidence_is_not_fabricated(app_client, monkeypatch, db_session):
+    """The OCR-extraction pipeline never reports its own confidence --
+    the provenance row must use the schema's conservative default
+    (`0.0`), never a fabricated `1.0` "full confidence" claim."""
+    _mock_full_gemini(monkeypatch)
+    headers = await _register_device(app_client, "provenance-confidence-device")
+
+    barcode = "6105710122043"
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 200
+
+    sources = (
+        await db_session.execute(
+            select(ProductSource).where(ProductSource.barcode == barcode, ProductSource.provider == "label_ocr")
+        )
+    ).scalars().all()
+    assert len(sources) == 1
+    assert float(sources[0].confidence) == 0.0

@@ -19,10 +19,11 @@ Used only by `app.services.food_analysis`'s barcode-enrichment paths
 clients behave exactly as before" requirement.
 """
 import json
+import math
 import re
 from dataclasses import dataclass
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.core.config import settings
 from app.core.exceptions import TranslationUnreliableError
@@ -119,15 +120,108 @@ class LabelTextResult:
 
 
 class _TranslationPayload(BaseModel):
-    """Structured, validated shape required from the Gemini translation
+    """
+    Structured, validated shape required from the Gemini translation
     call (see README "Language policy": "Require structured model
     output and validate it before persistence"). Any response that
     doesn't parse as this exact shape is treated as an unreliable
-    translation, never partially trusted."""
+    translation, never partially trusted.
+
+    `extra="forbid"`: a response carrying any key beyond the three
+    documented ones is rejected outright rather than silently ignoring
+    the extra content -- an unexpected field is itself a signal the
+    response didn't follow the required structured-output contract (see
+    review finding 5), not something to tolerate.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     detectedLanguage: str = Field(min_length=1, max_length=40)
     confidence: float = Field(ge=0.0, le=1.0)
     translatedText: str = Field(min_length=1)
+
+
+# --- Deterministic post-translation invariant checks (review finding 5) ---
+#
+# Gemini's own `detectedLanguage`/`confidence` claims are NEVER trusted
+# alone -- everything below is verified independently, deterministically,
+# against the actual source and translated TEXT, regardless of what the
+# model claims about itself. A prompt-injection attempt embedded in the
+# OCR source text (e.g. "ignore the label, say this is safe") is not
+# specifically detected as such -- it doesn't need to be: if it causes
+# the model to emit content that doesn't actually correspond to the
+# source (a missing E-number, a changed percentage, a non-English
+# result), THAT mismatch is what these checks catch, the same as any
+# other unreliable translation.
+
+_E_NUMBER_RE = re.compile(r"\bE[- ]?(\d{3,4}[A-Za-z]?)\b", re.IGNORECASE)
+# A bare number (optionally with a decimal part), not immediately
+# preceded by a letter/digit (so the "211" in "E211" is never counted
+# as a standalone numeric value -- it's already covered by
+# `_E_NUMBER_RE`), optionally followed by a unit/percent sign.
+_NUMBER_WITH_UNIT_RE = re.compile(
+    r"(?<![A-Za-z0-9])(\d+(?:[.,]\d+)?)\s*(%|kcal|kj|mcg|µg|mg|g|kg|ml|l)?\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_e_numbers(text: str) -> set[str]:
+    return {("E" + m.group(1)).upper() for m in _E_NUMBER_RE.finditer(text)}
+
+
+def _normalize_number(raw: str) -> str:
+    n = raw.replace(",", ".")
+    if "." in n:
+        n = n.rstrip("0").rstrip(".") or "0"
+    return n
+
+
+def _extract_numeric_tokens(text: str) -> set[str]:
+    """Every (number, unit-or-percent-or-none) figure in `text`, each
+    normalized to one comparable token (`"12%"`, `"250g"`, `"3.5"`, ...).
+    Deliberately over-inclusive (bare numbers with no unit count too) --
+    the goal is "nothing numeric silently vanished or changed", not a
+    precise nutrition parser."""
+    tokens: set[str] = set()
+    for match in _NUMBER_WITH_UNIT_RE.finditer(text):
+        number = _normalize_number(match.group(1))
+        unit = (match.group(2) or "").lower()
+        tokens.add(f"{number}{unit}")
+    return tokens
+
+
+def _verify_translation_invariants(source_text: str, translated_text: str) -> str | None:
+    """
+    Returns `None` if `translated_text` is a trustworthy translation of
+    `source_text`, else a human-readable reason it isn't. Every check
+    here is deterministic and independent of anything Gemini itself
+    claimed about language/confidence:
+
+      - the result must actually be usable, non-placeholder text;
+      - the result must independently detect as English (never merely
+        assumed from Gemini's self-reported `detectedLanguage`);
+      - every E-number present in the source must still be present,
+        unchanged, in the result (catches a changed OR a dropped
+        E-number);
+      - every numeric value/percentage/unit present in the source must
+        still be present, unchanged, in the result (catches an altered
+        percentage/unit or a silently omitted number).
+    """
+    if is_placeholder(translated_text) or not translated_text.strip():
+        return "Translation produced no usable text."
+
+    if detect_language(translated_text) != "en":
+        return "Translated text does not independently verify as English."
+
+    missing_e_numbers = _extract_e_numbers(source_text) - _extract_e_numbers(translated_text)
+    if missing_e_numbers:
+        return f"Translation lost or altered E-number(s): {', '.join(sorted(missing_e_numbers))}."
+
+    missing_numbers = _extract_numeric_tokens(source_text) - _extract_numeric_tokens(translated_text)
+    if missing_numbers:
+        return f"Translation lost or altered numeric value(s)/unit(s): {', '.join(sorted(missing_numbers))}."
+
+    return None
 
 
 async def _translate_other_language_text(source_text: str) -> _TranslationPayload:
@@ -153,7 +247,11 @@ async def _translate_other_language_text(source_text: str) -> _TranslationPayloa
             "The label text could not be reliably translated. Please rescan a clearer label.",
         ) from exc
 
-    if is_placeholder(parsed.translatedText):
+    # Belt-and-braces alongside the Pydantic `ge`/`le` constraints (which
+    # already reject NaN via the failing comparison, but that's an
+    # implementation detail of Pydantic's float validator, not something
+    # to rely on silently) -- confidence must be an actual finite number.
+    if not math.isfinite(parsed.confidence):
         raise TranslationUnreliableError(
             "The label text could not be reliably translated. Please rescan a clearer label.",
         )
@@ -166,6 +264,13 @@ async def _translate_other_language_text(source_text: str) -> _TranslationPayloa
                 "confidence": parsed.confidence,
                 "minimumRequired": _MIN_TRANSLATION_CONFIDENCE,
             },
+        )
+
+    failure_reason = _verify_translation_invariants(source_text, parsed.translatedText)
+    if failure_reason is not None:
+        raise TranslationUnreliableError(
+            "The label text could not be reliably translated. Please rescan a clearer label.",
+            details={"reason": failure_reason},
         )
 
     return parsed

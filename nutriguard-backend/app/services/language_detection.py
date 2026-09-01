@@ -7,13 +7,23 @@ generic "other" bucket for everything else.
 Deliberately NOT a general-purpose language identifier and NOT merely a
 script classifier: `barcode_text_safety.is_safe_script` already answers
 the Latin-vs-Cyrillic-vs-other SCRIPT question, and script alone is not
-a language -- German/French/Albanian are Latin script; Russian/
-Ukrainian/Serbian are Cyrillic script; neither is English/Bulgarian.
-This module adds one further, cheap-but-real signal on top of script:
-function-word ("stopword") vocabulary overlap for the Latin case, and
-alphabet-exclusion plus Bulgarian-specific vocabulary for the Cyrillic
-case, so "some Latin text" is never conflated with "English text", and
-"some Cyrillic text" is never conflated with "Bulgarian text".
+a language -- German/French/Italian/Spanish/Romanian are Latin script;
+Russian/Ukrainian/Serbian are Cyrillic script; neither is English/
+Bulgarian. This module adds two further signals on top of script:
+
+  1. Alphabet exclusion (Cyrillic case only): a letter that exists in
+     another Cyrillic-alphabet language's standard orthography but not
+     in modern Bulgarian's is direct, independent-of-vocabulary evidence
+     the text isn't Bulgarian.
+  2. Lexical evidence, tiered by how ambiguous a word is across related
+     languages: a small set of STRONG words (distinctive food-label
+     vocabulary very unlikely to coincide with a neighboring language)
+     is enough on its own; anything else is a WEAK word (a short
+     function word like "in"/"or"/"per"/"и"/"на", which frequently
+     coincides across unrelated languages purely by chance) and
+     requires at least two DISTINCT weak hits together before they're
+     trusted -- a single ambiguous token must never tip the
+     classification by itself.
 
 No network call, no third-party model, no added dependency -- see
 README "Language policy" for why (task requirement: no new paid
@@ -25,7 +35,7 @@ fail toward "other" rather than a wrong "en"/"bg" -- a false "other"
 (real English/Bulgarian text this heuristic doesn't recognize) only
 costs one extra translation call; a false "en"/"bg" would silently
 treat unrelated foreign text as verified English/Bulgarian content,
-which is the failure mode the "positive evidence required" rule below
+which is the failure mode the "positive evidence required" rule above
 exists to prevent.
 """
 import re
@@ -36,39 +46,61 @@ _CYRILLIC_START, _CYRILLIC_END = 0x0400, 0x04FF
 _LATIN_EXTENDED_END = 0x024F
 
 # Letters that exist in other Cyrillic-alphabet languages' standard
-# orthography but NOT in the modern Bulgarian alphabet -- which has no
-# ы, э, ё, і, ї, є, ґ, ў, none of the Serbian-specific letters, and (per
-# the 1945 Bulgarian spelling reform) no soft sign ь either, unlike
-# Russian/Ukrainian/Belarusian, which use it constantly. Their presence
-# is direct evidence the text is Russian, Ukrainian, Belarusian or
-# Serbian -- not Bulgarian -- independent of vocabulary.
-_NON_BULGARIAN_CYRILLIC_LETTERS = set("ыэёьіїєґўјљњћђџ")
+# orthography but NOT in the modern Bulgarian alphabet: Bulgarian has
+# no ы, э, ё, і, ї, є, ґ, ў, and none of the Serbian-specific letters
+# (ј, љ, њ, ћ, ђ, џ). Their presence is direct evidence the text is
+# Russian, Ukrainian, Belarusian or Serbian -- not Bulgarian --
+# independent of vocabulary.
+#
+# NOTE: ь (soft sign) is deliberately NOT in this set. It IS a valid
+# modern Bulgarian letter (e.g. "шофьор" [chauffeur], "каньон"
+# [canyon], "монтьор" [mechanic]) -- far less frequent than in Russian,
+# but its mere presence must never by itself disqualify Bulgarian.
+_NON_BULGARIAN_CYRILLIC_LETTERS = set("ыэёіїєґўјљњћђџ")
 
-# Common Bulgarian function words and food-label vocabulary. Not
-# exhaustive -- a real label only needs one or two hits to be
-# confidently Bulgarian, since these words are extremely frequent in
-# any Bulgarian sentence (unlike content words, which vary label to
-# label).
-_BULGARIAN_STOPWORDS = {
-    "и", "на", "за", "със", "с", "от", "без", "или", "как", "не", "да", "може",
-    "съдържа", "съдържат", "съставки", "продукт", "тегло", "нето", "грам", "грама",
-    "захар", "сол", "вода", "мляко", "пшеница", "брашно", "яйце", "яйца",
-    "масло", "мазнини", "въглехидрати", "белтъци", "енергийна",
-    "стойност", "срок", "годност", "партида", "опаковано", "алергени",
+# STRONG words: distinctive enough (exact spelling, food-label-specific)
+# that a single hit is trusted on its own -- picked to be very unlikely
+# to coincide with German/French/Italian/Spanish/Romanian/Russian/
+# Ukrainian text by chance.
+_ENGLISH_STRONG_WORDS = {"ingredients", "contains", "allergen", "allergens", "manufactured"}
+_BULGARIAN_STRONG_WORDS = {
+    "захар", "съставки", "съдържа", "съдържат", "пшеница",
+    "въглехидрати", "белтъци", "годност", "алергени",
 }
 
-# Common English function words and food-label vocabulary. Same
-# rationale as above.
-_ENGLISH_STOPWORDS = {
-    "the", "and", "with", "from", "for", "contains", "ingredients",
-    "may", "of", "in", "or", "not", "made", "product", "water",
-    "sugar", "salt", "milk", "wheat", "flour", "egg", "eggs", "oil", "free",
-    "net", "weight", "energy", "fat", "protein", "carbohydrate",
-    "carbohydrates", "per", "serving", "allergen", "allergens", "best",
+# WEAK words: common function words / generic label vocabulary that
+# frequently coincides with a neighboring language purely by chance
+# (Bulgarian "и"/"на"/"за" are shared Slavic function words). A single
+# weak hit proves nothing; at least two DISTINCT weak hits are required
+# before they're trusted as evidence (see `_has_sufficient_evidence`).
+#
+# Deliberately EXCLUDES short, cross-language-collision-prone
+# prepositions like "in" (also German/Dutch), "or" (also French "gold"),
+# "per" (also Italian "for"), and "of" -- even several such tokens
+# together must never be read as English evidence; see the module
+# docstring and the "single ambiguous token" review finding.
+_ENGLISH_WEAK_WORDS = {
+    "the", "and", "with", "from", "for", "may", "not",
+    "made", "product", "water", "sugar", "salt", "milk", "wheat", "flour",
+    "egg", "eggs", "oil", "free", "net", "weight", "energy", "fat",
+    "protein", "carbohydrate", "carbohydrates", "serving", "best",
     "before", "use", "store", "keep",
 }
+_BULGARIAN_WEAK_WORDS = {
+    "и", "на", "за", "със", "с", "от", "без", "или", "как", "не", "да", "може",
+    "продукт", "тегло", "нето", "грам", "грама", "сол", "вода", "мляко",
+    "брашно", "яйце", "яйца", "масло", "мазнини", "енергийна",
+    "стойност", "срок", "партида", "опаковано",
+}
 
-_MIN_STOPWORD_HITS = 1
+_MIN_WEAK_HITS = 2
+
+
+def _has_sufficient_evidence(words: list[str], strong: set[str], weak: set[str]) -> bool:
+    distinct = set(words)
+    if distinct & strong:
+        return True
+    return len(distinct & weak) >= _MIN_WEAK_HITS
 
 
 def _script_counts(text: str) -> tuple[int, int, int]:
@@ -113,11 +145,13 @@ def detect_language(text: str | None) -> str:
         lowered = text.lower()
         if any(ch in _NON_BULGARIAN_CYRILLIC_LETTERS for ch in lowered):
             return "other"
-        hits = sum(1 for w in words if w in _BULGARIAN_STOPWORDS)
-        return "bg" if hits >= _MIN_STOPWORD_HITS else "other"
+        if _has_sufficient_evidence(words, _BULGARIAN_STRONG_WORDS, _BULGARIAN_WEAK_WORDS):
+            return "bg"
+        return "other"
 
     if latin >= cyrillic and latin >= other:
-        hits = sum(1 for w in words if w in _ENGLISH_STOPWORDS)
-        return "en" if hits >= _MIN_STOPWORD_HITS else "other"
+        if _has_sufficient_evidence(words, _ENGLISH_STRONG_WORDS, _ENGLISH_WEAK_WORDS):
+            return "en"
+        return "other"
 
     return "other"

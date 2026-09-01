@@ -74,7 +74,14 @@ _IMAGE_PROMPT = (
     "Extract all ingredients from this food label image and analyze them scientifically. "
     "Return JSON with keys: productName, brand, sugarGrams, sodiumMg, saturatedFatGrams, "
     "hasArtificialSweeteners, hasPreservatives, isGlutenFree, isLactoseFree, isVegan, "
-    "isVegetarian, isHalal, isKosher, novaGroup, rawIngredientText, ingredients array."
+    "isVegetarian, isHalal, isKosher, novaGroup, rawIngredientText, ingredients array. "
+    "For sugarGrams, sodiumMg and saturatedFatGrams: report the real per-100g figure only "
+    "when it is actually printed on the label (or you can reliably read it); if that value "
+    "is unreadable, illegible, cut off, or simply not present on the label, return JSON "
+    "null for that field -- never guess a number and never silently fill in 0 for a value "
+    "you could not actually read. For isGlutenFree, isLactoseFree, isVegan, isVegetarian, "
+    "isHalal and isKosher: return true only when the label explicitly and reliably "
+    "supports it; otherwise return false -- never guess true."
 )
 
 _TRANSLATION_PROMPT_TEMPLATE = """

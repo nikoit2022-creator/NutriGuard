@@ -697,7 +697,9 @@ def _apply_label_enrichment(
     """Mutates `existing` IN PLACE, filling only what it is missing --
     see the merge rules in the section docstring above. Never called
     for a row that is already `is_verified and has_verified_nutrition`
-    (see `_persist_enriched_product`)."""
+    (see `_persist_enriched_product`). Does NOT commit -- the caller
+    controls the single outer-transaction commit point (review finding
+    3; see `_finalize_barcode_enrichment`)."""
     if not _is_meaningful_identity(existing.product_name):
         existing.product_name = data.product_name
     if not _is_meaningful_identity(existing.brand):
@@ -730,7 +732,13 @@ def _apply_label_enrichment(
             existing.source_confidence = None
 
     existing.is_verified = existing.has_verified_nutrition
-    existing.last_verified_at = datetime.now(timezone.utc)
+    # Review finding 7: `last_verified_at` is a claim that verification
+    # actually happened -- only ever stamp it when `has_verified_nutrition`
+    # is (now, or still) True. An enrichment attempt that leaves the row
+    # exactly as incomplete as before must not receive a fresh timestamp
+    # that would misleadingly suggest it was just re-verified.
+    if existing.has_verified_nutrition:
+        existing.last_verified_at = datetime.now(timezone.utc)
     existing.timestamp = int(time.time() * 1000)
 
 
@@ -742,7 +750,7 @@ def _new_product_from_label(
     source_label: str,
 ) -> Product:
     is_complete = _label_nutrition_is_complete(data, nutrition_known)
-    return _to_product_model(
+    product = _to_product_model(
         canonical_barcode,
         data,
         ingredients,
@@ -751,6 +759,13 @@ def _new_product_from_label(
         is_verified=is_complete,
         has_verified_nutrition=is_complete,
     )
+    if not is_complete:
+        # `_to_product_model` unconditionally stamps `last_verified_at`
+        # (correct for its OTHER callers, which only ever create
+        # fully-verified rows) -- an incomplete enrichment must not
+        # receive a misleading verification timestamp (review finding 7).
+        product.last_verified_at = None
+    return product
 
 
 async def _persist_enriched_product(
@@ -763,27 +778,42 @@ async def _persist_enriched_product(
     source_label: str,
 ) -> tuple[Product, bool]:
     """
-    Transactional, concurrency-safe insert-or-merge for one barcode +
-    label analysis. Returns `(product, used_label_analysis)` --
-    `used_label_analysis` is False only when an already fully-trusted
-    row made the fresh label analysis unnecessary (see the section
-    docstring's first merge rule).
+    Insert-or-merge for one barcode + label analysis. Returns
+    `(product, used_label_analysis)` -- `used_label_analysis` is False
+    only when an already fully-trusted row made the fresh label
+    analysis unnecessary (see the section docstring's first merge rule).
 
-    Reuses `product_repository.insert_new`'s SAVEPOINT-based race
-    handling for the brand-new-row case (same guarantee
-    `_persist_discovered_product` relies on above). The existing-row
-    merge path mutates the already-fetched ORM instance in place and
-    flushes -- the same best-effort (not fully linearizable) guarantee
-    `_apply_discovered_fields` already relies on for barcode discovery;
-    see README "10.6" for why a single shared SQLite test connection
-    cannot exercise true cross-transaction races any more faithfully
-    than the existing discovery-merge tests do.
+    Deliberately does NOT commit: the caller
+    (`_finalize_barcode_enrichment`) owns the single outer-transaction
+    commit point so product changes, provenance, score and scan history
+    all land atomically together or not at all (review finding 3).
+
+    Concurrency guarantee -- stated precisely, not overclaimed (review
+    finding 3): the brand-new-row case reuses `product_repository.
+    insert_new`'s SAVEPOINT-based primary-key-conflict handling, which
+    IS genuinely safe under real concurrent transactions (verified
+    against real, separate PostgreSQL connections -- see
+    `tests/postgres/test_concurrent_enrichment_postgres.py`): two
+    concurrent enrichments of the same brand-new barcode always
+    converge on exactly one row, never a duplicate, never a crash. The
+    EXISTING-row merge path (`_apply_label_enrichment` above) is only
+    BEST EFFORT: it reads `existing`, mutates it in memory, and flushes
+    -- with no optimistic-concurrency version column on `Product`, two
+    truly concurrent enrichments of the same already-existing
+    (incomplete) row can race, and the later COMMIT wins ("last write
+    wins"), not a merge of both attempts. This does not corrupt data or
+    duplicate rows -- SQLAlchemy's identity map plus the primary-key
+    UPDATE keeps it to one row either way -- but it is not linearizable.
+    Closing that gap would need a version/`xmin`-based optimistic lock
+    on `Product`, which is a real schema change deliberately left out of
+    this PR's scope; see the Postgres test file for the concurrent-INSERT
+    guarantee that IS proven, and this docstring as the honest statement
+    of what is not.
     """
     if existing is None:
         candidate = _new_product_from_label(canonical_barcode, data, ingredients, nutrition_known, source_label)
         inserted = await product_repository.insert_new(db, candidate)
         if inserted is not None:
-            await db.commit()
             return inserted, True
         # Lost a race with a concurrent enrichment/discovery of the same barcode.
         existing = await product_repository.get_by_barcode(db, canonical_barcode)
@@ -795,8 +825,22 @@ async def _persist_enriched_product(
 
     _apply_label_enrichment(existing, data, ingredients, nutrition_known, source_label)
     await db.flush()
-    await db.commit()
     return existing, True
+
+
+# Review finding 7: the OCR-extraction pipeline (Gemini image analysis
+# for `label_ocr`, the text-analysis chain for `ocr_text`) never
+# reports its own extraction-quality/confidence figure -- unlike the
+# SEPARATE translation call, which does (self-reported, but never
+# trusted alone -- see `label_language._verify_translation_invariants`).
+# There is therefore no real per-request confidence value available for
+# the OCR provenance row, and `1.0` was a fabricated, unjustified "full
+# confidence" claim. `0.0` is not "zero confidence this is right" --
+# it's the conservative, explicitly-unknown sentinel already built into
+# the schema (`ProductSource.confidence`'s own `default=0`, the same
+# value `product_source_repository` already uses for "no signal"),
+# reused here rather than inventing a new nullable column.
+_OCR_PROVENANCE_CONFIDENCE_UNKNOWN = 0.0
 
 
 async def _record_label_provenance(
@@ -816,7 +860,9 @@ async def _record_label_provenance(
     `raw_metadata_json` already carry everything the language policy
     needs to record (detected language, whether translation was used,
     translation model/confidence/status). See README section 11.4
-    "Provenance" / 11.5 "Why no migration was needed".
+    "Provenance" / 11.5 "Why no migration was needed". Does NOT commit
+    -- see `_finalize_barcode_enrichment`'s single outer-transaction
+    commit point (review finding 3).
     """
     ocr_result = ProviderProductResult(
         provider=provider_name,
@@ -831,13 +877,14 @@ async def _record_label_provenance(
             "detectedLanguage": label_result.detected_language,
             "translationUsed": label_result.translation_used,
             "status": label_result.status,
+            "confidenceBasis": "not reported by the OCR/extraction pipeline",
         },
     )
     await product_source_repository.record_discovery(
         db,
         barcode=canonical_barcode,
         result=ocr_result,
-        confidence=1.0,
+        confidence=_OCR_PROVENANCE_CONFIDENCE_UNKNOWN,
         is_conflicting=False,
         used_for_persisted_product=used_for_persisted_product,
     )
@@ -924,23 +971,56 @@ async def _finalize_barcode_enrichment(
     scan_type: ScanType,
     provenance_provider: str,
 ) -> dict:
-    """Shared tail end of `analyze_label_image_with_barcode` and
+    """
+    Shared tail end of `analyze_label_image_with_barcode` and
     `analyze_ocr_text_with_barcode`: applies the language policy,
     resolves/merges/persists the canonical product, records provenance,
     and returns the same `FullProductAnalysisOut`-shaped dict every
     other `analyze_*` function returns (API Contract compatible -- no
-    second response shape)."""
+    second response shape).
+
+    Transaction boundaries (review finding 3): exactly ONE `db.commit()`
+    call on every path through this function, not several --
+      - incomplete enrichment (nutrition still not verified after the
+        merge): ONE commit persists the product change and its
+        provenance together, then `ProductNotFoundError` is raised
+        (`labelScanRequired`) -- never a product row committed without
+        its provenance, and never a partial write left behind by a
+        later failure, because nothing before that commit is persisted
+        either.
+      - successful (verified) enrichment: product change + provenance +
+        Health Score + scan history are all flushed in-memory first and
+        committed together in the ONE final `db.commit()` below -- a
+        failure at ANY point before it (a provenance write error, a
+        scan-history write error, anything) rolls back the ENTIRE
+        attempt, including the product merge/insert, via `get_db`'s
+        `except Exception: await session.rollback()` (see
+        `app/database/session.py`). See
+        `tests/integration/test_label_barcode_enrichment.py`'s
+        `test_*_failure_rolls_back_*` tests for direct proof.
+    """
     label_result = await resolve_label_text(data.raw_ingredient_text)
-    if label_result.canonical_text.strip() != data.raw_ingredient_text.strip():
+
+    # Review finding 6: canonical ingredient normalization runs for ANY
+    # real language content -- English, Bulgarian, or mixed EN/BG, and
+    # of course a translated result -- not only when `canonical_text`
+    # happens to differ textually from the original. The previous
+    # `if canonical_text != raw_ingredient_text` gate silently skipped
+    # this for pure-Bulgarian content (a single Bulgarian segment's
+    # `canonical_text` is normally byte-identical to the original), so
+    # its tokens never got Bulgarian-alias-substituted (see
+    # `label_language.bulgarian_ingredient_alias`) and could never
+    # dedupe against an equivalent English mention. Only a genuinely
+    # empty/"unknown" result (nothing tokenizable at all) is skipped.
+    if label_result.detected_language != "unknown" and label_result.canonical_text.strip():
         tokens = normalize_and_extract_tokens(label_result.canonical_text)
         # Bulgarian ingredient-list tokens are aliased to their English
-        # canonical form for MATCHING purposes only (see
-        # `label_language.bulgarian_ingredient_alias`) -- an English and
-        # a Bulgarian mention of the same ingredient then resolve to the
-        # same matched/synthetic ingredient instead of two, satisfying
-        # the "deduplicate equivalent ingredients" language policy. The
-        # text actually stored (`data.raw_ingredient_text`, set below)
-        # is untouched by this substitution.
+        # canonical form for MATCHING purposes only -- an English and a
+        # Bulgarian mention of the same ingredient then resolve to the
+        # same matched/synthetic ingredient instead of two. The text
+        # actually stored (`data.raw_ingredient_text`, set below) is
+        # untouched by this substitution -- English AND Bulgarian
+        # content are both preserved verbatim in what's displayed.
         matchable_tokens = [label_language.bulgarian_ingredient_alias(t) or t for t in tokens]
         norm = match_against_database(matchable_tokens, await ingredient_repository.get_all(db))
         rebuilt: list[Any] = list(norm.matched_ingredients)
@@ -948,7 +1028,7 @@ async def _finalize_barcode_enrichment(
             rebuilt.append(create_synthetic_ingredient(unknown))
         if rebuilt:
             ingredients = rebuilt
-        data.raw_ingredient_text = label_result.canonical_text
+    data.raw_ingredient_text = label_result.canonical_text
 
     canonical_barcode = barcode_info.gtin13
     alias_keys = barcode_validation.alias_keys(barcode_info)
@@ -973,9 +1053,14 @@ async def _finalize_barcode_enrichment(
         label_result,
         used_for_persisted_product=used_label_analysis,
     )
-    await db.commit()
 
     if not product.has_verified_nutrition:
+        # Atomically persist ONLY the permitted incomplete identity +
+        # provenance (one commit, nothing else -- no Health Score, no
+        # scan history for a row that isn't verified) before surfacing
+        # the same structured `labelScanRequired` response
+        # `/scan/barcode` already uses for this situation.
+        await db.commit()
         raise ProductNotFoundError(
             f"Product {product.barcode} was found but lacks sufficient verified data for a Health Score.",
             details=_label_scan_required_details(product),
@@ -985,7 +1070,6 @@ async def _finalize_barcode_enrichment(
     profile = await _get_profile_namespace(db, user_id)
     score, warnings = _score_and_warnings(product, ingredients_out, profile)
     product.health_score = score
-    await db.flush()
 
     await scan_history_repository.insert(
         db,
@@ -998,6 +1082,9 @@ async def _finalize_barcode_enrichment(
             scan_type=scan_type,
         ),
     )
+    # The single outer-transaction commit: product changes, provenance,
+    # Health Score, and scan history all land together, or (on any
+    # exception above) none of them do.
     await db.commit()
 
     return {

@@ -12,6 +12,64 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V9 (bug fixes, PR #9 review):** Eight correctness/safety issues found
+in review of the V8 barcode + label enrichment feature, fixed before
+merge:
+1. Gemini image dietary flags (`isGlutenFree`/`isLactoseFree`/`isVegan`/
+   `isVegetarian`/`isHalal`/`isKosher`) defaulted to `true` for a
+   missing/null/malformed value — same "unknown must never read as a
+   positive certification" bug the barcode-discovery bridge already
+   fixed for external providers (V6). Now defaults to `false`.
+2. `nutrition_fields_present` accepted anything `float()` didn't raise
+   on — a JSON boolean, `NaN`/`Infinity`, a negative number, an
+   out-of-range number, or a numeric string all passed. Now rejects all
+   of those and requires a genuine, finite, non-negative, in-range JSON
+   number; the Gemini image prompt was also updated to require `null`
+   (never a guessed/defaulted number) for a nutrition value that isn't
+   actually legible on the label.
+3. `_persist_enriched_product`/`_finalize_barcode_enrichment` committed
+   up to four times per request (product, then provenance, then score+
+   history) despite being described as transactional — a mid-sequence
+   failure could leave a product row with no provenance, or other
+   partial state. Restructured to exactly one commit per outcome (see
+   11.6); also surfaced and fixed a real SQLite/pysqlite test-harness
+   quirk where a SAVEPOINT could silently survive a `rollback()` (see
+   11.6's note on `tests/integration/test_label_barcode_enrichment.py`'s
+   `strict_db_session` fixture).
+4. Bulgarian alphabet handling incorrectly excluded `ь` (a valid modern
+   Bulgarian letter) as "non-Bulgarian", and a single ambiguous Latin
+   token (`"in"`/`"or"`/`"per"`, coincidentally real words in other
+   languages too) could tip a classification to English on its own. See
+   11.3 for the corrected two-tier (strong/weak) evidence model.
+5. Translation validation trusted Gemini's own self-reported
+   `detectedLanguage`/`confidence` and didn't verify the translation
+   actually corresponds to the source. Now independently verifies
+   (never merely assumes) that the result is actually English, every
+   source E-number survived unchanged, and every numeric value/
+   percentage/unit survived unchanged — and the response schema now
+   forbids unexpected extra fields.
+6. Canonical ingredient normalization (the Bulgarian-alias-aware
+   re-tokenization pass) only ran when `canonical_text` textually
+   differed from the raw OCR text, which silently skipped pure-
+   Bulgarian labels (whose canonical text is normally identical to the
+   original) — Bulgarian ingredients never got a chance to dedupe
+   against an equivalent English mention. Now runs for any real
+   language content (English, Bulgarian, mixed, or translated).
+7. OCR provenance was recorded with a hardcoded `confidence=1.0`, and
+   an incomplete enrichment still stamped `last_verified_at` as if it
+   had just been verified. Fixed: OCR provenance now uses the schema's
+   own conservative `0.0` default (there is no real per-request
+   confidence signal for OCR extraction, unlike translation, which
+   already had one); `last_verified_at` is only ever set when
+   `has_verified_nutrition` is true.
+8. `openapi.json` had been hand-patched rather than generated from the
+   repository's pinned dependencies. Regenerated and verified against a
+   throwaway container running the exact pinned `requirements.txt` on
+   Python 3.12 (matching CI) — byte-for-byte identical to the prior
+   hand patch, confirming it was accurate, but now sourced correctly.
+
+See section 11 (11.2–11.7) for the full detail on each.
+
 **V8 (feature): Barcode + label enrichment and multilingual label
 normalization.** When barcode discovery (V4/V5) cannot produce a
 complete product and returns `labelScanRequired`, the client can now
@@ -178,14 +236,18 @@ source .venv/bin/activate
 pytest -q
 ```
 
-The full suite (**206 tests**) runs against an in-memory SQLite database
-via `aiosqlite` — no Docker or Postgres required, and it runs in a few
-seconds. This is intentional: SQLite is good enough to validate all
-business logic and API behavior, while the actual deployment always
-targets Postgres (see `alembic/versions/` for the Postgres-generated
-migrations, authored and applied against a real local PostgreSQL 16
-instance during development, not just SQLite — see section 10.7 for how
-the barcode-discovery migration specifically was verified).
+The full suite (**247 tests**: 246 run by default + 1 opt-in) runs
+against an in-memory SQLite database via `aiosqlite` — no Docker or
+Postgres required, and it runs in a few seconds. This is intentional:
+SQLite is good enough to validate all business logic and API behavior,
+while the actual deployment always targets Postgres (see
+`alembic/versions/` for the Postgres-generated migrations, authored and
+applied against a real local PostgreSQL 16 instance during development,
+not just SQLite — see section 10.7 for how the barcode-discovery
+migration specifically was verified, and section 11.6 for the one
+opt-in test, `tests/postgres/test_concurrent_enrichment_postgres.py`,
+which needs a real disposable Postgres instance and is skipped by
+default).
 
 Every barcode-discovery test mocks its HTTP layer (`httpx.MockTransport`
 for provider-adapter tests, in-memory fake `BarcodeProductProvider`
@@ -846,18 +908,25 @@ implement:
   placeholder zeros).
 - `has_verified_nutrition` only flips to `true` when the label analysis
   itself produced genuinely known nutrition — all three of
-  sugar/sodium/saturated-fat actually present in the model's structured
-  output (`gemini_image_parser.nutrition_fields_present`), never a
-  heuristic fallback guess — AND non-empty ingredient text; the same
-  "all three required" gate `barcode_discovery.discover_product`
-  already uses for external providers. A row that doesn't clear this
-  gate stays `labelScanRequired` (`404 PRODUCT_NOT_FOUND`, the same
+  sugar/sodium/saturated-fat present as a genuine, finite, non-negative,
+  physically-defensible-range JSON number in the model's structured
+  output (`gemini_image_parser.nutrition_fields_present`) — never a
+  boolean, `NaN`/`Infinity`, a negative or out-of-range value, a numeric
+  string, or a heuristic fallback guess — AND non-empty ingredient text;
+  the same "all three required" gate `barcode_discovery.discover_product`
+  already uses for external providers. The Gemini image prompt itself
+  requires `null` (never a guessed number) for a value that isn't
+  actually legible on the label. A row that doesn't clear this gate
+  stays `labelScanRequired` (`404 PRODUCT_NOT_FOUND`, the same
   structured payload `/scan/barcode` returns for an incomplete
   discovery), never a confident-looking score from placeholder data.
 - `is_verified` is kept equal to `has_verified_nutrition`: an
   incomplete row stays open to a *later* enrichment attempt for the
   same barcode; only a genuinely complete one is protected from being
-  overwritten again.
+  overwritten again. `last_verified_at` is only ever stamped when
+  `has_verified_nutrition` ends up `true` — an enrichment attempt that
+  leaves a row exactly as incomplete as before must not carry a
+  timestamp implying it was just re-verified.
 - `/scan/ocr-text`'s barcode path always treats nutrition as NOT
   genuinely known: that endpoint preserves the pre-existing, documented
   `gemini_result_parser.py` quirk where nutrition figures come from the
@@ -878,12 +947,22 @@ implement:
 
 - **Semantic, not script-based, detection.** Script (Latin/Cyrillic) is
   only a first filter; English/Bulgarian classification additionally
-  requires food-label vocabulary evidence (a small stopword set per
-  language) and, for Cyrillic, the *absence* of letters exclusive to
-  other Cyrillic-alphabet languages (Russian/Ukrainian/Belarusian/
-  Serbian) — so a German/French/Albanian label is never misread as
-  English, and a Russian/Ukrainian label is never misread as Bulgarian,
-  merely because the script matches.
+  requires food-label vocabulary evidence, tiered by ambiguity: a small
+  set of STRONG words (`"ingredients"`, `"contains"`, `"захар"`,
+  `"съставки"`, ...) distinctive enough to trust on their own, and a
+  larger set of WEAK words (common function words like `"water"`/
+  `"вода"`) that require **at least two distinct hits together** before
+  they're trusted — a single ambiguous token (`"in"`/`"or"`/`"per"`,
+  coincidentally real words in German/French/Italian too) can never tip
+  the classification by itself. For Cyrillic text, the classification
+  additionally requires the *absence* of letters exclusive to other
+  Cyrillic-alphabet languages (Russian/Ukrainian/Belarusian/Serbian —
+  е.g. `ы`/`э`/`ё`/`і`/`ї`/`є`); modern Bulgarian's own `ь` (e.g.
+  `"шофьор"`, chauffeur) is correctly NOT treated as excluding evidence.
+  Net effect: a German/French/Italian/Spanish/Romanian label is never
+  misread as English, and a Russian/Ukrainian label is never misread as
+  Bulgarian, merely because the script (or one coincidental word)
+  matches.
 - **Section splitting + preference.** Raw label text is split on
   language-section headers (`Ingredients:`/`Съставки:`/`Zutaten:`/...),
   line breaks, and `/`/`|` dividers, and each section is classified
@@ -904,14 +983,27 @@ implement:
   canonical English via the existing `GeminiService` (no new provider
   or API key) with a dedicated, injection-hardened prompt (the OCR text
   is explicitly framed as data, never instructions) requiring
-  structured JSON (`detectedLanguage`/`confidence`/`translatedText`),
-  validated with a Pydantic model before use. A response that fails to
-  parse, fails validation, is a placeholder, or reports confidence
-  below `label_language._MIN_TRANSLATION_CONFIDENCE` (0.55) raises
+  structured JSON (`detectedLanguage`/`confidence`/`translatedText`,
+  **extra fields forbidden**), validated with a strict Pydantic model
+  before use. Gemini's own `detectedLanguage`/`confidence` self-report
+  is never trusted alone — every translation is additionally verified
+  **deterministically**, independent of anything the model claims about
+  itself: the result must independently detect as English (via the same
+  `language_detection.detect_language`, not Gemini's claim), every
+  E-number present in the source must still be present unchanged in the
+  result, and every numeric value/percentage/unit present in the source
+  must still be present unchanged in the result. A response that fails
+  to parse, fails schema validation (including an unexpected extra
+  field), reports non-finite/out-of-range confidence, is a placeholder,
+  reports confidence below `label_language._MIN_TRANSLATION_CONFIDENCE`
+  (0.55), or fails any of those deterministic invariant checks raises
   `TranslationUnreliableError` (`422 LABEL_TRANSLATION_UNRELIABLE`) —
-  nothing is persisted for that request. The prompt explicitly asks the
-  model to preserve E-numbers/percentages/quantities/units and never
-  translate brand/proper nouns.
+  nothing is persisted for that request. This also means a
+  prompt-injection attempt embedded in the OCR source text doesn't need
+  to be specifically detected as such: if it causes the model to
+  produce content that doesn't actually correspond to the source (a
+  changed E-number, a missing quantity, non-English output), that
+  mismatch alone is what gets it rejected.
 - **Original text preserved.** The original OCR/label text is always
   kept (see 11.4, `label_ocr` provenance row's `raw_ingredient_text`)
   even when a translated or EN+BG-merged canonical text is what's
@@ -930,6 +1022,14 @@ row records the source language, the Gemini model, and the confidence
 score (`ProductSource.confidence`). Both use the column set every other
 provider provenance row already uses.
 
+The OCR/extraction pipeline itself never reports its own confidence
+(unlike the separate translation call, which does — self-reported, but
+never trusted alone, see 11.3) — so the `label_ocr`/`ocr_text`
+provenance row's `confidence` uses the schema's own conservative `0.0`
+default (the same "no signal" sentinel `product_source_repository`
+already uses elsewhere), never a fabricated `1.0` "full confidence"
+claim.
+
 ### 11.5 Why no migration was needed
 
 `Product.source` / `source_confidence` / `is_verified` /
@@ -943,7 +1043,67 @@ schema. The Alembic chain is therefore unchanged: one head
 (`cf5522508f9a`), same parent (`64dfe47cbbf7`) — see
 `tests/unit/test_barcode_discovery_migration.py`.
 
-### 11.6 Tests
+### 11.6 Transaction boundaries and concurrency
+
+`_finalize_barcode_enrichment` makes exactly ONE `db.commit()` call on
+every path, not several:
+
+- **Incomplete enrichment** (nutrition still not verified after the
+  merge): one commit persists the product change and its provenance
+  *together*, then `ProductNotFoundError` (`labelScanRequired`) is
+  raised — never a product row committed without its provenance.
+- **Successful (verified) enrichment**: the product merge/insert,
+  provenance write(s), Health Score, and scan-history insert are all
+  flushed in-memory first and committed together in one final
+  `db.commit()` — a failure at any point before it (a provenance write
+  error, a scan-history write error, anything) rolls back the *entire*
+  attempt via `app.database.session.get_db`'s
+  `except Exception: await session.rollback()`, including the product
+  merge/insert from earlier in the same call. Proven directly by
+  `tests/integration/test_label_barcode_enrichment.py`'s
+  `test_provenance_write_failure_rolls_back_the_whole_enrichment` and
+  `test_scan_history_write_failure_rolls_back_product_and_provenance_too`.
+
+**Concurrency guarantee — stated precisely, not overclaimed:**
+
+- The brand-new-row INSERT race is **genuinely safe**: it reuses
+  `product_repository.insert_new`'s SAVEPOINT-based primary-key-conflict
+  handling, and this is verified against **real, separate PostgreSQL
+  connections** (not the SQLite test suite's single shared connection —
+  see the note below) in
+  `tests/postgres/test_concurrent_enrichment_postgres.py`: two
+  concurrent enrichments of the same brand-new barcode always converge
+  on exactly one row, never a duplicate, never a crash. This test is
+  opt-in (`NUTRIGUARD_TEST_POSTGRES_URL`) against a disposable Postgres
+  instance — see the file's own docstring for how to run it; it is not
+  part of the default `pytest -q` run, the same convention this project
+  already uses for the barcode-discovery migration (section 10.7).
+- The EXISTING-row merge path (`_apply_label_enrichment`) is **only
+  best effort**: `Product` has no optimistic-concurrency version
+  column, so two truly concurrent enrichments of the same
+  already-existing (incomplete) row can race, and the later `COMMIT`
+  wins ("last write wins"), not a merge of both attempts. This does not
+  corrupt data or duplicate rows (SQLAlchemy's identity map plus the
+  primary-key `UPDATE` keeps it to one row either way), but it is not
+  linearizable. Closing that gap would need a version/`xmin`-based
+  optimistic lock on `Product`, deliberately left out of this PR's
+  scope as a real schema change.
+- The SQLite-backed default test suite's single shared connection
+  (`tests/conftest.py`'s `db_engine`) cannot faithfully exercise either
+  guarantee directly — see `product_repository.insert_new`'s own
+  docstring. Its rollback tests instead use a **dedicated, isolated**
+  SQLite engine/session (`test_label_barcode_enrichment.py`'s
+  `strict_db_session` fixture) with the standard SQLAlchemy
+  pysqlite/aiosqlite workaround applied (disabling the DBAPI's own
+  legacy implicit-transaction tracking, which otherwise can silently
+  make a SAVEPOINT survive a `session.rollback()` — a SQLite-driver-only
+  quirk, never a problem against real PostgreSQL). This fix is
+  deliberately scoped to that one fixture, not applied to the shared
+  `db_engine` every other test uses, to avoid surfacing unrelated
+  pre-existing assumptions elsewhere in the suite that are out of scope
+  for this PR.
+
+### 11.7 Tests
 
 `tests/unit/test_language_detection.py`, `tests/unit/test_label_language.py`,
 and `tests/integration/test_label_barcode_enrichment.py` cover: backward
@@ -957,17 +1117,37 @@ being idempotent; verified data never being overwritten by lower-
 confidence OCR; incomplete nutrition staying `labelScanRequired`;
 invalid-barcode structured errors; English preferred over another-
 language duplicate; Bulgarian preferred over another-language
-duplicate; mixed English/Bulgarian deduplication; other-language-only
-translation to canonical English; translation failure/low confidence
-returning a controlled error with nothing persisted; E-numbers/
-percentages/quantities/units surviving translation; and no raw image
-bytes ever being persisted. `tests/unit/test_ocr_normalizer.py` and
-`tests/unit/test_gemini_image_parser.py` gained regression tests for
-two supporting fixes this feature surfaced: non-Latin synthetic-
-ingredient names no longer collide on the same id (`ocr_normalizer.
-create_synthetic_ingredient`), and `gemini_image_parser.
-nutrition_fields_present` correctly distinguishes genuinely-provided
-nutrition numbers from `_as_float`'s missing-key default.
+duplicate; mixed English/Bulgarian deduplication (including a
+pure-Bulgarian label, which previously skipped the rebuild step — V9
+finding 6); other-language-only translation to canonical English;
+translation failure/low confidence returning a controlled error with
+nothing persisted; E-numbers/percentages/quantities/units surviving
+translation; no raw image bytes ever being persisted; a provenance
+write failure or a scan-history write failure each rolling back the
+*entire* attempt, product row included (V9 finding 3); and an incomplete
+enrichment never stamping a misleading `last_verified_at` while a
+verified one does (V9 finding 7).
+
+`tests/postgres/test_concurrent_enrichment_postgres.py` (opt-in, see
+11.6) proves the concurrent-INSERT guarantee against real, separate
+PostgreSQL connections.
+
+`tests/unit/test_ocr_normalizer.py` and `tests/unit/test_gemini_image_parser.py`
+gained regression tests for two supporting fixes this feature surfaced:
+non-Latin synthetic-ingredient names no longer collide on the same id
+(`ocr_normalizer.create_synthetic_ingredient`), and
+`gemini_image_parser.nutrition_fields_present` correctly rejects
+booleans/NaN/Infinity/negative/out-of-range/non-numeric values, not
+merely whatever `float()` doesn't raise on (V9 finding 2) — alongside
+dedicated dietary-flag safe-default tests (missing/null/malformed/true/
+false, V9 finding 1). `test_language_detection.py` and
+`test_label_language.py` gained false-positive fixtures for German,
+French, Italian, Spanish, Romanian, Russian, and Ukrainian text, a
+Bulgarian-with-`ь` fixture, a single-ambiguous-token fixture, and
+adversarial translation tests (changed/omitted E-numbers, altered
+percentages/units, non-English output despite a high self-reported
+confidence, extra JSON fields, `NaN` confidence, and prompt-injection
+phrasing embedded in OCR input) — V9 findings 4–5.
 
 ## 12. Project layout
 

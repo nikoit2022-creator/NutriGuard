@@ -48,3 +48,68 @@ def test_brand_only_text_with_no_vocabulary_signal_is_other_not_english():
     """A bare Latin-script brand/proper-noun string has no stopword
     evidence either way -- must not default to "en"."""
     assert detect_language("Bolt Beverages Xtreme") == "other"
+
+
+# --- Review finding 4: stronger lexical evidence + corrected Bulgarian
+# --- alphabet handling --------------------------------------------------
+
+
+def test_single_ambiguous_latin_token_is_not_classified_as_english():
+    """"in"/"or"/"per" are real words (or near-homographs) in German/
+    French/Italian too -- even several of them together must never tip
+    the classification to English on their own."""
+    assert detect_language("in") == "other"
+    assert detect_language("or") == "other"
+    assert detect_language("per") == "other"
+    assert detect_language("in or per") == "other"
+
+
+def test_single_weak_english_word_is_not_enough_on_its_own():
+    assert detect_language("water") == "other"
+
+
+def test_two_distinct_weak_english_words_are_enough():
+    assert detect_language("Water, Sugar") == "en"
+
+
+def test_single_strong_english_word_is_enough_on_its_own():
+    assert detect_language("Contains soy") == "en"
+
+
+def test_italian_latin_script_is_not_treated_as_english():
+    assert detect_language("Ingredienti: Acqua, Zucchero, Sale, Farina di frumento") == "other"
+
+
+def test_spanish_latin_script_is_not_treated_as_english():
+    assert detect_language("Ingredientes: Agua, Azúcar, Sal, Harina de trigo") == "other"
+
+
+def test_romanian_latin_script_is_not_treated_as_english():
+    assert detect_language("Ingrediente: Apă, Zahăr, Sare, Făină de grâu") == "other"
+
+
+def test_russian_cyrillic_script_is_not_treated_as_bulgarian_weak_evidence_only():
+    """No letter exclusive to another Cyrillic language present (no ы/
+    э/ё/і/ї/є/ґ/ў/Serbian letters -- "соль"'s ь no longer excludes it,
+    see below), so this specifically exercises the lexical-evidence
+    threshold, not the alphabet-exclusion shortcut."""
+    assert detect_language("Вода, сахар, соль") == "other"
+
+
+def test_russian_with_exclusive_cyrillic_letter_is_not_bulgarian():
+    assert detect_language("Ингредиенты: Вода, Сахар, Соль, Пшеничная мука") == "other"
+
+
+def test_ukrainian_is_not_treated_as_bulgarian():
+    assert detect_language("Інгредієнти: вода, цукор, сіль") == "other"
+
+
+def test_bulgarian_text_containing_soft_sign_is_still_classified_as_bulgarian():
+    """ь is a valid modern Bulgarian letter (e.g. "шофьор" -- chauffeur)
+    and must not, by itself, disqualify Bulgarian classification."""
+    assert detect_language("Вода и сол за шофьор") == "bg"
+    assert "ь" in "шофьор"
+
+
+def test_bulgarian_strong_word_is_enough_on_its_own():
+    assert detect_language("захар") == "bg"
