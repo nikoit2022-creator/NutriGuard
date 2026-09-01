@@ -5,6 +5,7 @@ Tokenization rules, matching heuristics, and synthetic-ingredient risk
 heuristics are copied verbatim from the Kotlin source (API Contract
 section 7.3).
 """
+import hashlib
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -132,6 +133,15 @@ def create_synthetic_ingredient(name: str) -> SyntheticIngredient:
         risk = RiskLevel.SAFE
 
     slug = re.sub(r"[^a-z0-9_]", "", name.lower().replace(" ", "_"))
+    if not slug:
+        # A name with no ASCII-alphanumeric characters at all (e.g. a
+        # Cyrillic-only Bulgarian ingredient word that didn't match the
+        # scientific database -- see `app.services.label_language`)
+        # would otherwise collapse every such token to the same empty
+        # slug ("synth_"), silently colliding distinct ingredients into
+        # one id. Fall back to a short, stable content hash instead, so
+        # each distinct non-Latin name still gets its own id.
+        slug = hashlib.sha1(name.encode("utf-8")).hexdigest()[:10]
 
     return SyntheticIngredient(
         id=f"synth_{slug}",

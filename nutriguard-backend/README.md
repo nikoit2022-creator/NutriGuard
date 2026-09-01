@@ -12,6 +12,28 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V8 (feature): Barcode + label enrichment and multilingual label
+normalization.** When barcode discovery (V4/V5) cannot produce a
+complete product and returns `labelScanRequired`, the client can now
+resubmit a label image (or OCR text) together with the *original*
+barcode, via a new optional `barcode` field on `POST
+/scan/label-image` and `POST /scan/ocr-text`. The backend combines
+both sources into one canonical, barcode-keyed product instead of a
+synthetic `img_.../ocr_...` one, persists it through the same
+product/history pipeline, and returns the unchanged
+`FullProductAnalysisOut` schema — no second response shape. A later
+plain barcode scan then resolves entirely from the local database, no
+provider discovery or further label request needed. Label text is
+normalized against an English/Bulgarian-first language policy: English
+and Bulgarian sections are preferred and, when both are present,
+merged with equivalent ingredients deduplicated; other-language-only
+text is translated to canonical English via the existing Gemini
+integration (no new provider/API key), with a controlled, structured
+error when translation is unreliable rather than fabricated data. Both
+new fields are optional and additive — no existing client behavior
+changes when `barcode` is omitted. See section 11 for the full design;
+no Alembic migration was needed (see 11.5).
+
 **V6 (bug fixes, PR #7 review):** Six correctness issues in the V4/V5
 barcode discovery feature, fixed before merge:
 1. Unknown dietary flags (vegan/vegetarian/gluten-free/lactose-free/
@@ -156,7 +178,7 @@ source .venv/bin/activate
 pytest -q
 ```
 
-The full suite (**159 tests**) runs against an in-memory SQLite database
+The full suite (**206 tests**) runs against an in-memory SQLite database
 via `aiosqlite` — no Docker or Postgres required, and it runs in a few
 seconds. This is intentional: SQLite is good enough to validate all
 business logic and API behavior, while the actual deployment always
@@ -187,6 +209,9 @@ Coverage:
 - `tests/unit/test_barcode_discovery_migration.py` — the barcode-discovery Alembic migration has a single head, a valid parent revision, and defines both `upgrade`/`downgrade`.
 - `tests/integration/test_barcode_discovery_flow.py` — full `POST /scan/barcode` discovery flow: local-hit short-circuit, Open Food Facts success, Open Food Facts miss → UPCitemdb fallback (correctly incomplete, V6), provider timeout/rate-limit/malformed-response isolation, all-providers-unavailable structured 404, invalid-barcode rejection with zero network calls, repeated-discovery dedup, verified-local-data protection, conflicting-source preservation, equivalent-barcode-representation dedup, and provenance-conflict race-safety.
 - `tests/unit/test_food_analysis_discovery_bridge.py` — unknown dietary flags default to `false` (never `true`); materially incomplete nutrition/ingredients are flagged `has_verified_nutrition=False` in every combination (missing nutrition, missing ingredients, missing both); complete data is scored normally.
+- `tests/unit/test_language_detection.py` — semantic English/Bulgarian/other/unknown classification (not merely script-based): German/French/Russian/Ukrainian text correctly rejected as not-English/not-Bulgarian despite matching script; purely numeric/E-number text is "unknown", not a false positive.
+- `tests/unit/test_label_language.py` — `resolve_label_text`'s full language policy: English/Bulgarian preferred over another-language duplicate section, mixed EN+BG retained, other-language-only text translated (mocked Gemini), low-confidence/invalid/malformed translation responses all raise the controlled `TranslationUnreliableError`, E-numbers/percentages/quantities/units untouched by the pipeline.
+- `tests/integration/test_label_barcode_enrichment.py` — full `POST /scan/label-image` (+ `/scan/ocr-text`) barcode-enrichment flow: no-barcode/placeholder-barcode backward compatibility, unknown-barcode product creation, incomplete-discovery enrichment in place, a subsequent plain barcode scan resolving locally with discovery never invoked, UPC-A/EAN-13 alias dedup, repeated-enrichment idempotency, verified-data protection, incomplete-nutrition `labelScanRequired`, invalid-barcode validation errors, end-to-end mixed-language dedup and translation, translation-failure persists nothing, and no raw image bytes ever stored.
 
 ## 4. Implemented endpoints
 
@@ -197,8 +222,8 @@ All 11 endpoints from the API Contract, plus the two auth endpoints it specifies
 | POST | `/api/v1/auth/device` | 3.2 |
 | POST | `/api/v1/auth/refresh` | 3.2 |
 | POST | `/api/v1/scan/barcode` | 6.1 |
-| POST | `/api/v1/scan/ocr-text` | 6.2 |
-| POST | `/api/v1/scan/label-image` | 6.3 |
+| POST | `/api/v1/scan/ocr-text` | 6.2 (+ optional `barcode`, see section 11) |
+| POST | `/api/v1/scan/label-image` | 6.3 (+ optional `barcode`, see section 11) |
 | GET | `/api/v1/products/{barcode}` | 6.4 |
 | GET | `/api/v1/products` | 6.5 |
 | GET | `/api/v1/ingredients` | 6.6 |
@@ -773,7 +798,178 @@ attempts — `tests/unit/test_barcode_discovery_migration.py` instead
 checks the migration's structural integrity (single head, valid parent
 revision, both `upgrade`/`downgrade` present) on every `pytest` run.
 
-## 11. Project layout
+## 11. Barcode + label enrichment and multilingual label normalization
+
+### 11.1 API contract additions
+
+Both additive, optional, backward compatible (an existing client that
+never sends the new field behaves byte-for-byte as before):
+
+- `POST /api/v1/scan/label-image` — new optional multipart form field
+  `barcode`. Omitted, blank, or a literal placeholder (`"null"`,
+  `"N/A"`, whitespace) behaves exactly like today: `analyze_label_image`
+  runs unchanged, minting a synthetic `img_...` id.
+- `POST /api/v1/scan/ocr-text` — new optional JSON field `barcode` on
+  `OcrTextScanRequest`, same semantics.
+- Both return the existing `FullProductAnalysisOut` — never a second,
+  Android-incompatible response shape. An invalid supplied barcode
+  (fails `barcode_validation.validate_and_normalize`) returns the
+  standard `422 VALIDATION_ERROR` envelope, the same one `/scan/barcode`
+  already uses for an empty barcode.
+
+### 11.2 Merge/upsert design
+
+`app/services/food_analysis.py`'s `analyze_label_image_with_barcode` /
+`analyze_ocr_text_with_barcode` (sharing `_finalize_barcode_enrichment`)
+implement:
+
+- The supplied barcode is validated/canonicalized and resolved through
+  every alias (`barcode_validation.alias_keys` +
+  `product_repository.get_by_barcode_or_aliases`) — the same lookup
+  `/scan/barcode` uses, so a UPC-A scan finds a row already stored
+  under its EAN-13-zero-padded equivalent (or vice versa) and never
+  creates a duplicate.
+- No existing row → a new one is created under the canonical GTIN-13
+  key (`product_repository.insert_new`, SAVEPOINT-based, race-safe —
+  the same mechanism V5/V6 barcode discovery already relies on).
+- An existing row that is already fully trusted (`is_verified` AND
+  `has_verified_nutrition`) is never modified — the label analysis
+  still runs (so its provenance is recorded) but can't overwrite it.
+- Otherwise, fields are merged, not replaced wholesale: identity
+  (name/brand/category/image) is kept when already meaningful (not
+  empty, not a known discovery placeholder like `"Discovered Product"`/
+  `"Unknown Brand"`) and filled from the label analysis only when
+  missing; nutrition/ingredients are kept only when
+  `has_verified_nutrition` was already true, otherwise replaced with
+  the fresh label data (real per-100g figures read off the physical
+  label are always more trustworthy than an incomplete discovery's
+  placeholder zeros).
+- `has_verified_nutrition` only flips to `true` when the label analysis
+  itself produced genuinely known nutrition — all three of
+  sugar/sodium/saturated-fat actually present in the model's structured
+  output (`gemini_image_parser.nutrition_fields_present`), never a
+  heuristic fallback guess — AND non-empty ingredient text; the same
+  "all three required" gate `barcode_discovery.discover_product`
+  already uses for external providers. A row that doesn't clear this
+  gate stays `labelScanRequired` (`404 PRODUCT_NOT_FOUND`, the same
+  structured payload `/scan/barcode` returns for an incomplete
+  discovery), never a confident-looking score from placeholder data.
+- `is_verified` is kept equal to `has_verified_nutrition`: an
+  incomplete row stays open to a *later* enrichment attempt for the
+  same barcode; only a genuinely complete one is protected from being
+  overwritten again.
+- `/scan/ocr-text`'s barcode path always treats nutrition as NOT
+  genuinely known: that endpoint preserves the pre-existing, documented
+  `gemini_result_parser.py` quirk where nutrition figures come from the
+  deterministic fallback recomputed against raw text, never from a
+  model's structured numbers — i.e. never genuinely-extracted real
+  label data, by long-standing design. A barcode resubmitted through
+  `/scan/ocr-text` alone only reaches `has_verified_nutrition=true` if
+  the existing row already had it.
+- Everything is persisted through the same `Product`/`Ingredient`
+  matching/scan-history pipeline every other analysis path uses — no
+  parallel write path, no raw image bytes ever touch storage (only
+  `PIL.Image.verify()` reads them, in memory, then they're discarded).
+
+### 11.3 Language policy
+
+`app/services/language_detection.py` (`detect_language`) and
+`app/services/label_language.py` (`resolve_label_text`) implement:
+
+- **Semantic, not script-based, detection.** Script (Latin/Cyrillic) is
+  only a first filter; English/Bulgarian classification additionally
+  requires food-label vocabulary evidence (a small stopword set per
+  language) and, for Cyrillic, the *absence* of letters exclusive to
+  other Cyrillic-alphabet languages (Russian/Ukrainian/Belarusian/
+  Serbian) — so a German/French/Albanian label is never misread as
+  English, and a Russian/Ukrainian label is never misread as Bulgarian,
+  merely because the script matches.
+- **Section splitting + preference.** Raw label text is split on
+  language-section headers (`Ingredients:`/`Съставки:`/`Zutaten:`/...),
+  line breaks, and `/`/`|` dividers, and each section is classified
+  independently — real multi-market packaging usually separates
+  languages this way. Any English and/or Bulgarian sections found are
+  used verbatim (English first); other-language sections are ignored
+  once English/Bulgarian content exists.
+- **Mixed EN+BG dedup.** When both are present, both are retained in
+  the stored/displayed text, and equivalent ingredients are
+  deduplicated once tokenized: `label_language.bulgarian_ingredient_alias`
+  maps common Bulgarian ingredient-list tokens (e.g. `"захар"`) to
+  their English canonical form *for matching purposes only* (never
+  altering the stored text), so an English and a Bulgarian mention of
+  the same ingredient collapse into one matched/synthetic ingredient
+  instead of two.
+- **Other-language-only → translation.** With no usable English/
+  Bulgarian section, the best other-language text is translated to
+  canonical English via the existing `GeminiService` (no new provider
+  or API key) with a dedicated, injection-hardened prompt (the OCR text
+  is explicitly framed as data, never instructions) requiring
+  structured JSON (`detectedLanguage`/`confidence`/`translatedText`),
+  validated with a Pydantic model before use. A response that fails to
+  parse, fails validation, is a placeholder, or reports confidence
+  below `label_language._MIN_TRANSLATION_CONFIDENCE` (0.55) raises
+  `TranslationUnreliableError` (`422 LABEL_TRANSLATION_UNRELIABLE`) —
+  nothing is persisted for that request. The prompt explicitly asks the
+  model to preserve E-numbers/percentages/quantities/units and never
+  translate brand/proper nouns.
+- **Original text preserved.** The original OCR/label text is always
+  kept (see 11.4, `label_ocr` provenance row's `raw_ingredient_text`)
+  even when a translated or EN+BG-merged canonical text is what's
+  actually stored on `Product.raw_ingredient_text` and analyzed.
+  Translation success alone never marks anything "verified" — that
+  still requires the nutrition-completeness gate in 11.2.
+
+### 11.4 Provenance
+
+Recorded through the **existing** `product_sources` table/repository
+(`product_source_repository.record_discovery`, reused as-is) — no new
+table: a `label_ocr` (or `ocr_text`) row records the original OCR text,
+detected language, and whether translation was used
+(`raw_metadata_json`); when translation ran, a second `label_translation`
+row records the source language, the Gemini model, and the confidence
+score (`ProductSource.confidence`). Both use the column set every other
+provider provenance row already uses.
+
+### 11.5 Why no migration was needed
+
+`Product.source` / `source_confidence` / `is_verified` /
+`has_verified_nutrition` / `discovered_at` / `last_verified_at`
+(added by `cf5522508f9a` for barcode discovery) are sufficient to
+represent the merge/verification state above, and `ProductSource.language`
+/ `.confidence` / `.raw_metadata_json` (already present on that table)
+are sufficient to represent the language/translation provenance in
+11.4 — nothing this feature needs is unrepresentable in the existing
+schema. The Alembic chain is therefore unchanged: one head
+(`cf5522508f9a`), same parent (`64dfe47cbbf7`) — see
+`tests/unit/test_barcode_discovery_migration.py`.
+
+### 11.6 Tests
+
+`tests/unit/test_language_detection.py`, `tests/unit/test_label_language.py`,
+and `tests/integration/test_label_barcode_enrichment.py` cover: backward
+compatibility (no barcode, and a placeholder barcode value); unknown
+barcode + label scan creating one canonical product; an incomplete
+discovered product being enriched in place (meaningful identity
+preserved, placeholders filled); a subsequent plain barcode scan
+resolving from the local database with discovery never invoked;
+UPC-A/EAN-13 alias enrichment never duplicating; repeated enrichment
+being idempotent; verified data never being overwritten by lower-
+confidence OCR; incomplete nutrition staying `labelScanRequired`;
+invalid-barcode structured errors; English preferred over another-
+language duplicate; Bulgarian preferred over another-language
+duplicate; mixed English/Bulgarian deduplication; other-language-only
+translation to canonical English; translation failure/low confidence
+returning a controlled error with nothing persisted; E-numbers/
+percentages/quantities/units surviving translation; and no raw image
+bytes ever being persisted. `tests/unit/test_ocr_normalizer.py` and
+`tests/unit/test_gemini_image_parser.py` gained regression tests for
+two supporting fixes this feature surfaced: non-Latin synthetic-
+ingredient names no longer collide on the same id (`ocr_normalizer.
+create_synthetic_ingredient`), and `gemini_image_parser.
+nutrition_fields_present` correctly distinguishes genuinely-provided
+nutrition numbers from `_as_float`'s missing-key default.
+
+## 12. Project layout
 
 ```
 app/

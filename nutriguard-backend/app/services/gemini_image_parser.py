@@ -109,6 +109,40 @@ def _resolve_ingredients(
     return resolved
 
 
+def nutrition_fields_present(json_string: str) -> bool:
+    """
+    True only if the Gemini image JSON explicitly provided all three
+    core numeric Health Score inputs (sugarGrams/sodiumMg/
+    saturatedFatGrams) as real, non-null, numeric values -- i.e.
+    genuinely extracted label data, not a default silently filled in by
+    `_as_float`'s missing-key fallback.
+
+    Used only by the barcode-enrichment path
+    (`food_analysis.analyze_label_image_with_barcode`) to decide
+    whether the merged product's nutrition is genuinely verified
+    (mirrors `barcode_discovery`'s `nutrition_known` rule for external
+    providers). The standalone `/scan/label-image` endpoint (no
+    barcode) is unaffected -- it keeps its own unconditional
+    `has_verified_nutrition=True` default (see
+    `food_analysis._to_product_model`), unchanged by this function.
+    """
+    try:
+        payload = json.loads(json_string)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    for key in ("sugarGrams", "sodiumMg", "saturatedFatGrams"):
+        value = payload.get(key)
+        if value is None:
+            return False
+        try:
+            float(value)
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def parse_gemini_image_json_result(
     json_string: str, db_ingredients: list[Any]
 ) -> tuple[AnalyzedProductData, list[Any]] | None:

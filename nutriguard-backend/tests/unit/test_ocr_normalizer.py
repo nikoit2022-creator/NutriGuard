@@ -84,3 +84,17 @@ def test_synthetic_ingredient_hypertension_flag_from_sodium_keyword():
 def test_synthetic_ingredient_extracts_e_number():
     syn = create_synthetic_ingredient("some e621 flavor enhancer")
     assert syn.e_number == "E621"
+
+
+def test_synthetic_ingredient_non_latin_name_gets_a_stable_non_colliding_id():
+    """A name with no ASCII-alphanumeric characters at all (e.g. a
+    Cyrillic-only Bulgarian ingredient word -- see
+    app.services.label_language) must not collapse to the same empty
+    "synth_" id as every other such name."""
+    water = create_synthetic_ingredient("Вода")
+    sugar = create_synthetic_ingredient("Захар")
+    assert water.id != "synth_"
+    assert sugar.id != "synth_"
+    assert water.id != sugar.id
+    # Deterministic: the same name always yields the same id.
+    assert create_synthetic_ingredient("Вода").id == water.id

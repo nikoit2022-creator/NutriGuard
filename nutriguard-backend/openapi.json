@@ -141,7 +141,7 @@
           "scan"
         ],
         "summary": "Scan Ocr Text",
-        "description": "API Contract 6.2",
+        "description": "API Contract 6.2. `body.barcode` is optional (see `OcrTextScanRequest`\ndocstring) -- when supplied it routes through the same barcode\nenrichment/upsert pipeline `/scan/label-image` uses; omitted, it\nbehaves exactly as before.",
         "operationId": "scan_ocr_text_api_v1_scan_ocr_text_post",
         "requestBody": {
           "content": {
@@ -188,7 +188,7 @@
           "scan"
         ],
         "summary": "Scan Label Image",
-        "description": "API Contract 6.3",
+        "description": "API Contract 6.3, extended with an optional multipart `barcode`\nfield: lets a client that already attempted POST /scan/barcode (and\ngot `labelScanRequired`) resubmit the same barcode alongside the\nlabel image, so the backend can combine both sources into one\ncanonical, persisted product instead of a synthetic `img_...` one.\n\n`barcode` omitted, blank, or a literal placeholder (e.g. \"null\",\n\"N/A\") -> behaves EXACTLY as before (`food_analysis.\nanalyze_label_image`), fully backward compatible with existing\nclients. A supplied barcode is validated/canonicalized through the\nsame `barcode_validation` module `/scan/barcode` uses; an invalid\none returns the standard structured `VALIDATION_ERROR` response.",
         "operationId": "scan_label_image_api_v1_scan_label_image_post",
         "requestBody": {
           "content": {
@@ -692,6 +692,17 @@
             "type": "string",
             "format": "binary",
             "title": "Image"
+          },
+          "barcode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Barcode"
           }
         },
         "type": "object",
@@ -1170,6 +1181,18 @@
             "type": "string",
             "minLength": 3,
             "title": "Rawtext"
+          },
+          "barcode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Barcode"
           }
         },
         "type": "object",

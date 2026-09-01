@@ -1,6 +1,6 @@
 import json
 
-from app.services.gemini_image_parser import parse_gemini_image_json_result
+from app.services.gemini_image_parser import nutrition_fields_present, parse_gemini_image_json_result
 
 
 def test_valid_json_uses_gemini_nutrition_and_flags_directly():
@@ -131,3 +131,29 @@ def test_malformed_numeric_field_falls_back_to_default_without_raising():
     assert result is not None
     data, _ = result
     assert data.sugar_grams == 0.0
+
+
+# --- nutrition_fields_present (used only by the barcode-enrichment path) ---
+
+
+def test_nutrition_fields_present_true_when_all_three_given():
+    payload = {"sugarGrams": 0.0, "sodiumMg": 15.0, "saturatedFatGrams": 0.0}
+    assert nutrition_fields_present(json.dumps(payload)) is True
+
+
+def test_nutrition_fields_present_false_when_any_missing():
+    payload = {"sugarGrams": 0.0, "sodiumMg": 15.0}  # saturatedFatGrams missing
+    assert nutrition_fields_present(json.dumps(payload)) is False
+
+
+def test_nutrition_fields_present_false_when_any_explicitly_null():
+    payload = {"sugarGrams": 0.0, "sodiumMg": 15.0, "saturatedFatGrams": None}
+    assert nutrition_fields_present(json.dumps(payload)) is False
+
+
+def test_nutrition_fields_present_false_for_invalid_json():
+    assert nutrition_fields_present("not valid json {{{") is False
+
+
+def test_nutrition_fields_present_false_for_non_object_json():
+    assert nutrition_fields_present("[1, 2, 3]") is False
