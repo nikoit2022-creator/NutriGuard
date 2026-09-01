@@ -12,6 +12,50 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V10 (bug fixes, PR #9 review round 3):** Three further correctness/
+safety gaps found in a third review of the barcode + label enrichment
+feature, fixed before merge:
+1. `nutrition_fields_present`/`label_field_validity` correctly rejected
+   unsafe nutrition values (NaN/Infinity/negative/out-of-range/boolean/
+   placeholder), but the REJECTED value itself still flowed through
+   `_as_float` into `AnalyzedProductData` and then into the `Product`
+   row -- only `has_verified_nutrition` stayed `false`, while the
+   garbage number sat in the column regardless. `parse_gemini_image_json_result`
+   now uses `_safe_nutrition_value`, which returns the safe neutral
+   placeholder `0.0` for anything that isn't genuinely trustworthy --
+   a rejected value can no longer reach a `Product` column in ANY form.
+   The merge path (`_apply_label_enrichment`) now also gates each
+   nutrition/NOVA field's overwrite INDIVIDUALLY on that field's own
+   validity (`gemini_image_parser.LabelFieldValidity`), so a field this
+   attempt couldn't trust leaves an existing safe value untouched
+   instead of blanking it to the neutral placeholder.
+2. Translation-invariant checks (E-numbers, numbers/percentages/units)
+   used one-way set subtraction (`source - translated`), which only
+   ever caught a REMOVED or CHANGED token -- an ADDED/invented token
+   (e.g. a fabricated extra E-number or figure the source never had)
+   passed silently, and a REPEATED token collapsing to one occurrence
+   (sets dedupe) was invisible too. Now uses `collections.Counter`
+   multiset equality, which catches all four: added, removed, changed,
+   and duplicate-count loss. Also fixed a real regex bug where `12%`
+   silently backtracked to a bare `12` (a trailing `\b` never matches
+   right after a non-word character like `%`), and confirmed comma/dot
+   decimals (`12,5`/`12.5`) normalize deterministically to the same
+   token.
+3. `gemini_image_parser.py` hardcoded `allergens_detected="None"`
+   unconditionally -- representing "the model said nothing about
+   allergens" as a confirmed, factual "no allergens" claim. The image
+   prompt now requests an `allergens` array; an explicit, non-empty
+   list of named allergens is persisted (normalized, deduplicated), and
+   anything else (missing, null, an empty array, a malformed type)
+   persists as `""` (unknown), never `"None"`. `novaGroup` is now
+   validated strictly as a genuine JSON integer 1-4 (rejecting
+   booleans/strings/floats/negative/zero/out-of-range values); an
+   invalid value uses the same `0` "unclassified" sentinel
+   `barcode_discovery.py` already established, which `health_score.py`'s
+   own zero-deduction branch already treats safely.
+
+See section 11.2 and 11.3 for the full detail on each.
+
 **V9 (bug fixes, PR #9 review):** Eight correctness/safety issues found
 in review of the V8 barcode + label enrichment feature, fixed before
 merge:
@@ -236,7 +280,7 @@ source .venv/bin/activate
 pytest -q
 ```
 
-The full suite (**247 tests**: 246 run by default + 1 opt-in) runs
+The full suite (**293 tests**: 292 run by default + 1 opt-in) runs
 against an in-memory SQLite database via `aiosqlite` — no Docker or
 Postgres required, and it runs in a few seconds. This is intentional:
 SQLite is good enough to validate all business logic and API behavior,
@@ -898,14 +942,23 @@ implement:
   `has_verified_nutrition`) is never modified — the label analysis
   still runs (so its provenance is recorded) but can't overwrite it.
 - Otherwise, fields are merged, not replaced wholesale: identity
-  (name/brand/category/image) is kept when already meaningful (not
-  empty, not a known discovery placeholder like `"Discovered Product"`/
+  (name/brand/category/image/allergens) is kept when already meaningful
+  (not a placeholder string — see `barcode_text_safety.is_placeholder`
+  — and not a known discovery placeholder like `"Discovered Product"`/
   `"Unknown Brand"`) and filled from the label analysis only when
-  missing; nutrition/ingredients are kept only when
-  `has_verified_nutrition` was already true, otherwise replaced with
-  the fresh label data (real per-100g figures read off the physical
-  label are always more trustworthy than an incomplete discovery's
-  placeholder zeros).
+  missing.
+- Nutrition/NOVA fields are merged at PER-FIELD granularity, not as one
+  all-or-nothing blob (`gemini_image_parser.LabelFieldValidity`,
+  applied by `_apply_label_enrichment`): an existing row's sugar/
+  sodium/saturated-fat/NOVA value is only ever replaced by a fresh
+  attempt's value when THAT SPECIFIC field was individually
+  trustworthy this time — a field the new attempt couldn't trust
+  leaves the existing value untouched rather than blanking it to a
+  placeholder. Whatever numeric value actually gets written is always
+  safe regardless: a rejected value (see below) is normalized to the
+  neutral placeholder `0.0`/`0` at parse time
+  (`gemini_image_parser._safe_nutrition_value`/`_safe_nova_group`), so
+  it can never reach a `Product` column even on the very first fill-in.
 - `has_verified_nutrition` only flips to `true` when the label analysis
   itself produced genuinely known nutrition — all three of
   sugar/sodium/saturated-fat present as a genuine, finite, non-negative,
@@ -920,6 +973,23 @@ implement:
   stays `labelScanRequired` (`404 PRODUCT_NOT_FOUND`, the same
   structured payload `/scan/barcode` returns for an incomplete
   discovery), never a confident-looking score from placeholder data.
+- `novaGroup` is validated strictly as a genuine JSON integer 1-4
+  (rejects booleans, strings, floats, negative values, `0`, and
+  anything above `4`); an invalid value uses the same `0`
+  "unclassified" sentinel `barcode_discovery.py` already established
+  for its own incomplete discoveries, which `health_score.py`'s own
+  zero-deduction `else` branch already treats identically to any other
+  non-2/3/4 value — never a fabricated processing-level claim, never a
+  score skewed either direction.
+- `allergens_detected` only persists an explicit, non-empty, named
+  allergen list from the model (normalized: trimmed, deduplicated
+  case-insensitively, comma-joined); anything else — missing, `null`,
+  an empty array, or a malformed type — persists as `""` (unknown),
+  never the string `"None"` as a fabricated confirmed-absence claim.
+  Neither `allergens_detected` nor `novaGroup` are consumed by the
+  Personalized Warning Engine (it acts on the boolean dietary flags and
+  the ingredient risk levels respectively) — an unknown/invalid value
+  in either field cannot fabricate or suppress a warning.
 - `is_verified` is kept equal to `has_verified_nutrition`: an
   incomplete row stays open to a *later* enrichment attempt for the
   same barcode; only a genuinely complete one is protected from being
@@ -989,20 +1059,29 @@ implement:
   is never trusted alone — every translation is additionally verified
   **deterministically**, independent of anything the model claims about
   itself: the result must independently detect as English (via the same
-  `language_detection.detect_language`, not Gemini's claim), every
-  E-number present in the source must still be present unchanged in the
-  result, and every numeric value/percentage/unit present in the source
-  must still be present unchanged in the result. A response that fails
-  to parse, fails schema validation (including an unexpected extra
-  field), reports non-finite/out-of-range confidence, is a placeholder,
-  reports confidence below `label_language._MIN_TRANSLATION_CONFIDENCE`
-  (0.55), or fails any of those deterministic invariant checks raises
+  `language_detection.detect_language`, not Gemini's claim), and the
+  **multiset** (`collections.Counter`, not a one-way set difference) of
+  E-numbers — and separately, of numeric values/percentages/units — in
+  the source and in the result must match EXACTLY. Multiset equality
+  (not one-way subtraction) is what catches all four failure modes: a
+  token REMOVED, one CHANGED, one silently ADDED/invented (a one-way
+  "is the source a subset of the translation" check would miss this
+  entirely), and a DUPLICATE occurrence lost or gained (plain set
+  equality would miss this too, since sets dedupe). Percentages are
+  extracted as a single `"12%"` token (a regex fix: a naive trailing
+  word-boundary assertion backtracks and silently drops the `%`), and
+  comma/dot decimals (`12,5`/`12.5`) normalize to the identical token
+  deterministically. A response that fails to parse, fails schema
+  validation (including an unexpected extra field), reports non-finite/
+  out-of-range confidence, is a placeholder, reports confidence below
+  `label_language._MIN_TRANSLATION_CONFIDENCE` (0.55), or fails any of
+  those deterministic invariant checks raises
   `TranslationUnreliableError` (`422 LABEL_TRANSLATION_UNRELIABLE`) —
   nothing is persisted for that request. This also means a
   prompt-injection attempt embedded in the OCR source text doesn't need
   to be specifically detected as such: if it causes the model to
   produce content that doesn't actually correspond to the source (a
-  changed E-number, a missing quantity, non-English output), that
+  changed/added/dropped E-number or number, non-English output), that
   mismatch alone is what gets it rejected.
 - **Original text preserved.** The original OCR/label text is always
   kept (see 11.4, `label_ocr` provenance row's `raw_ingredient_text`)
@@ -1124,9 +1203,19 @@ translation failure/low confidence returning a controlled error with
 nothing persisted; E-numbers/percentages/quantities/units surviving
 translation; no raw image bytes ever being persisted; a provenance
 write failure or a scan-history write failure each rolling back the
-*entire* attempt, product row included (V9 finding 3); and an incomplete
+*entire* attempt, product row included (V9 finding 3); an incomplete
 enrichment never stamping a misleading `last_verified_at` while a
-verified one does (V9 finding 7).
+verified one does (V9 finding 7); NaN/Infinity/negative/out-of-range/
+boolean/placeholder nutrition values asserted safe at the DATABASE
+level (not merely `has_verified_nutrition`), including that an
+individually-rejected field never overwrites an existing safe value
+from an earlier attempt (V10 finding 1); invalid/boolean NOVA group
+values persisting as the safe `0` sentinel without skewing the Health
+Score, and a real NOVA 4 classification still taking its full
+deduction (V10 finding 3); and explicit allergens persisting while an
+unknown/absent answer never persists as `"None"`, including that a
+previously-known allergen list survives a later unknown answer (V10
+finding 3).
 
 `tests/postgres/test_concurrent_enrichment_postgres.py` (opt-in, see
 11.6) proves the concurrent-INSERT guarantee against real, separate
@@ -1147,7 +1236,19 @@ Bulgarian-with-`ь` fixture, a single-ambiguous-token fixture, and
 adversarial translation tests (changed/omitted E-numbers, altered
 percentages/units, non-English output despite a high self-reported
 confidence, extra JSON fields, `NaN` confidence, and prompt-injection
-phrasing embedded in OCR input) — V9 findings 4–5.
+phrasing embedded in OCR input) — V9 findings 4–5. `test_label_language.py`
+additionally gained multiset-equality regression tests: an invented
+extra E-number/number rejected (not just a removed one), a lost
+duplicate occurrence rejected, valid reordering with an identical
+multiset accepted, a comma/dot decimal pair recognized as the same
+value, and the `12%` percentage-token regex-backtracking fix — V10
+finding 2. `test_gemini_image_parser.py` gained `label_field_validity`
+per-field-independence tests, "rejected value never persisted, even
+alongside an individually-valid field" tests, and NOVA-group/allergens
+parser tests (valid 1-4, invalid boolean/string/float/negative/zero/
+above-4 all reduced to the safe sentinel; missing/null/empty-array/
+malformed-type allergens all reduced to `""`, an explicit list
+persisted deduplicated) — V10 findings 1 and 3.
 
 ## 12. Project layout
 

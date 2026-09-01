@@ -753,3 +753,283 @@ async def test_ocr_provenance_confidence_is_not_fabricated(app_client, monkeypat
     ).scalars().all()
     assert len(sources) == 1
     assert float(sources[0].confidence) == 0.0
+
+
+# --- 19. Rejected nutrition/NOVA/allergens must never be persisted --------
+# --- (review round 3, findings 1 and 3) -------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_nan_nutrition_value_is_never_persisted_db_level(app_client, monkeypatch, db_session):
+    _mock_full_gemini(monkeypatch, sodiumMg=float("nan"))
+    headers = await _register_device(app_client, "nan-nutrition-device")
+
+    barcode = "3775945807980"
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 404  # sodiumMg rejected -> still incomplete
+
+    db_session.expire_all()
+    stored = await db_session.get(Product, barcode)
+    assert stored is not None
+    assert stored.has_verified_nutrition is False
+    assert float(stored.sodium_mg) == 0.0  # safe neutral, never NaN
+
+
+@pytest.mark.asyncio
+async def test_infinity_nutrition_value_is_never_persisted_db_level(app_client, monkeypatch, db_session):
+    _mock_full_gemini(monkeypatch, saturatedFatGrams=float("inf"))
+    headers = await _register_device(app_client, "infinity-nutrition-device")
+
+    barcode = "6941115109544"
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 404
+
+    db_session.expire_all()
+    stored = await db_session.get(Product, barcode)
+    assert stored.has_verified_nutrition is False
+    assert float(stored.saturated_fat_grams) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_negative_nutrition_value_is_never_persisted_db_level(app_client, monkeypatch, db_session):
+    _mock_full_gemini(monkeypatch, sugarGrams=-50.0)
+    headers = await _register_device(app_client, "negative-nutrition-device")
+
+    barcode = "9413482690590"
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 404
+
+    db_session.expire_all()
+    stored = await db_session.get(Product, barcode)
+    assert stored.has_verified_nutrition is False
+    assert float(stored.sugar_grams) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_boolean_nutrition_value_is_never_persisted_db_level(app_client, monkeypatch, db_session):
+    _mock_full_gemini(monkeypatch, sugarGrams=True)
+    headers = await _register_device(app_client, "boolean-nutrition-device")
+
+    barcode = "2981884718725"
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 404
+
+    db_session.expire_all()
+    stored = await db_session.get(Product, barcode)
+    assert stored.has_verified_nutrition is False
+    assert float(stored.sugar_grams) == 0.0  # never 1.0 (float(True))
+
+
+@pytest.mark.asyncio
+async def test_out_of_range_nutrition_value_is_never_persisted_db_level(app_client, monkeypatch, db_session):
+    _mock_full_gemini(monkeypatch, sodiumMg=5_000_000.0)
+    headers = await _register_device(app_client, "out-of-range-nutrition-device")
+
+    barcode = "0743961627182"
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 404
+
+    db_session.expire_all()
+    stored = await db_session.get(Product, barcode)
+    assert stored.has_verified_nutrition is False
+    assert float(stored.sodium_mg) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_placeholder_string_nutrition_value_is_never_persisted_db_level(app_client, monkeypatch, db_session):
+    _mock_full_gemini(monkeypatch, saturatedFatGrams="null")
+    headers = await _register_device(app_client, "placeholder-nutrition-device")
+
+    barcode = "6854312189007"
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 404
+
+    db_session.expire_all()
+    stored = await db_session.get(Product, barcode)
+    assert stored.has_verified_nutrition is False
+    assert float(stored.saturated_fat_grams) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_incomplete_enrichment_does_not_overwrite_existing_safe_nutrition_with_rejected_value(
+    app_client, monkeypatch, db_session
+):
+    """A field this attempt couldn't trust must leave the existing
+    value untouched -- never blanked to the safe-neutral placeholder,
+    and never overwritten with rejected model output."""
+    barcode = "7944021761768"
+    incomplete = Product(
+        barcode=barcode,
+        product_name="Partially Known Product",
+        brand="Some Brand",
+        category="",
+        raw_ingredient_text="",
+        ingredient_ids="",
+        health_score=0,
+        nova_group=0,
+        sugar_grams=5.5,  # already known from an earlier attempt
+        sodium_mg=0,
+        saturated_fat_grams=0,
+        allergens_detected="",
+        source="label_scan",
+        is_verified=False,
+        has_verified_nutrition=False,
+    )
+    db_session.add(incomplete)
+    await db_session.commit()
+
+    # This attempt's sugarGrams is REJECTED (NaN); sodium/saturatedFat are valid.
+    _mock_full_gemini(monkeypatch, sugarGrams=float("nan"), sodiumMg=77.0, saturatedFatGrams=2.5)
+    headers = await _register_device(app_client, "preserve-existing-nutrition-device")
+
+    resp = await _upload(app_client, headers, barcode=barcode)
+    # sugarGrams rejected this round -> still incomplete overall.
+    assert resp.status_code == 404
+
+    db_session.expire_all()
+    stored = await db_session.get(Product, barcode)
+    assert float(stored.sugar_grams) == 5.5  # PRESERVED, not overwritten with 0.0
+    assert float(stored.sodium_mg) == 77.0  # filled in from this attempt
+    assert float(stored.saturated_fat_grams) == 2.5  # filled in from this attempt
+    assert stored.has_verified_nutrition is False
+
+
+# --- NOVA group -------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_invalid_nova_group_stored_as_safe_unknown_sentinel(app_client, monkeypatch, db_session):
+    _mock_full_gemini(monkeypatch, novaGroup=999)
+    headers = await _register_device(app_client, "invalid-nova-device")
+
+    barcode = "6675985898092"
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 200
+    assert resp.json()["product"]["novaGroup"] == 0
+
+    db_session.expire_all()
+    stored = await db_session.get(Product, barcode)
+    assert stored.nova_group == 0
+
+
+@pytest.mark.asyncio
+async def test_boolean_nova_group_is_rejected(app_client, monkeypatch, db_session):
+    _mock_full_gemini(monkeypatch, novaGroup=True)
+    headers = await _register_device(app_client, "boolean-nova-device")
+
+    barcode = "0549862476047"
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 200
+    assert resp.json()["product"]["novaGroup"] == 0
+
+
+@pytest.mark.asyncio
+async def test_valid_nova_group_persists_and_zero_deduction_never_fabricated_for_invalid(
+    app_client, monkeypatch, db_session
+):
+    """A real NOVA 4 classification takes its documented 20-point
+    deduction; an invalid classification (rejected to the safe-unknown
+    sentinel) must fall back to the health-score calculator's own
+    zero-deduction branch, never silently inheriting a real deduction."""
+    barcode_valid = "7587225144465"
+    _mock_full_gemini(monkeypatch, novaGroup=4)
+    headers = await _register_device(app_client, "nova-score-device")
+    resp_valid = await _upload(app_client, headers, barcode=barcode_valid)
+    assert resp_valid.status_code == 200
+    assert resp_valid.json()["product"]["novaGroup"] == 4
+
+    barcode_invalid = "2897921715162"
+    _mock_full_gemini(monkeypatch, novaGroup=-7)
+    resp_invalid = await _upload(app_client, headers, barcode=barcode_invalid)
+    assert resp_invalid.status_code == 200
+    assert resp_invalid.json()["product"]["novaGroup"] == 0
+    # Same underlying analysis otherwise -- the invalid-NOVA product's
+    # score must be HIGHER (or equal) than the valid-NOVA-4 product's,
+    # since NOVA 4 carries a real 20-point deduction and the unknown
+    # sentinel carries none.
+    assert resp_invalid.json()["healthScore"] >= resp_valid.json()["healthScore"]
+
+
+# --- Allergens ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_allergens_explicitly_extracted_are_persisted(app_client, monkeypatch, db_session):
+    _mock_full_gemini(monkeypatch, allergens=["Milk", "Soy"])
+    headers = await _register_device(app_client, "allergens-extracted-device")
+
+    barcode = "9392194796861"
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 200
+    assert resp.json()["product"]["allergensDetected"] == "Milk, Soy"
+
+
+@pytest.mark.asyncio
+async def test_allergens_unknown_is_never_a_confirmed_absence_claim(app_client, monkeypatch, db_session):
+    """No "allergens" key at all in the model response -- must persist
+    as unknown/empty, never the string "None" (a fabricated confirmed-
+    absence claim)."""
+    _mock_full_gemini(monkeypatch)  # _full_gemini_payload has no "allergens" key
+    headers = await _register_device(app_client, "allergens-unknown-device")
+
+    barcode = "0035226754062"
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 200
+    assert resp.json()["product"]["allergensDetected"] == ""
+    assert resp.json()["product"]["allergensDetected"] != "None"
+
+    db_session.expire_all()
+    stored = await db_session.get(Product, barcode)
+    assert stored.allergens_detected == ""
+
+
+@pytest.mark.asyncio
+async def test_existing_allergens_not_overwritten_by_unknown_new_payload(app_client, monkeypatch, db_session):
+    barcode = "7415048029112"
+    incomplete = Product(
+        barcode=barcode,
+        product_name="Known Allergen Product",
+        brand="Some Brand",
+        category="",
+        raw_ingredient_text="",
+        ingredient_ids="",
+        health_score=0,
+        nova_group=0,
+        sugar_grams=0,
+        sodium_mg=0,
+        saturated_fat_grams=0,
+        allergens_detected="Peanuts",  # already known from an earlier attempt
+        source="label_scan",
+        is_verified=False,
+        has_verified_nutrition=False,
+    )
+    db_session.add(incomplete)
+    await db_session.commit()
+
+    _mock_full_gemini(monkeypatch)  # no "allergens" key this time -> unknown
+    headers = await _register_device(app_client, "preserve-allergens-device")
+
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 200
+    assert resp.json()["product"]["allergensDetected"] == "Peanuts"  # preserved, not blanked
+
+
+# --- Warning pipeline sanity (finding 3) ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_warning_pipeline_unaffected_by_unknown_allergens_and_invalid_nova(app_client, monkeypatch):
+    """Neither `allergens_detected` nor `nova_group` are consumed by the
+    Personalized Warning Engine (it uses the boolean dietary flags, and
+    the Health Score Calculator, respectively) -- confirms the endpoint
+    still returns a well-formed, non-crashing warnings list when both
+    are unknown/invalid simultaneously."""
+    _mock_full_gemini(monkeypatch, novaGroup="not-an-int")
+    headers = await _register_device(app_client, "warning-pipeline-sanity-device")
+
+    resp = await _upload(app_client, headers, barcode="1522904214455")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert isinstance(body["warnings"], list)
+    assert body["product"]["allergensDetected"] == ""
+    assert body["product"]["novaGroup"] == 0

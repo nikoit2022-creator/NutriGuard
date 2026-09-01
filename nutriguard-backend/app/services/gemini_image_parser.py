@@ -28,6 +28,7 @@ back to `fallback_local_analysis`.
 """
 import json
 import math
+from dataclasses import dataclass
 from typing import Any
 
 from app.services.fallback_analysis import AnalyzedProductData
@@ -38,25 +39,9 @@ from app.services.ocr_normalizer import (
 )
 
 
-def _as_float(payload: dict, key: str, default: float) -> float:
-    try:
-        value = payload.get(key, default)
-        return float(value) if value is not None else default
-    except (TypeError, ValueError):
-        return default
-
-
 def _as_bool(payload: dict, key: str, default: bool) -> bool:
     value = payload.get(key, default)
     return value if isinstance(value, bool) else default
-
-
-def _as_int(payload: dict, key: str, default: int) -> int:
-    try:
-        value = payload.get(key, default)
-        return int(value) if value is not None else default
-    except (TypeError, ValueError):
-        return default
 
 
 def _resolve_ingredients(
@@ -135,12 +120,12 @@ _NUTRITION_FIELD_BOUNDS: dict[str, float] = {
 def _is_trustworthy_nutrition_number(value: Any, *, max_value: float) -> bool:
     """
     True only for a genuine, finite, non-negative, in-range JSON
-    number -- deliberately stricter than `_as_float` (which is used
-    only to fill `AnalyzedProductData` for DISPLAY, including on the
-    intentionally-untrusted keyword-heuristic fallback path; it must
-    stay lenient there so a malformed value degrades to a placeholder
-    number rather than crashing). This function alone gates
-    `has_verified_nutrition` and must never be fooled by:
+    number. Used both to gate `has_verified_nutrition`
+    (`label_field_validity`/`nutrition_fields_present`) AND, via
+    `_safe_nutrition_value`, to decide what's actually safe to persist
+    at all (review finding 1: a rejected value must never reach a
+    `Product` column, not merely be flagged as unverified while the
+    garbage number itself still gets stored). Must never be fooled by:
 
       - a JSON boolean (`bool` is an `int` subclass in Python, so
         `isinstance(True, int)` is True and `float(True) == 1.0` --
@@ -173,6 +158,103 @@ def _is_trustworthy_nutrition_number(value: Any, *, max_value: float) -> bool:
     return True
 
 
+@dataclass(frozen=True)
+class LabelFieldValidity:
+    """
+    Per-field trustworthiness of one Gemini image JSON response's
+    numeric/classification fields (review finding 1/3: a field must be
+    validated -- and safely defaulted -- INDIVIDUALLY, not as an
+    all-or-nothing blob). All default to `False` ("nothing trustworthy
+    provided") so a caller with no payload at all (e.g. the fallback
+    heuristic path, which never went through this JSON in the first
+    place) can just use `LabelFieldValidity()`.
+
+    `all_valid` is deliberately ONLY sugar/sodium/saturated-fat -- the
+    same "all three core numeric Health Score inputs required" gate
+    `barcode_discovery.discover_product` and `food_analysis.
+    _label_nutrition_is_complete` already use; `nova_valid` is tracked
+    separately since NOVA group has never been part of that gate.
+    """
+
+    sugar_valid: bool = False
+    sodium_valid: bool = False
+    saturated_fat_valid: bool = False
+    nova_valid: bool = False
+
+    @property
+    def all_valid(self) -> bool:
+        return self.sugar_valid and self.sodium_valid and self.saturated_fat_valid
+
+
+def _safe_nutrition_value(payload: dict, key: str, max_value: float) -> float:
+    """
+    The genuine extracted value when it passes
+    `_is_trustworthy_nutrition_number`, else the safe neutral
+    placeholder `0.0` -- NEVER the raw rejected value (a boolean, NaN/
+    Infinity, a negative or out-of-range number, ...). Review finding 1:
+    a rejected value must never reach a `Product` column in ANY form,
+    not merely be flagged as unverified while the garbage number itself
+    still gets persisted. Whether `0.0` here means "genuinely zero" or
+    "unknown" is exactly what `LabelFieldValidity`/`has_verified_nutrition`
+    exists to disambiguate -- this function's only job is to guarantee
+    the stored number itself is always safe.
+    """
+    value = payload.get(key)
+    if _is_trustworthy_nutrition_number(value, max_value=max_value):
+        return float(value)
+    return 0.0
+
+
+# Same "unclassified" sentinel `barcode_discovery.
+# _to_analyzed_data_from_discovery` already uses for an incomplete
+# discovery's NOVA group. `health_score.calculate` treats any value
+# that isn't exactly 2, 3, or 4 identically (its `else` branch: zero
+# deduction, "Unprocessed / Minimally Processed") -- so this sentinel
+# never fabricates a specific processing-level claim and never skews
+# the score either direction, matching review finding 3's "does not
+# falsely affect the score" requirement.
+_NOVA_GROUP_UNKNOWN = 0
+
+
+def _is_valid_nova_group(value: Any) -> bool:
+    """True only for a genuine JSON integer 1-4 (the real NOVA
+    classification range). Rejects booleans (`bool` is an `int`
+    subclass in Python -- checked explicitly before the `int` check),
+    JSON floats/strings, negative values, `0`, and anything above `4`."""
+    if value is None or isinstance(value, bool) or not isinstance(value, int):
+        return False
+    return 1 <= value <= 4
+
+
+def _safe_nova_group(payload: dict) -> int:
+    value = payload.get("novaGroup")
+    return value if _is_valid_nova_group(value) else _NOVA_GROUP_UNKNOWN
+
+
+def label_field_validity(json_string: str) -> LabelFieldValidity:
+    """The full per-field validity picture for one Gemini image JSON
+    response -- see `LabelFieldValidity`. Invalid/unparseable JSON, or
+    a non-object payload, yields all-`False` (nothing trustworthy)."""
+    try:
+        payload = json.loads(json_string)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        payload = None
+    if not isinstance(payload, dict):
+        payload = {}
+    return LabelFieldValidity(
+        sugar_valid=_is_trustworthy_nutrition_number(
+            payload.get("sugarGrams"), max_value=_MAX_SUGAR_GRAMS_PER_100G
+        ),
+        sodium_valid=_is_trustworthy_nutrition_number(
+            payload.get("sodiumMg"), max_value=_MAX_SODIUM_MG_PER_100G
+        ),
+        saturated_fat_valid=_is_trustworthy_nutrition_number(
+            payload.get("saturatedFatGrams"), max_value=_MAX_SATURATED_FAT_GRAMS_PER_100G
+        ),
+        nova_valid=_is_valid_nova_group(payload.get("novaGroup")),
+    )
+
+
 def nutrition_fields_present(json_string: str) -> bool:
     """
     True only if the Gemini image JSON explicitly provided all three
@@ -186,6 +268,10 @@ def nutrition_fields_present(json_string: str) -> bool:
     trustworthy answer, indistinguishable at the JSON level from any
     other explicit number.
 
+    A thin wrapper around `label_field_validity(...).all_valid` --
+    kept as its own function since it's the one other modules
+    (`food_analysis.py`) and tests already depend on by this name.
+
     Used only by the barcode-enrichment path
     (`food_analysis.analyze_label_image_with_barcode`) to decide
     whether the merged product's nutrition is genuinely verified
@@ -195,16 +281,41 @@ def nutrition_fields_present(json_string: str) -> bool:
     `has_verified_nutrition=True` default (see
     `food_analysis._to_product_model`), unchanged by this function.
     """
-    try:
-        payload = json.loads(json_string)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return False
-    if not isinstance(payload, dict):
-        return False
-    return all(
-        _is_trustworthy_nutrition_number(payload.get(key), max_value=max_value)
-        for key, max_value in _NUTRITION_FIELD_BOUNDS.items()
-    )
+    return label_field_validity(json_string).all_valid
+
+
+# Allergen names Gemini explicitly names on the label. A genuinely
+# empty/absent/unreadable answer must NEVER be represented as a
+# confirmed "no allergens" claim (review finding 3) -- so this returns
+# "" (unknown/not stated) for anything but a real, non-empty list of
+# named allergens, never the string "None" (which this codebase's own
+# placeholder-normalization policy treats as equivalent to no value
+# anyway -- see `barcode_text_safety.is_placeholder` -- so it could
+# never have been a meaningful "confirmed absent" signal in the first
+# place). This deliberately does NOT attempt to distinguish "Gemini
+# said there are no declared allergens" from "Gemini didn't answer" --
+# an explicit empty array from a model that isn't a certified allergen
+# scanner is not trustworthy enough evidence of genuine absence, so
+# both map to the same safe "unknown" state; see README section 11 for
+# the documented rationale.
+def _extract_allergens_text(payload: dict) -> str:
+    raw = payload.get("allergens")
+    if not isinstance(raw, list):
+        return ""
+    names = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        cleaned = item.strip()
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(cleaned)
+    return ", ".join(names)
 
 
 def parse_gemini_image_json_result(
@@ -238,10 +349,18 @@ def parse_gemini_image_json_result(
         category="Analyzed Food",
         image_url=None,
         raw_ingredient_text=raw_text.strip(),
-        nova_group=_as_int(payload, "novaGroup", 3),
-        sugar_grams=_as_float(payload, "sugarGrams", 0.0),
-        sodium_mg=_as_float(payload, "sodiumMg", 0.0),
-        saturated_fat_grams=_as_float(payload, "saturatedFatGrams", 0.0),
+        # Review finding 3: a strict 1-4 JSON integer only -- never a
+        # boolean/string/float/negative/zero/out-of-range value passed
+        # through, and never silently defaulted to a plausible-looking
+        # "3" that would fabricate a specific processing-level claim.
+        nova_group=_safe_nova_group(payload),
+        # Review finding 1: genuinely trustworthy values only -- a
+        # rejected value (boolean, NaN/Infinity, negative, out-of-range,
+        # a numeric string) is NEVER persisted, not even as an
+        # unverified guess; see `_safe_nutrition_value`.
+        sugar_grams=_safe_nutrition_value(payload, "sugarGrams", _MAX_SUGAR_GRAMS_PER_100G),
+        sodium_mg=_safe_nutrition_value(payload, "sodiumMg", _MAX_SODIUM_MG_PER_100G),
+        saturated_fat_grams=_safe_nutrition_value(payload, "saturatedFatGrams", _MAX_SATURATED_FAT_GRAMS_PER_100G),
         has_artificial_sweeteners=_as_bool(payload, "hasArtificialSweeteners", False),
         has_preservatives=_as_bool(payload, "hasPreservatives", False),
         # Safe-default rule: an unknown/missing/null/malformed dietary
@@ -260,6 +379,9 @@ def parse_gemini_image_json_result(
         is_vegetarian=_as_bool(payload, "isVegetarian", False),
         is_halal=_as_bool(payload, "isHalal", False),
         is_kosher=_as_bool(payload, "isKosher", False),
-        allergens_detected="None",
+        # Review finding 3: "" (unknown/not stated), never the string
+        # "None" as a fabricated confirmed-absence claim -- see
+        # `_extract_allergens_text`.
+        allergens_detected=_extract_allergens_text(payload),
     )
     return data, ingredients

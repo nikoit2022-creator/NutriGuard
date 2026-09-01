@@ -21,6 +21,7 @@ clients behave exactly as before" requirement.
 import json
 import math
 import re
+from collections import Counter
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -155,39 +156,71 @@ class _TranslationPayload(BaseModel):
 # other unreliable translation.
 
 _E_NUMBER_RE = re.compile(r"\bE[- ]?(\d{3,4}[A-Za-z]?)\b", re.IGNORECASE)
-# A bare number (optionally with a decimal part), not immediately
-# preceded by a letter/digit (so the "211" in "E211" is never counted
-# as a standalone numeric value -- it's already covered by
-# `_E_NUMBER_RE`), optionally followed by a unit/percent sign.
+# A bare number (optionally with a decimal part, comma OR dot), not
+# immediately preceded by a letter/digit (so the "211" in "E211" is
+# never counted as a standalone numeric value -- it's already covered
+# by `_E_NUMBER_RE`), optionally followed by a unit/percent sign and
+# NOT immediately followed by a further letter/digit (review finding 2:
+# a trailing `\b` fails right after a non-word unit character like "%"
+# -- there is no word/non-word transition between "%" and end-of-string
+# or a following space, so `\b` forced the engine to backtrack the
+# optional unit group away and match a bare "12" for input "12%",
+# silently discarding the percent sign. A negative lookahead for
+# "not alphanumeric" has no such blind spot).
 _NUMBER_WITH_UNIT_RE = re.compile(
-    r"(?<![A-Za-z0-9])(\d+(?:[.,]\d+)?)\s*(%|kcal|kj|mcg|µg|mg|g|kg|ml|l)?\b",
+    r"(?<![A-Za-z0-9])(\d+(?:[.,]\d+)?)\s*(%|kcal|kj|mcg|µg|mg|kg|g|ml|l)?(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 
 
-def _extract_e_numbers(text: str) -> set[str]:
-    return {("E" + m.group(1)).upper() for m in _E_NUMBER_RE.finditer(text)}
+def _extract_e_numbers(text: str) -> Counter[str]:
+    return Counter(("E" + m.group(1)).upper() for m in _E_NUMBER_RE.finditer(text))
 
 
 def _normalize_number(raw: str) -> str:
+    """Comma and dot decimals are treated identically and
+    deterministically -- `"12,5"` and `"12.5"` normalize to the exact
+    same token (review finding 2), so a translation from a
+    comma-decimal source to a dot-decimal result (or vice versa) is
+    recognized as preserving the same value, not flagged as changed."""
     n = raw.replace(",", ".")
     if "." in n:
         n = n.rstrip("0").rstrip(".") or "0"
     return n
 
 
-def _extract_numeric_tokens(text: str) -> set[str]:
+def _extract_numeric_tokens(text: str) -> Counter[str]:
     """Every (number, unit-or-percent-or-none) figure in `text`, each
-    normalized to one comparable token (`"12%"`, `"250g"`, `"3.5"`, ...).
-    Deliberately over-inclusive (bare numbers with no unit count too) --
-    the goal is "nothing numeric silently vanished or changed", not a
-    precise nutrition parser."""
-    tokens: set[str] = set()
+    normalized to one comparable token (`"12%"`, `"250g"`, `"3.5"`, ...),
+    counted with multiplicity -- a REPEATED occurrence (`"5g, 5g"`)
+    must survive translation exactly as many times as it appeared, not
+    collapse to one (review finding 2). Deliberately over-inclusive
+    (bare numbers with no unit count too) -- the goal is "nothing
+    numeric silently vanished, changed, or was invented", not a precise
+    nutrition parser."""
+    tokens: Counter[str] = Counter()
     for match in _NUMBER_WITH_UNIT_RE.finditer(text):
         number = _normalize_number(match.group(1))
         unit = (match.group(2) or "").lower()
-        tokens.add(f"{number}{unit}")
+        tokens[f"{number}{unit}"] += 1
     return tokens
+
+
+def _describe_counter_mismatch(source: Counter[str], translated: Counter[str], noun: str) -> str:
+    """`source`/`translated` are compared as MULTISETS (review finding
+    2), not one-way subsets: this catches every one of "added",
+    "removed", "changed" (removed X + added Y), and "duplicate lost/
+    gained" (same elements, different counts) -- a one-way
+    `source - translated` check only ever catches removal/change, never
+    a token the translation invented that the source never had."""
+    missing = source - translated  # in source, absent (or too few) in translated
+    added = translated - source  # in translated, absent (or too many) in source
+    parts = []
+    if missing:
+        parts.append(f"missing: {', '.join(sorted(missing.elements()))}")
+    if added:
+        parts.append(f"added: {', '.join(sorted(added.elements()))}")
+    return f"Translation altered {noun}(s) -- {'; '.join(parts)}."
 
 
 def _verify_translation_invariants(source_text: str, translated_text: str) -> str | None:
@@ -200,12 +233,11 @@ def _verify_translation_invariants(source_text: str, translated_text: str) -> st
       - the result must actually be usable, non-placeholder text;
       - the result must independently detect as English (never merely
         assumed from Gemini's self-reported `detectedLanguage`);
-      - every E-number present in the source must still be present,
-        unchanged, in the result (catches a changed OR a dropped
-        E-number);
-      - every numeric value/percentage/unit present in the source must
-        still be present, unchanged, in the result (catches an altered
-        percentage/unit or a silently omitted number).
+      - the MULTISET of E-numbers in source and result must match
+        exactly -- catches a changed, dropped, OR newly-invented
+        E-number, and a duplicate silently lost or gained;
+      - the MULTISET of numeric values/percentages/units in source and
+        result must match exactly -- same coverage for numbers.
     """
     if is_placeholder(translated_text) or not translated_text.strip():
         return "Translation produced no usable text."
@@ -213,13 +245,15 @@ def _verify_translation_invariants(source_text: str, translated_text: str) -> st
     if detect_language(translated_text) != "en":
         return "Translated text does not independently verify as English."
 
-    missing_e_numbers = _extract_e_numbers(source_text) - _extract_e_numbers(translated_text)
-    if missing_e_numbers:
-        return f"Translation lost or altered E-number(s): {', '.join(sorted(missing_e_numbers))}."
+    source_e_numbers = _extract_e_numbers(source_text)
+    translated_e_numbers = _extract_e_numbers(translated_text)
+    if source_e_numbers != translated_e_numbers:
+        return _describe_counter_mismatch(source_e_numbers, translated_e_numbers, "E-number")
 
-    missing_numbers = _extract_numeric_tokens(source_text) - _extract_numeric_tokens(translated_text)
-    if missing_numbers:
-        return f"Translation lost or altered numeric value(s)/unit(s): {', '.join(sorted(missing_numbers))}."
+    source_numbers = _extract_numeric_tokens(source_text)
+    translated_numbers = _extract_numeric_tokens(translated_text)
+    if source_numbers != translated_numbers:
+        return _describe_counter_mismatch(source_numbers, translated_numbers, "numeric value/unit")
 
     return None
 

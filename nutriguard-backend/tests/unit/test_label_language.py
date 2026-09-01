@@ -306,3 +306,92 @@ async def test_valid_complete_translation_with_all_invariants_preserved_is_accep
     result = await resolve_label_text(_SOURCE_TEXT)
     assert result.translation_used is True
     assert result.canonical_text == "Water, Sugar 12%, Sodium Benzoate (E211), Net Weight 250g"
+
+
+# --- Review finding 2: multiset (Counter) equality, percentage regex ------
+# --- boundary fix, and comma/dot decimal handling --------------------------
+
+
+def test_percentage_token_is_not_lost_to_regex_backtracking():
+    """Regression for the specific bug: `12%` must extract as the
+    single token `"12%"`, never backtrack to a bare `"12"` (which would
+    silently discard the percent sign and let an altered percentage
+    slip past the invariant check undetected)."""
+    from app.services.label_language import _extract_numeric_tokens
+
+    tokens = _extract_numeric_tokens("Sugar 12%, Salt 250g")
+    assert tokens["12%"] == 1
+    assert tokens["12"] == 0  # never counted as a bare, unit-less "12"
+    assert tokens["250g"] == 1
+
+
+def test_duplicate_numeric_occurrences_are_counted_with_multiplicity():
+    from app.services.label_language import _extract_numeric_tokens
+
+    tokens = _extract_numeric_tokens("Contains 5g fat and 5g sugar")
+    assert tokens["5g"] == 2
+
+
+def test_comma_and_dot_decimals_normalize_to_the_same_token():
+    from app.services.label_language import _extract_numeric_tokens
+
+    assert _extract_numeric_tokens("12,5%") == _extract_numeric_tokens("12.5%")
+
+
+@pytest.mark.asyncio
+async def test_adversarial_invented_extra_e_number_is_rejected(monkeypatch):
+    """Source has only E211; translation adds a fabricated E999 the
+    source never mentioned -- a one-way subset check would miss this
+    entirely (translated ⊇ source would still hold)."""
+    _mock_translate(monkeypatch, "Water, Sugar 12%, Sodium Benzoate (E211, E999), Net Weight 250g")
+    with pytest.raises(TranslationUnreliableError):
+        await resolve_label_text(_SOURCE_TEXT)
+
+
+@pytest.mark.asyncio
+async def test_adversarial_invented_extra_number_is_rejected(monkeypatch):
+    """Source has only 250g; translation adds a fabricated extra 500g
+    figure the source never stated."""
+    _mock_translate(monkeypatch, "Water, Sugar 12%, Sodium Benzoate (E211), Net Weight 250g and 500g")
+    with pytest.raises(TranslationUnreliableError):
+        await resolve_label_text(_SOURCE_TEXT)
+
+
+@pytest.mark.asyncio
+async def test_adversarial_duplicate_occurrence_loss_is_rejected(monkeypatch):
+    """Source states 5g twice (e.g. two separate ingredient lines);
+    translation keeps only one -- a plain set-equality check would miss
+    this (the set of distinct tokens is unchanged)."""
+    source_with_duplicate = "Zutaten: Fett 5g, Zucker 5g"
+    translated_missing_one = "Ingredients: Fat 5g, Sugar"  # "5g" only once now
+
+    async def fake_translate(text: str) -> str:
+        return json.dumps(
+            {"detectedLanguage": "de", "confidence": 0.9, "translatedText": translated_missing_one}
+        )
+
+    monkeypatch.setattr(gemini_service, "translate_label_text", fake_translate)
+    with pytest.raises(TranslationUnreliableError):
+        await resolve_label_text(source_with_duplicate)
+
+
+@pytest.mark.asyncio
+async def test_valid_reordering_with_identical_multiset_is_accepted(monkeypatch):
+    """Word/clause order legitimately differs between languages -- the
+    same E-numbers/numbers in a different order must still be accepted."""
+    source_reordered = "Zutaten: Nettogewicht 250g, Natriumbenzoat (E211), Zucker 12%, Wasser"
+    _mock_translate(monkeypatch, "Water, Sugar 12%, Sodium Benzoate (E211), Net Weight 250g")
+    result = await resolve_label_text(source_reordered)
+    assert result.translation_used is True
+
+
+@pytest.mark.asyncio
+async def test_decimal_comma_to_dot_translation_is_accepted(monkeypatch):
+    """A European comma-decimal source value translated to a dot-decimal
+    result (same numeric value) must be recognized as preserved, not
+    flagged as changed."""
+    source_comma_decimal = "Zutaten: Wasser, Zucker 12,5%, Natriumbenzoat (E211), Nettogewicht 250g"
+    _mock_translate(monkeypatch, "Water, Sugar 12.5%, Sodium Benzoate (E211), Net Weight 250g")
+    result = await resolve_label_text(source_comma_decimal)
+    assert result.translation_used is True
+    assert "12.5%" in result.canonical_text
