@@ -310,7 +310,7 @@ async def _translate_other_language_text(source_text: str) -> _TranslationPayloa
     return parsed
 
 
-async def resolve_label_text(raw_text: str | None) -> LabelTextResult:
+async def resolve_label_text(raw_text: str | None, *, strict: bool = True) -> LabelTextResult:
     """
     Applies the full language policy to one piece of raw label text:
 
@@ -327,11 +327,33 @@ async def resolve_label_text(raw_text: str | None) -> LabelTextResult:
       3. No English/Bulgarian section at all, but some other-language
          text exists -> translate it into canonical English via Gemini
          (structured, validated -- see `_translate_other_language_text`).
-         An unreliable/failed translation raises
-         `TranslationUnreliableError` rather than persisting a guess.
       4. No usable text at all (empty, or only digits/punctuation) ->
          passed through unchanged; there is nothing to translate or
          prefer between.
+
+    `strict` (review round 4, finding 2 -- applying this policy to the
+    STANDALONE `/scan/label-image`/`/scan/ocr-text` endpoints, which
+    have no barcode-linked canonical row to protect and no continuation
+    request a client would ever retry):
+
+      - `strict=True` (default; used by the barcode-linked enrichment
+        path, unchanged from its original, tested behavior): an
+        unreliable/failed translation raises `TranslationUnreliableError`
+        -- the caller must not persist a guess.
+      - `strict=False`: the SAME translation attempt is made, but if it
+        fails for ANY reason (Gemini unavailable, invalid response,
+        low confidence, a failed invariant check), this function does
+        NOT raise -- it falls back to using the ORIGINAL text unchanged
+        (`status="translation_unreliable_fallback"`, `translation_used=
+        False`), so a standalone scan degrades gracefully to "text as
+        extracted" instead of hard-failing the whole request over a
+        best-effort translation. This also covers the case where the
+        semantic language detector under-recognizes short, genuinely
+        English/Bulgarian text as "other" (see `language_detection`'s
+        own documented "fail toward other" bias): the wasted
+        translation attempt is harmless here, since its failure just
+        falls back to the (already-fine) original text rather than
+        rejecting the request.
     """
     text = raw_text or ""
     segments = [(seg, detect_language(seg)) for seg in _split_segments(text)]
@@ -361,7 +383,20 @@ async def resolve_label_text(raw_text: str | None) -> LabelTextResult:
 
     if other_parts:
         source_text = "; ".join(other_parts)
-        translated = await _translate_other_language_text(source_text)
+        try:
+            translated = await _translate_other_language_text(source_text)
+        except TranslationUnreliableError:
+            if strict:
+                raise
+            return LabelTextResult(
+                original_text=text,
+                canonical_text=text,
+                detected_language="unknown",
+                translation_used=False,
+                translation_model=None,
+                translation_confidence=None,
+                status="translation_unreliable_fallback",
+            )
         return LabelTextResult(
             original_text=text,
             canonical_text=translated.translatedText.strip(),

@@ -1033,3 +1033,531 @@ async def test_warning_pipeline_unaffected_by_unknown_allergens_and_invalid_nova
     assert isinstance(body["warnings"], list)
     assert body["product"]["allergensDetected"] == ""
     assert body["product"]["novaGroup"] == 0
+
+
+# --- 20. Cumulative completeness across independent evidence groups -------
+# --- (review round 4, finding 1) --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_barcode_nutrition_plus_later_ingredients_only_photo_completes_product(
+    app_client, monkeypatch, db_session
+):
+    """barcode discovery gave trustworthy nutrition but no ingredients
+    (a real, common Open Food Facts pattern: `nutriments` populated,
+    `ingredients_text` empty) -- a later ingredients-only photo must
+    complete the product WITHOUT needing to resupply nutrition."""
+    barcode = "7088449526544"
+    from_discovery = Product(
+        barcode=barcode,
+        product_name="Nutrition-Known Product",
+        brand="DiscoveredBrand",
+        category="cat",
+        raw_ingredient_text="",
+        ingredient_ids="",
+        health_score=0,
+        nova_group=0,
+        sugar_grams=5.0,
+        sodium_mg=50.0,
+        saturated_fat_grams=1.0,
+        allergens_detected="",
+        source="open_food_facts",
+        source_confidence=0.75,
+        is_verified=False,
+        has_verified_nutrition=True,
+        has_verified_ingredients=False,
+    )
+    db_session.add(from_discovery)
+    await db_session.commit()
+
+    # This attempt's OWN nutrition is absent/invalid -- must not matter,
+    # since the nutrition group is already verified and locked.
+    _mock_full_gemini(
+        monkeypatch,
+        rawIngredientText="Water, Sugar, Salt",
+        ingredients=[],
+        sugarGrams=None,
+        sodiumMg=None,
+        saturatedFatGrams=None,
+    )
+    headers = await _register_device(app_client, "cumulative-nutrition-then-ingredients-device")
+
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["product"]["sugarGrams"] == 5.0  # the ORIGINAL trusted nutrition, untouched
+    assert "Water" in body["product"]["rawIngredientText"]
+    assert body["healthScore"] >= 0
+
+    assert await _product_count(db_session, barcode) == 1
+    db_session.expire_all()
+    stored = await db_session.get(Product, barcode)
+    assert stored.has_verified_nutrition is True
+    assert stored.has_verified_ingredients is True
+    assert stored.is_verified is True
+
+
+@pytest.mark.asyncio
+async def test_barcode_ingredients_plus_later_nutrition_only_photo_completes_product(
+    app_client, monkeypatch, db_session
+):
+    """barcode discovery gave trustworthy ingredients_text but no
+    nutriments -- a later nutrition-panel photo must complete the
+    product WITHOUT needing to resupply ingredients."""
+    barcode = "1554965693191"
+    from_discovery = Product(
+        barcode=barcode,
+        product_name="Ingredients-Known Product",
+        brand="DiscoveredBrand",
+        category="cat",
+        raw_ingredient_text="Water, Sugar, Salt",
+        ingredient_ids="",
+        health_score=0,
+        nova_group=3,
+        sugar_grams=0,
+        sodium_mg=0,
+        saturated_fat_grams=0,
+        allergens_detected="",
+        source="open_food_facts",
+        source_confidence=0.75,
+        is_verified=False,
+        has_verified_nutrition=False,
+        has_verified_ingredients=True,
+    )
+    db_session.add(from_discovery)
+    await db_session.commit()
+
+    # This attempt's raw text is irrelevant -- ingredients are already
+    # verified and locked, so it must never be applied.
+    _mock_full_gemini(
+        monkeypatch,
+        rawIngredientText="Completely Different Text, Should Be Ignored",
+        ingredients=[],
+        sugarGrams=8.0,
+        sodiumMg=60.0,
+        saturatedFatGrams=2.0,
+    )
+    headers = await _register_device(app_client, "cumulative-ingredients-then-nutrition-device")
+
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["product"]["rawIngredientText"] == "Water, Sugar, Salt"  # ORIGINAL, untouched
+    assert body["product"]["sugarGrams"] == 8.0
+
+    db_session.expire_all()
+    stored = await db_session.get(Product, barcode)
+    assert stored.has_verified_nutrition is True
+    assert stored.has_verified_ingredients is True
+    assert stored.is_verified is True
+
+
+@pytest.mark.asyncio
+async def test_two_separate_label_scans_with_complementary_evidence_complete_product(
+    app_client, monkeypatch, db_session
+):
+    """TWO separate label-image scans (no barcode-discovery involved at
+    all) -- the first supplies only trustworthy ingredients (its own
+    nutrition is rejected), the second supplies only trustworthy
+    nutrition (its raw text is irrelevant, ingredients already locked
+    from the first scan) -- together they complete the product."""
+    barcode = "7018669017096"
+    headers = await _register_device(app_client, "two-scans-complementary-device")
+
+    _mock_full_gemini(
+        monkeypatch,
+        rawIngredientText="Water, Sugar, Citric Acid",
+        ingredients=[],
+        sugarGrams=float("nan"),
+        sodiumMg=float("nan"),
+        saturatedFatGrams=float("nan"),
+    )
+    resp1 = await _upload(app_client, headers, barcode=barcode)
+    assert resp1.status_code == 404  # still incomplete -- nutrition missing
+    assert resp1.json()["error"]["details"]["labelScanRequired"] is True
+
+    db_session.expire_all()
+    after_first = await db_session.get(Product, barcode)
+    assert after_first.has_verified_ingredients is True
+    assert after_first.has_verified_nutrition is False
+
+    _mock_full_gemini(
+        monkeypatch,
+        rawIngredientText="This text must be ignored entirely",
+        ingredients=[],
+        sugarGrams=9.0,
+        sodiumMg=90.0,
+        saturatedFatGrams=3.0,
+    )
+    resp2 = await _upload(app_client, headers, barcode=barcode)
+    assert resp2.status_code == 200
+    body2 = resp2.json()
+    assert "Water" in body2["product"]["rawIngredientText"]  # from scan 1, preserved
+    assert "ignored entirely" not in body2["product"]["rawIngredientText"]
+    assert body2["product"]["sugarGrams"] == 9.0  # from scan 2
+    assert body2["healthScore"] >= 0
+
+    assert await _product_count(db_session, barcode) == 1
+    db_session.expire_all()
+    final = await db_session.get(Product, barcode)
+    assert final.is_verified is True
+
+
+@pytest.mark.asyncio
+async def test_rejected_later_evidence_does_not_erase_either_verified_group(
+    app_client, monkeypatch, db_session
+):
+    """A row with one group already verified (nutrition) receives a
+    label scan whose ingredients are entirely untrustworthy (Gemini
+    fails -> deterministic fallback) -- the already-verified nutrition
+    must survive completely unchanged, and the still-missing ingredients
+    group must NOT be fabricated as verified either."""
+    barcode = "8818675446342"
+    from_discovery = Product(
+        barcode=barcode,
+        product_name="Nutrition-Known Product",
+        brand="DiscoveredBrand",
+        category="cat",
+        raw_ingredient_text="",
+        ingredient_ids="",
+        health_score=0,
+        nova_group=0,
+        sugar_grams=4.4,
+        sodium_mg=44.0,
+        saturated_fat_grams=0.4,
+        allergens_detected="",
+        source="open_food_facts",
+        is_verified=False,
+        has_verified_nutrition=True,
+        has_verified_ingredients=False,
+    )
+    db_session.add(from_discovery)
+    await db_session.commit()
+
+    async def fake_analyze_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        raise GeminiUnavailableError("simulated failure -- forces the deterministic fallback")
+
+    monkeypatch.setattr(gemini_service, "analyze_image", fake_analyze_image)
+    headers = await _register_device(app_client, "reject-later-evidence-device")
+
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 404
+    assert resp.json()["error"]["details"]["labelScanRequired"] is True
+
+    db_session.expire_all()
+    stored = await db_session.get(Product, barcode)
+    assert float(stored.sugar_grams) == 4.4  # untouched
+    assert float(stored.sodium_mg) == 44.0  # untouched
+    assert stored.has_verified_nutrition is True  # untouched
+    assert stored.has_verified_ingredients is False  # never fabricated true
+    assert stored.is_verified is False
+
+
+@pytest.mark.asyncio
+async def test_neither_evidence_group_alone_produces_a_health_score(app_client, db_session):
+    nutrition_only_barcode = "1421671062460"
+    ingredients_only_barcode = "6449263834870"
+    db_session.add_all(
+        [
+            Product(
+                barcode=nutrition_only_barcode,
+                product_name="Nutrition Only",
+                brand="",
+                category="",
+                raw_ingredient_text="",
+                ingredient_ids="",
+                health_score=0,
+                nova_group=0,
+                sugar_grams=1.0,
+                sodium_mg=1.0,
+                saturated_fat_grams=1.0,
+                allergens_detected="",
+                is_verified=False,
+                has_verified_nutrition=True,
+                has_verified_ingredients=False,
+            ),
+            Product(
+                barcode=ingredients_only_barcode,
+                product_name="Ingredients Only",
+                brand="",
+                category="",
+                raw_ingredient_text="Water, Sugar",
+                ingredient_ids="",
+                health_score=0,
+                nova_group=3,
+                sugar_grams=0,
+                sodium_mg=0,
+                saturated_fat_grams=0,
+                allergens_detected="",
+                is_verified=False,
+                has_verified_nutrition=False,
+                has_verified_ingredients=True,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    headers = await _register_device(app_client, "neither-group-alone-device")
+
+    for barcode in (nutrition_only_barcode, ingredients_only_barcode):
+        resp = await app_client.post("/api/v1/scan/barcode", json={"barcode": barcode}, headers=headers)
+        assert resp.status_code == 404, barcode
+        assert resp.json()["error"]["details"]["labelScanRequired"] is True
+
+
+@pytest.mark.asyncio
+async def test_subsequent_barcode_lookup_returns_the_completed_product(app_client, monkeypatch, db_session):
+    barcode = "4457491344704"
+    from_discovery = Product(
+        barcode=barcode,
+        product_name="Nutrition-Known Product",
+        brand="DiscoveredBrand",
+        category="cat",
+        raw_ingredient_text="",
+        ingredient_ids="",
+        health_score=0,
+        nova_group=0,
+        sugar_grams=5.0,
+        sodium_mg=50.0,
+        saturated_fat_grams=1.0,
+        allergens_detected="",
+        source="open_food_facts",
+        is_verified=False,
+        has_verified_nutrition=True,
+        has_verified_ingredients=False,
+    )
+    db_session.add(from_discovery)
+    await db_session.commit()
+
+    _mock_full_gemini(monkeypatch, rawIngredientText="Water, Sugar, Salt", ingredients=[])
+    headers = await _register_device(app_client, "completed-then-barcode-lookup-device")
+
+    complete_resp = await _upload(app_client, headers, barcode=barcode)
+    assert complete_resp.status_code == 200
+
+    from app.services import barcode_discovery
+
+    async def _must_not_be_called(*args, **kwargs):
+        raise AssertionError("discover_product must not run for a completed local product")
+
+    monkeypatch.setattr(barcode_discovery, "discover_product", _must_not_be_called)
+
+    lookup_resp = await app_client.post("/api/v1/scan/barcode", json={"barcode": barcode}, headers=headers)
+    assert lookup_resp.status_code == 200
+    body = lookup_resp.json()
+    assert body["isFromDatabaseCache"] is True
+    assert body["product"]["sugarGrams"] == 5.0
+    assert "Water" in body["product"]["rawIngredientText"]
+
+
+@pytest.mark.asyncio
+async def test_upc_a_ean13_alias_still_enriches_same_row_for_cumulative_completeness(
+    app_client, monkeypatch, db_session
+):
+    # A distinct, checksum-valid UPC-A/EAN-13 pair not used elsewhere in this file.
+    upc_a_barcode = "614141000012"
+    ean13_equivalent = "0614141000012"
+
+    from_discovery = Product(
+        barcode=upc_a_barcode,  # stored under the legacy 12-digit UPC-A form
+        product_name="Nutrition-Known Product",
+        brand="DiscoveredBrand",
+        category="cat",
+        raw_ingredient_text="",
+        ingredient_ids="",
+        health_score=0,
+        nova_group=0,
+        sugar_grams=6.0,
+        sodium_mg=60.0,
+        saturated_fat_grams=1.5,
+        allergens_detected="",
+        source="open_food_facts",
+        is_verified=False,
+        has_verified_nutrition=True,
+        has_verified_ingredients=False,
+    )
+    db_session.add(from_discovery)
+    await db_session.commit()
+
+    _mock_full_gemini(monkeypatch, rawIngredientText="Water, Sugar, Salt", ingredients=[])
+    headers = await _register_device(app_client, "alias-cumulative-device")
+
+    # Scan using the 13-digit EAN-13-zero-padded equivalent.
+    resp = await _upload(app_client, headers, barcode=ean13_equivalent)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["product"]["barcode"] == upc_a_barcode  # enriched the ORIGINAL row
+    assert body["product"]["sugarGrams"] == 6.0
+
+    assert await _product_count(db_session, upc_a_barcode) == 1
+    assert await _product_count(db_session, ean13_equivalent) == 0
+
+
+@pytest.mark.asyncio
+async def test_repeated_cumulative_enrichment_calls_remain_idempotent(app_client, monkeypatch, db_session):
+    barcode = "8564939924643"
+    _mock_full_gemini(monkeypatch, rawIngredientText="Water, Sugar, Salt", ingredients=[])
+    headers = await _register_device(app_client, "idempotent-cumulative-device")
+
+    resp1 = await _upload(app_client, headers, barcode=barcode)
+    assert resp1.status_code == 200
+    assert resp1.json()["isFromDatabaseCache"] is False
+
+    resp2 = await _upload(app_client, headers, barcode=barcode)
+    assert resp2.status_code == 200
+    assert resp2.json()["isFromDatabaseCache"] is True
+    assert resp2.json()["product"]["sugarGrams"] == resp1.json()["product"]["sugarGrams"]
+
+    resp3 = await _upload(app_client, headers, barcode=barcode)
+    assert resp3.status_code == 200
+    assert resp3.json()["isFromDatabaseCache"] is True
+
+    assert await _product_count(db_session, barcode) == 1
+
+
+# --- 21. Standalone (no-barcode) endpoints reuse the same language/safety --
+# --- policy (review round 4, finding 2) -------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_standalone_label_image_prefers_english_over_other_language_duplicate(app_client, monkeypatch):
+    _mock_full_gemini(
+        monkeypatch,
+        rawIngredientText="Water, Sugar, Salt / Wasser, Zucker, Salz",
+        ingredients=[],
+    )
+    headers = await _register_device(app_client, "standalone-en-preferred-device")
+
+    resp = await _upload(app_client, headers)  # no barcode -- standalone endpoint
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "Water" in body["product"]["rawIngredientText"]
+    assert "Wasser" not in body["product"]["rawIngredientText"]
+
+
+@pytest.mark.asyncio
+async def test_standalone_label_image_translates_other_language_only_label(app_client, monkeypatch):
+    _mock_full_gemini(
+        monkeypatch,
+        rawIngredientText="Wasser, Zucker, Salz",
+        ingredients=[],
+    )
+
+    async def fake_translate(text: str) -> str:
+        return json.dumps(
+            {"detectedLanguage": "de", "confidence": 0.9, "translatedText": "Water, Sugar, Salt"}
+        )
+
+    monkeypatch.setattr(gemini_service, "translate_label_text", fake_translate)
+    headers = await _register_device(app_client, "standalone-translate-device")
+
+    resp = await _upload(app_client, headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "Water" in body["product"]["rawIngredientText"]
+    assert "Wasser" not in body["product"]["rawIngredientText"]
+
+
+@pytest.mark.asyncio
+async def test_standalone_label_image_null_nutrition_field_is_not_fabricated_verified(
+    app_client, monkeypatch, db_session
+):
+    """Gemini succeeds and gives real ingredients, but explicitly nulls
+    one nutrition value (the label was unreadable there) -- must NOT
+    silently score from a placeholder zero."""
+    _mock_full_gemini(monkeypatch, sodiumMg=None)
+    headers = await _register_device(app_client, "standalone-null-nutrition-device")
+
+    resp = await _upload(app_client, headers)
+    assert resp.status_code == 404
+    error = resp.json()["error"]
+    assert error["code"] == "PRODUCT_NOT_FOUND"
+    assert error["details"]["labelScanRequired"] is True
+
+    barcode = error["details"]["discoveredIdentity"]["barcode"]
+    stored = await db_session.get(Product, barcode)
+    assert stored.has_verified_nutrition is False
+    assert float(stored.sodium_mg) == 0.0  # safe neutral, never a garbage/rejected value
+
+
+@pytest.mark.asyncio
+async def test_standalone_label_image_preserves_original_ocr_text_as_provenance(app_client, monkeypatch, db_session):
+    original_text = "Wasser, Zucker, Salz"
+    _mock_full_gemini(monkeypatch, rawIngredientText=original_text, ingredients=[])
+
+    async def fake_translate(text: str) -> str:
+        return json.dumps(
+            {"detectedLanguage": "de", "confidence": 0.9, "translatedText": "Water, Sugar, Salt"}
+        )
+
+    monkeypatch.setattr(gemini_service, "translate_label_text", fake_translate)
+    headers = await _register_device(app_client, "standalone-provenance-device")
+
+    resp = await _upload(app_client, headers)
+    assert resp.status_code == 200
+    barcode = resp.json()["product"]["barcode"]
+
+    sources = (
+        await db_session.execute(
+            select(ProductSource).where(ProductSource.barcode == barcode, ProductSource.provider == "label_ocr")
+        )
+    ).scalars().all()
+    assert len(sources) == 1
+    assert sources[0].raw_ingredient_text == original_text  # ORIGINAL, pre-translation text
+
+
+@pytest.mark.asyncio
+async def test_standalone_label_image_no_raw_image_bytes_persisted(app_client, monkeypatch, db_session):
+    image_bytes = _fake_jpeg_bytes()
+    _mock_full_gemini(monkeypatch)
+    headers = await _register_device(app_client, "standalone-no-image-device")
+
+    files = {"image": ("label.jpg", image_bytes, "image/jpeg")}
+    resp = await app_client.post("/api/v1/scan/label-image", headers=headers, files=files)
+    assert resp.status_code == 200
+    barcode = resp.json()["product"]["barcode"]
+
+    stored = await db_session.get(Product, barcode)
+    for column in Product.__table__.columns:
+        value = getattr(stored, column.name)
+        if isinstance(value, str) and image_bytes.decode("latin-1") in value:
+            raise AssertionError(f"raw image bytes leaked into column {column.name!r}")
+
+
+@pytest.mark.asyncio
+async def test_standalone_ocr_text_prefers_bulgarian_over_other_language_duplicate(app_client):
+    headers = await _register_device(app_client, "standalone-ocr-bg-preferred-device")
+    resp = await app_client.post(
+        "/api/v1/scan/ocr-text",
+        json={"rawText": "Вода, Захар, Сол / Wasser, Zucker, Salz"},
+        headers=headers,
+    )
+    # This endpoint never gates its response on completeness (its
+    # nutrition is always a heuristic guess, by long-standing design --
+    # see `analyze_ocr_text`'s docstring) -- it must still succeed.
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "Захар" in body["product"]["rawIngredientText"]
+    assert "Zucker" not in body["product"]["rawIngredientText"]
+
+
+@pytest.mark.asyncio
+async def test_standalone_ocr_text_still_always_succeeds_even_when_nutrition_is_heuristic(app_client, db_session):
+    """Confirms the deliberate scoping decision documented in
+    `analyze_ocr_text`/`_finalize_standalone_label_analysis`
+    (`always_verified=True`): this endpoint's response is never gated,
+    and the persisted row stays fully `is_verified` so a later
+    `POST /scan/barcode` lookup of the same synthetic id still works."""
+    headers = await _register_device(app_client, "standalone-ocr-always-verified-device")
+    resp = await app_client.post(
+        "/api/v1/scan/ocr-text", json={"rawText": "Water, Sugar, Salt"}, headers=headers
+    )
+    assert resp.status_code == 200
+    barcode = resp.json()["product"]["barcode"]
+
+    stored = await db_session.get(Product, barcode)
+    assert stored.is_verified is True
+
+    lookup = await app_client.post("/api/v1/scan/barcode", json={"barcode": barcode}, headers=headers)
+    assert lookup.status_code == 200
+    assert lookup.json()["isFromDatabaseCache"] is True

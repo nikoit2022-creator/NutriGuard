@@ -136,7 +136,17 @@ async def test_open_food_facts_successful_discovery(app_client, monkeypatch, db_
         await db_session.execute(select(Product).where(Product.barcode == VALID_UNKNOWN_BARCODE))
     ).scalar_one()
     assert row.source == "open_food_facts"
-    assert row.is_verified is False
+    # V11 (PR #9 review round 4): `is_verified` now means "both
+    # evidence groups (nutrition, ingredients) are genuinely verified",
+    # not "was this locally-sourced" -- a genuinely complete discovery
+    # (this one has real nutrition AND real ingredients_text from
+    # `_off_result()`) is verified, and correctly protected from being
+    # overwritten by a later, lower-value re-discovery or a rejected
+    # label scan -- see test_food_analysis_discovery_bridge.py and
+    # README section 11.8.
+    assert row.has_verified_nutrition is True
+    assert row.has_verified_ingredients is True
+    assert row.is_verified is True
 
 
 @pytest.mark.asyncio
@@ -607,9 +617,15 @@ async def test_legacy_upc_a_row_is_found_by_a_later_equivalent_ean13_scan(app_cl
         saturated_fat_grams=0,
         allergens_detected="None",
         source="open_food_facts",
-        is_verified=False,
+        # A fully complete legacy row (real nutrition AND ingredients,
+        # matching how the pre-V11 migration backfill treats a row that
+        # was already fully verified -- see the a1b2c3d4e5f6 migration):
+        # `is_verified` now means "both evidence groups verified", not
+        # merely "not overwritten yet".
+        is_verified=True,
         source_confidence=0.75,
         has_verified_nutrition=True,
+        has_verified_ingredients=True,
     )
     db_session.add(legacy_row)
     await db_session.flush()

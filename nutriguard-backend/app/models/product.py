@@ -77,13 +77,45 @@ class Product(Base):
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
     discovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # False only for a barcode-discovery result whose nutrition and/or
-    # ingredient data was too incomplete to compute a real Health Score
-    # (identity-only UPCitemdb fallback, or an Open Food Facts entry with
-    # no nutriments/ingredients_text). Gates BOTH the initial discovery
-    # response and every later cache-hit lookup of the same row — see
-    # food_analysis.analyze_barcode — so an incomplete cached product can
-    # never accidentally be scored on a repeat scan either. Always True
-    # for local/OCR/label-image products, which always run the real
-    # scoring pipeline against actual label content.
+    # has_verified_nutrition / has_verified_ingredients (V11, PR #9
+    # review round 4): TWO INDEPENDENT evidence groups, deliberately
+    # split rather than one flag conflating both. A product's nutrition
+    # and its ingredient list are physically different parts of a label
+    # (the nutrition facts panel vs. the ingredients list) and are
+    # legitimately learned from DIFFERENT sources at DIFFERENT times --
+    # e.g. a trusted barcode provider states real per-100g nutrition but
+    # no ingredients_text, and the user's own later ingredient-list
+    # photo supplies the other half. Tracking them separately lets each
+    # piece of trusted evidence be preserved and COUNTED, regardless of
+    # which request supplied it, instead of requiring both in the same
+    # request (see `app/services/food_analysis.py`'s "Barcode + label
+    # enrichment" section and README section 11.2/11.8).
+    #
+    # has_verified_nutrition: the three core numeric Health Score inputs
+    # (sugar/sodium/saturated-fat) are genuinely, trustworthily known --
+    # never a heuristic guess or a placeholder. Gates nothing on its
+    # own; see `is_verified` above for the actual Health Score gate.
     has_verified_nutrition: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
+    # has_verified_ingredients: usable ingredient-list evidence
+    # (raw_ingredient_text / ingredient_ids, and the NOVA group and
+    # dietary/allergen flags derived from it) is genuinely, trustworthily
+    # known -- from a trusted provider's `ingredients_text`, or a
+    # successful structured Gemini label-image extraction, or literal
+    # user-submitted OCR text -- never a heuristic guess from a
+    # placeholder/error string.
+    has_verified_ingredients: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
+    )
+    # is_verified: BOTH evidence groups are true -- the single gate for
+    # "safe to compute a real Health Score for" and "protected from
+    # being overwritten by a future lower-trust discovery/enrichment
+    # attempt". Every write path in `app/services/food_analysis.py`
+    # keeps this in sync as `has_verified_nutrition AND
+    # has_verified_ingredients` -- it is never set independently.
+    # Gates BOTH the initial discovery/enrichment response and every
+    # later cache-hit lookup of the same row (see
+    # `food_analysis.analyze_barcode` / `_finalize_barcode_enrichment`)
+    # -- so an incomplete cached product can never accidentally be
+    # scored on a repeat scan either. Always True for local/OCR/
+    # label-image products with genuinely complete data, which always
+    # run the real scoring pipeline against actual label content.

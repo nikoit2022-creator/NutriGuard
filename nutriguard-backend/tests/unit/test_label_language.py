@@ -395,3 +395,58 @@ async def test_decimal_comma_to_dot_translation_is_accepted(monkeypatch):
     result = await resolve_label_text(source_comma_decimal)
     assert result.translation_used is True
     assert "12.5%" in result.canonical_text
+
+
+# --- Review round 4, finding 2: lenient (non-strict) mode for standalone --
+# --- endpoints -- translation failure degrades gracefully, never raises ---
+
+
+@pytest.mark.asyncio
+async def test_lenient_mode_falls_back_to_original_text_on_translation_infrastructure_failure(monkeypatch):
+    async def fake_translate_unavailable(text: str) -> str:
+        from app.integrations.gemini import GeminiUnavailableError
+
+        raise GeminiUnavailableError("simulated: not configured")
+
+    monkeypatch.setattr(gemini_service, "translate_label_text", fake_translate_unavailable)
+
+    source = "Zutaten: Wasser, Zucker, Salz"
+    result = await resolve_label_text(source, strict=False)
+    assert result.translation_used is False
+    assert result.canonical_text == source
+    assert result.status == "translation_unreliable_fallback"
+
+
+@pytest.mark.asyncio
+async def test_lenient_mode_falls_back_to_original_text_on_low_confidence(monkeypatch):
+    async def fake_translate(text: str) -> str:
+        return json.dumps({"detectedLanguage": "de", "confidence": 0.1, "translatedText": "??"})
+
+    monkeypatch.setattr(gemini_service, "translate_label_text", fake_translate)
+
+    source = "Zutaten: Wasser, Zucker, Salz"
+    result = await resolve_label_text(source, strict=False)
+    assert result.translation_used is False
+    assert result.canonical_text == source
+
+
+@pytest.mark.asyncio
+async def test_strict_mode_default_still_raises_on_translation_failure(monkeypatch):
+    """`strict` defaults to True -- the barcode-linked enrichment path's
+    existing, already-tested behavior is completely unaffected by
+    adding this parameter."""
+    async def fake_translate(text: str) -> str:
+        return json.dumps({"detectedLanguage": "de", "confidence": 0.1, "translatedText": "??"})
+
+    monkeypatch.setattr(gemini_service, "translate_label_text", fake_translate)
+
+    with pytest.raises(TranslationUnreliableError):
+        await resolve_label_text("Zutaten: Wasser, Zucker, Salz")
+
+
+@pytest.mark.asyncio
+async def test_lenient_mode_still_succeeds_normally_when_translation_is_reliable(monkeypatch):
+    _mock_translate(monkeypatch, "Water, Sugar, Salt")
+    result = await resolve_label_text("Zutaten: Wasser, Zucker, Salz", strict=False)
+    assert result.translation_used is True
+    assert result.canonical_text == "Water, Sugar, Salt"
