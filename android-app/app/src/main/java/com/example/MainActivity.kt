@@ -67,6 +67,10 @@ import com.example.ui.screens.ScientificLibraryScreen
 import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.NutriGuardTheme
+import com.example.ui.theme.ScannerPageBackground
+import com.example.ui.theme.ScannerSlateMuted
+import com.example.ui.theme.ScannerSoftBorder
+import com.example.ui.theme.ScannerViolet
 import com.example.ui.viewmodel.MainViewModel
 import kotlinx.coroutines.launch
 
@@ -335,8 +339,8 @@ fun NutriGuardApp(
         bottomBar = {
             if (showBottomBar) {
                 NavigationBar(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 4.dp
+                    containerColor = ScannerPageBackground,
+                    tonalElevation = 0.dp
                 ) {
                     tabs.forEach { tab ->
                         val isSelected = currentRoute == tab.route
@@ -367,9 +371,13 @@ fun NutriGuardApp(
                                 )
                             },
                             colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = EmeraldPrimary,
-                                selectedTextColor = EmeraldPrimary,
-                                indicatorColor = MaterialTheme.colorScheme.primaryContainer
+                                selectedIconColor = ScannerViolet,
+                                selectedTextColor = ScannerViolet,
+                                unselectedIconColor = ScannerSlateMuted,
+                                unselectedTextColor = ScannerSlateMuted,
+                                indicatorColor = ScannerViolet.copy(alpha = 0.13f),
+                                disabledIconColor = ScannerSoftBorder,
+                                disabledTextColor = ScannerSoftBorder
                             )
                         )
                     }
