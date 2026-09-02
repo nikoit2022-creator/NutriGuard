@@ -21,6 +21,8 @@ object NutriGuardRadius {
     val small: Dp = 8.dp
     val medium: Dp = 14.dp
     val large: Dp = 20.dp
+    val editorialCard: Dp = 22.dp
+    val hero: Dp = 28.dp
     val pill: Dp = 50.dp
 }
 

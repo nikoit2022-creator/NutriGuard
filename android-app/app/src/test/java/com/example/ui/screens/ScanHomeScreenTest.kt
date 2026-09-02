@@ -35,6 +35,34 @@ class ScanHomeScreenTest {
         assertEquals("Scan label for more information", SCAN_LABEL_ACTION_TEXT)
     }
 
+    @Test
+    fun labelScanActionText_pointsToNutritionWhenOnlyNutritionIsMissing() {
+        assertEquals("Scan nutrition table", labelScanActionText(true, false))
+    }
+
+    @Test
+    fun labelScanActionText_pointsToIngredientsWhenOnlyIngredientsAreMissing() {
+        assertEquals("Scan ingredient list", labelScanActionText(false, true))
+    }
+
+    @Test
+    fun labelScanActionText_usesSafeFallbackWhenBothOrNeitherAreKnownMissing() {
+        assertEquals(SCAN_LABEL_ACTION_TEXT, labelScanActionText(true, true))
+        assertEquals(SCAN_LABEL_ACTION_TEXT, labelScanActionText(null, null))
+    }
+
+    @Test
+    fun partialProductDisplayName_rejectsPlaceholderAndSyntheticNames() {
+        assertEquals(UNCONFIRMED_PRODUCT_NAME, partialProductDisplayName("null"))
+        assertEquals(UNCONFIRMED_PRODUCT_NAME, partialProductDisplayName("Synth_unknown_product"))
+        assertEquals(UNCONFIRMED_PRODUCT_NAME, partialProductDisplayName("Unknown product"))
+    }
+
+    @Test
+    fun partialProductDisplayName_preservesARealDiscoveredName() {
+        assertEquals("Frutti Extra Pere", partialProductDisplayName(" Frutti Extra Pere "))
+    }
+
     // --- missingEvidenceMessages (review requirement: "Nutrition
     // information is still needed" / "Ingredient information is still
     // needed", and both together when the sequential-photo flow still

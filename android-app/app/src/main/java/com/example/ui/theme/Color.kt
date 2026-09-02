@@ -29,6 +29,24 @@ val BentoPurpleFg = Color(0xFF7C3AED)
 val BentoTealBg = Color(0xFFF0FDFA)
 val BentoTealFg = Color(0xFF0D9488)
 
+// Soft editorial palette used for high-level information cards. These
+// colors are decorative surfaces only; safety meaning continues to come
+// from the dedicated Risk* colors below.
+val PastelLavender = Color(0xFFEAE4FF)
+val PastelMint = Color(0xFFDCF7E7)
+val PastelSky = Color(0xFFDDF2FF)
+val PastelPeach = Color(0xFFFFE6C7)
+val PastelRose = Color(0xFFFBE3F1)
+val PastelButter = Color(0xFFFFF1B8)
+val PastelInk = Color(0xFF171821)
+
+val PastelLavenderDark = Color(0xFF302B49)
+val PastelMintDark = Color(0xFF17392C)
+val PastelSkyDark = Color(0xFF173347)
+val PastelPeachDark = Color(0xFF49301E)
+val PastelRoseDark = Color(0xFF482638)
+val PastelButterDark = Color(0xFF443817)
+
 // Color-coded Risk Levels for Food Ingredients
 val RiskGreen = Color(0xFF16A34A)       // Safe
 val RiskYellow = Color(0xFFD97706)      // Moderate

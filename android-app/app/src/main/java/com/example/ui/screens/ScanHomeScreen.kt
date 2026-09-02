@@ -69,10 +69,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import com.example.data.model.IngredientEntity
 import com.example.data.remote.dto.cleanOrNull
+import com.example.ui.components.IngredientDetailBottomSheet
+import com.example.ui.components.RecognizedIngredientsSection
 import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.NutriGuardSpacing
+import com.example.ui.theme.PastelLavender
+import com.example.ui.theme.PastelLavenderDark
+import com.example.ui.theme.PastelSky
+import com.example.ui.theme.PastelSkyDark
 import com.example.ui.theme.RiskGreen
 import com.example.ui.theme.RiskOrange
 import com.example.ui.theme.RiskRed
@@ -108,6 +115,7 @@ fun ScanHomeScreen(
     // below) never has one of these and must never be deleted by this screen.
     var pendingCameraFile by remember { mutableStateOf<File?>(null) }
     var lastSubmittedBarcode by remember { mutableStateOf<String?>(null) }
+    var selectedIngredient by remember { mutableStateOf<IngredientEntity?>(null) }
 
     // If this screen is disposed (e.g. the user navigates away) while an
     // ingredient-label capture was launched but its result was never
@@ -446,6 +454,7 @@ fun ScanHomeScreen(
                 is BarcodeLookupUiState.LabelScanRequired -> {
                     LabelScanRequiredCard(
                         state = lookupState,
+                        onIngredientClick = { selectedIngredient = it },
                         onScanLabel = {
                             // Deliberately does NOT call
                             // dismissBarcodeLookupState() first -- this card
@@ -751,6 +760,11 @@ fun ScanHomeScreen(
             Spacer(modifier = Modifier.height(20.dp))
         }
     }
+
+    IngredientDetailBottomSheet(
+        ingredient = selectedIngredient,
+        onDismiss = { selectedIngredient = null }
+    )
 }
 
 @Composable
@@ -871,13 +885,25 @@ private fun BarcodeSearchingCard(isAnalyzingPhoto: Boolean) {
     }
 }
 
-/**
- * The scan/rescan call-to-action label is ALWAYS this exact text --
- * never the backend's raw `suggestedAction` (a technical/generic hint,
- * not user-facing copy) and never varies by which evidence group is
- * still missing (see [missingEvidenceMessages] for that instead).
- */
+/** Safe fallback; the backend's raw technical suggestedAction is never displayed. */
 internal const val SCAN_LABEL_ACTION_TEXT = "Scan label for more information"
+internal const val UNCONFIRMED_PRODUCT_NAME = "Product name not confirmed"
+
+internal fun labelScanActionText(
+    nutritionScanRequired: Boolean?,
+    ingredientsScanRequired: Boolean?
+): String = when {
+    nutritionScanRequired == true && ingredientsScanRequired != true -> "Scan nutrition table"
+    ingredientsScanRequired == true && nutritionScanRequired != true -> "Scan ingredient list"
+    else -> SCAN_LABEL_ACTION_TEXT
+}
+
+internal fun partialProductDisplayName(productName: String?): String {
+    val cleaned = productName.cleanOrNull()
+        ?.takeUnless { it.startsWith("synth_", ignoreCase = true) }
+        ?.takeUnless { it.equals("Unknown product", ignoreCase = true) }
+    return cleaned ?: UNCONFIRMED_PRODUCT_NAME
+}
 
 /** Fixed copy for each still-missing evidence group -- shown ABOVE the (always-identical) action button so the user knows what the next photo needs to capture. Both can apply at once (requirement: sequential photos for each missing group, combined by the backend into the same product). */
 internal fun missingEvidenceMessages(nutritionScanRequired: Boolean?, ingredientsScanRequired: Boolean?): List<String> =
@@ -927,37 +953,73 @@ internal fun shouldCancelFlowOnFailedDismiss(pendingBarcode: String?): Boolean =
 @Composable
 private fun LabelScanRequiredCard(
     state: BarcodeLookupUiState.LabelScanRequired,
+    onIngredientClick: (IngredientEntity) -> Unit,
     onScanLabel: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val identity = state.discoveredIdentity
-    val identityName = identity?.productName?.cleanOrNull()
+    val identityName = partialProductDisplayName(identity?.productName)
     val identityBrand = identity?.brand?.cleanOrNull()
     val missingMessages = missingEvidenceMessages(state.nutritionScanRequired, state.ingredientsScanRequired)
-    val verifiedIngredientNames = state.ingredients.mapNotNull { it.commonName.cleanOrNull() }
+    val hasRecognizedIngredients = state.ingredients.isNotEmpty()
+    val dark = isSystemInDarkTheme()
+    val cardBackground = when {
+        hasRecognizedIngredients && dark -> PastelLavenderDark
+        hasRecognizedIngredients -> PastelLavender
+        dark -> PastelSkyDark
+        else -> PastelSky
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(NutriGuardRadius.large),
+        shape = RoundedCornerShape(NutriGuardRadius.hero),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+            containerColor = cardBackground
         ),
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+        elevation = CardDefaults.cardElevation(defaultElevation = 5.dp),
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+        )
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
+        Column(modifier = Modifier.padding(18.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = Icons.Default.SearchOff,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (hasRecognizedIngredients) {
+                            Icons.Default.DocumentScanner
+                        } else {
+                            Icons.Default.SearchOff
+                        },
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
                 Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = "Label Scan Needed",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
+                Column {
+                    Text(
+                        text = if (hasRecognizedIngredients) "Ingredients recognized" else "Label Scan Needed",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = if (hasRecognizedIngredients) {
+                            "We found useful information on the label"
+                        } else {
+                            "One more scan will help complete the product"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -968,40 +1030,45 @@ private fun LabelScanRequiredCard(
             // here is a deliberate second, UI-side layer of the same
             // defense (never trust a single filtering pass for text
             // shown directly to the user).
-            if (identityName != null) {
-                Text(
-                    text = buildString {
-                        append(identityName)
-                        if (identityBrand != null) append(" • $identityBrand")
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-            }
-
             Text(
-                text = state.reason,
+                text = buildString {
+                    append(identityName)
+                    if (identityBrand != null && identityName != UNCONFIRMED_PRODUCT_NAME) {
+                        append(" • $identityBrand")
+                    }
+                },
                 style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = "Product identity is not confirmed yet",
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(NutriGuardRadius.medium))
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.62f))
+                    .padding(NutriGuardSpacing.md)
+            ) {
+                Text(
+                    text = state.reason,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
 
             // Already-verified evidence -- never discarded just because
             // the OTHER evidence group is still missing.
-            if (verifiedIngredientNames.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(10.dp))
-                Text(
-                    text = "Verified ingredients so far",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = verifiedIngredientNames.joinToString(", "),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface
+            if (hasRecognizedIngredients) {
+                Spacer(modifier = Modifier.height(14.dp))
+                RecognizedIngredientsSection(
+                    ingredients = state.ingredients,
+                    onIngredientClick = onIngredientClick
                 )
             }
 
@@ -1019,6 +1086,24 @@ private fun LabelScanRequiredCard(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                }
+            }
+
+            if (hasRecognizedIngredients && state.healthScoreAvailable != true) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(NutriGuardRadius.medium))
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f))
+                        .padding(horizontal = NutriGuardSpacing.md, vertical = NutriGuardSpacing.sm)
+                ) {
+                    Text(
+                        text = "Health Score pending • Scan the missing label information to complete it",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 
@@ -1040,7 +1125,13 @@ private fun LabelScanRequiredCard(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(SCAN_LABEL_ACTION_TEXT, fontSize = 13.sp)
+                    Text(
+                        text = labelScanActionText(
+                            state.nutritionScanRequired,
+                            state.ingredientsScanRequired
+                        ),
+                        fontSize = 13.sp
+                    )
                 }
                 TextButton(onClick = onDismiss) {
                     Text("Dismiss")
