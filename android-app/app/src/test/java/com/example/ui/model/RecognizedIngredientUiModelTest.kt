@@ -2,6 +2,7 @@ package com.example.ui.model
 
 import com.example.data.model.IngredientEntity
 import com.example.data.model.RiskLevel
+import com.example.ui.components.categorizeIngredientResults
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -76,6 +77,28 @@ class RecognizedIngredientUiModelTest {
 
         assertNull(model.safetyScore)
         assertEquals(IngredientSafetyRating.LOW_CONCERN, model.rating)
+    }
+
+    @Test
+    fun categorizedResults_showMostImportantGroupsFirst() {
+        val sections = categorizeIngredientResults(
+            listOf(
+                ingredient(id = "water", commonName = "Water").toRecognizedIngredientUiModel(),
+                ingredient(id = "colour", commonName = "Colour", riskLevel = RiskLevel.HIGH_CONCERN)
+                    .toRecognizedIngredientUiModel(),
+                ingredient(id = "synth_flavour", commonName = "Synth_flavour")
+                    .toRecognizedIngredientUiModel(),
+                ingredient(id = "salt", commonName = "Salt", riskLevel = RiskLevel.MODERATE)
+                    .toRecognizedIngredientUiModel()
+            )
+        )
+
+        assertEquals(
+            listOf("High concern", "Use in moderation", "Low concern", "Limited data"),
+            sections.map { it.title }
+        )
+        assertEquals("Colour", sections.first().models.single().displayName)
+        assertEquals("Flavour", sections.last().models.single().displayName)
     }
 
     private fun ingredient(
