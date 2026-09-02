@@ -9,6 +9,7 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
@@ -64,6 +65,24 @@ private val ScannerColorScheme = lightColorScheme(
 /** A stable light presentation for the scanner flow, independent of system dark mode. */
 @Composable
 fun NutriGuardScannerTheme(content: @Composable () -> Unit) {
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        DisposableEffect(view) {
+            val window = (view.context as Activity).window
+            val controller = WindowCompat.getInsetsController(window, view)
+            val previousStatusBarColor = window.statusBarColor
+            val previousLightStatusBars = controller.isAppearanceLightStatusBars
+
+            window.statusBarColor = ScannerHeroStart.toArgb()
+            controller.isAppearanceLightStatusBars = true
+
+            onDispose {
+                window.statusBarColor = previousStatusBarColor
+                controller.isAppearanceLightStatusBars = previousLightStatusBars
+            }
+        }
+    }
+
     MaterialTheme(
         colorScheme = ScannerColorScheme,
         typography = Typography,
