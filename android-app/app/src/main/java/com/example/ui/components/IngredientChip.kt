@@ -31,9 +31,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.IngredientEntity
 import com.example.data.model.RiskLevel
+import com.example.data.remote.dto.cleanOrNull
 import com.example.ui.theme.NutriGuardRadius
-import com.example.ui.theme.RiskRed
 import com.example.ui.theme.getRiskUiColor
+import com.example.ui.theme.getWhoIarcUiColor
 
 @Composable
 fun IngredientChip(
@@ -89,7 +90,8 @@ fun IngredientChip(
                             color = MaterialTheme.colorScheme.onSurface
                         )
 
-                        if (!ingredient.eNumber.isNullOrBlank()) {
+                        val displayENumber = ingredient.eNumber.cleanOrNull()
+                        if (displayENumber != null) {
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(6.dp))
@@ -97,7 +99,7 @@ fun IngredientChip(
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                             ) {
                                 Text(
-                                    text = ingredient.eNumber,
+                                    text = displayENumber,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Medium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -132,12 +134,13 @@ fun IngredientChip(
                         )
                     }
 
-                    if (ingredient.whoIarcClassification != null) {
+                    val displayWhoIarc = ingredient.whoIarcClassification.cleanOrNull()
+                    if (displayWhoIarc != null) {
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = "WHO/IARC: ${ingredient.whoIarcClassification}",
+                            text = "WHO/IARC: $displayWhoIarc",
                             fontSize = 11.sp,
-                            color = RiskRed,
+                            color = getWhoIarcUiColor(displayWhoIarc).main,
                             fontWeight = FontWeight.Medium
                         )
                     }

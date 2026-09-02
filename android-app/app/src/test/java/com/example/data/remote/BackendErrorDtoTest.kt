@@ -187,6 +187,128 @@ class BackendErrorDtoTest {
         assertNull(dto?.details)
     }
 
+    // --- V12 partial-analysis fields (review requirement: extend typed --
+    // parsing of structured labelScanRequired responses) ------------------
+
+    @Test
+    fun `fromJson parses the full V12 partial-analysis payload`() {
+        val body = """
+            {
+              "error": {
+                "code": "PRODUCT_NOT_FOUND",
+                "details": {
+                  "labelScanRequired": true,
+                  "reason": "Ingredients verified, nutrition still needed.",
+                  "discoveredIdentity": {"barcode": "4006381333931", "productName": "Diagnostic Product"},
+                  "analysisComplete": false,
+                  "healthScoreAvailable": false,
+                  "healthScore": null,
+                  "nutritionScanRequired": true,
+                  "ingredientsScanRequired": false,
+                  "ingredients": [
+                    {"id": "sugar", "commonName": "Sugar", "riskLevel": "MODERATE"},
+                    {"id": "e211_sodium_benzoate", "commonName": "Sodium Benzoate", "eNumber": "E211", "riskLevel": "POTENTIAL_CONCERN"}
+                  ]
+                }
+              }
+            }
+        """.trimIndent()
+
+        val details = BackendErrorDto.fromJson(body)?.details
+
+        assertEquals(false, details?.analysisComplete)
+        assertEquals(false, details?.healthScoreAvailable)
+        assertNull("explicit JSON null healthScore must parse as null, never 0", details?.healthScore)
+        assertEquals(true, details?.nutritionScanRequired)
+        assertEquals(false, details?.ingredientsScanRequired)
+        assertEquals(2, details?.ingredients?.size)
+        assertEquals("Sugar", details?.ingredients?.get(0)?.commonName)
+        assertEquals("E211", details?.ingredients?.get(1)?.eNumber)
+    }
+
+    @Test
+    fun `fromJson parses a non-null healthScore when the product IS complete`() {
+        val body = """
+            {
+              "error": {
+                "code": "PRODUCT_NOT_FOUND",
+                "details": {
+                  "labelScanRequired": true,
+                  "analysisComplete": true,
+                  "healthScoreAvailable": true,
+                  "healthScore": 42
+                }
+              }
+            }
+        """.trimIndent()
+
+        val details = BackendErrorDto.fromJson(body)?.details
+        assertEquals(42, details?.healthScore)
+        assertEquals(true, details?.healthScoreAvailable)
+    }
+
+    @Test
+    fun `fromJson leaves the V12 fields null when the backend never sent them`() {
+        // The plain "nothing found anywhere" 404 shape (_not_found_details)
+        // predates these fields entirely -- absence must parse as null,
+        // never as false/0/an assumed-complete default.
+        val body = """
+            {
+              "error": {
+                "code": "PRODUCT_NOT_FOUND",
+                "details": {
+                  "labelScanRequired": true,
+                  "reason": "Barcode not found in the local database or any configured external source."
+                }
+              }
+            }
+        """.trimIndent()
+
+        val details = BackendErrorDto.fromJson(body)?.details
+        assertNull(details?.analysisComplete)
+        assertNull(details?.healthScoreAvailable)
+        assertNull(details?.healthScore)
+        assertNull(details?.nutritionScanRequired)
+        assertNull(details?.ingredientsScanRequired)
+        assertTrue(details?.ingredients?.isEmpty() == true)
+    }
+
+    @Test
+    fun `fromJson treats a false healthScoreAvailable distinctly from an absent one`() {
+        val explicitFalse = BackendErrorDto.fromJson(
+            """{"error":{"code":"PRODUCT_NOT_FOUND","details":{"labelScanRequired":true,"healthScoreAvailable":false}}}"""
+        )?.details
+        val absent = BackendErrorDto.fromJson(
+            """{"error":{"code":"PRODUCT_NOT_FOUND","details":{"labelScanRequired":true}}}"""
+        )?.details
+
+        assertEquals(false, explicitFalse?.healthScoreAvailable)
+        assertNull(absent?.healthScoreAvailable)
+    }
+
+    @Test
+    fun `malformed ingredient entries in the partial-analysis payload are skipped without crashing`() {
+        val body = """
+            {
+              "error": {
+                "code": "PRODUCT_NOT_FOUND",
+                "details": {
+                  "labelScanRequired": true,
+                  "ingredients": [
+                    {"id": "sugar", "commonName": "Sugar"},
+                    "not an object",
+                    null
+                  ]
+                }
+              }
+            }
+        """.trimIndent()
+
+        val details = BackendErrorDto.fromJson(body)?.details
+        assertEquals(1, details?.ingredients?.size)
+        assertEquals("Sugar", details?.ingredients?.get(0)?.commonName)
+    }
+
     @Test
     fun `malformed providersChecked entries are skipped without crashing`() {
         val body = """

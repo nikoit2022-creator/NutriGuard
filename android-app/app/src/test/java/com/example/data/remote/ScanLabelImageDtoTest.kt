@@ -1,7 +1,9 @@
 package com.example.data.remote
 
 import com.example.data.model.RiskLevel
+import com.example.data.remote.dto.IngredientDto
 import com.example.data.remote.dto.ScanLabelImageResponseDto
+import com.example.data.remote.dto.toEntities
 import com.example.data.remote.dto.toParsedEntities
 import com.example.util.WarningSeverity
 import org.json.JSONObject
@@ -230,5 +232,76 @@ class ScanLabelImageDtoTest {
         val part = NutriGuardApiService.buildLabelImagePart(byteArrayOf(1, 2, 3))
 
         assertEquals("image/jpeg", part.body.contentType().toString())
+    }
+
+    // The shared List<IngredientDto>.toEntities helper -- used both by
+    // the full success path (toParsedEntities, above) and by a partial
+    // labelScanRequired result's already-verified `ingredients` list
+    // (see BackendErrorDetailsDto/LabelScanRequiredException), so both
+    // render identically.
+    @Test
+    fun `toEntities synthesizes a stable id when the backend didn't send one`() {
+        val entities = listOf(
+            IngredientDto(id = null, commonName = "Sugar"),
+            IngredientDto(id = "e211_sodium_benzoate", commonName = "Sodium Benzoate")
+        ).toEntities("4006381333931")
+
+        assertEquals("ING_4006381333931_0", entities[0].id)
+        assertEquals("e211_sodium_benzoate", entities[1].id)
+    }
+
+    // TEST 4: the optional barcode multipart field (review requirement:
+    // camera and gallery enrichment both attach a pending barcode via
+    // this same request-body builder).
+
+    @Test
+    fun `buildLabelImageRequestBody includes a barcode part when a barcode is supplied`() {
+        val body = NutriGuardApiService.buildLabelImageRequestBody(byteArrayOf(1, 2, 3), "4006381333931")
+
+        assertEquals(2, body.parts.size)
+        val barcodePart = body.parts.first {
+            it.headers?.get("Content-Disposition")?.contains("name=\"barcode\"") == true
+        }
+        val buffer = okio.Buffer()
+        barcodePart.body.writeTo(buffer)
+        assertEquals("4006381333931", buffer.readUtf8())
+    }
+
+    @Test
+    fun `buildLabelImageRequestBody omits the barcode part entirely when barcode is null`() {
+        val body = NutriGuardApiService.buildLabelImageRequestBody(byteArrayOf(1, 2, 3), null)
+
+        assertEquals(1, body.parts.size)
+        assertFalse(
+            body.parts.any { it.headers?.get("Content-Disposition")?.contains("name=\"barcode\"") == true }
+        )
+    }
+
+    // TEST 5: POST /api/v1/scan/ocr-text's JSON body (review round 2,
+    // finding 2) -- the exact OpenAPI schema field is "rawText", NOT
+    // "text".
+
+    @Test
+    fun `buildOcrTextRequestJson uses the rawText field, not text`() {
+        val json = NutriGuardApiService.buildOcrTextRequestJson("Water, Sugar, Salt", null)
+
+        assertEquals("Water, Sugar, Salt", json.getString("rawText"))
+        assertFalse("the OpenAPI schema field is rawText, never text", json.has("text"))
+        assertFalse(json.has("barcode"))
+    }
+
+    @Test
+    fun `buildOcrTextRequestJson includes barcode when a pending barcode is supplied`() {
+        val json = NutriGuardApiService.buildOcrTextRequestJson("Water, Sugar, Salt", "4006381333931")
+
+        assertEquals("Water, Sugar, Salt", json.getString("rawText"))
+        assertEquals("4006381333931", json.getString("barcode"))
+    }
+
+    @Test
+    fun `buildOcrTextRequestJson omits barcode entirely for a standalone submission`() {
+        val json = NutriGuardApiService.buildOcrTextRequestJson("Water, Sugar, Salt", null)
+
+        assertFalse(json.has("barcode"))
     }
 }

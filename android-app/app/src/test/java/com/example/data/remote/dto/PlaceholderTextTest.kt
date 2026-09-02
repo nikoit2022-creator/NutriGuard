@@ -36,4 +36,38 @@ class PlaceholderTextTest {
         // "Nonetheless Bakery" must not be treated as the placeholder "none".
         assertEquals("Nonetheless Bakery", "Nonetheless Bakery".cleanOrNull())
     }
+
+    // --- Ingredient UI fixes (review requirement: hide E-Number/WHO-IARC
+    // badges when there is no real value -- IngredientChip/
+    // IngredientDetailBottomSheet both gate on `cleanOrNull() != null`,
+    // this is the exact function/values they apply it to.) --------------
+
+    @Test
+    fun `a real E-number is preserved for display`() {
+        assertEquals("E211", "E211".cleanOrNull())
+        assertEquals("E951", " E951 ".cleanOrNull())
+    }
+
+    @Test
+    fun `a missing or placeholder E-number is hidden, not shown as literal text`() {
+        assertNull((null as String?).cleanOrNull())
+        assertNull("".cleanOrNull())
+        assertNull("null".cleanOrNull())
+        assertNull("N/A".cleanOrNull())
+    }
+
+    @Test
+    fun `a real WHO-IARC classification is preserved for display`() {
+        assertEquals(
+            "Group 2B - Possibly Carcinogenic",
+            "Group 2B - Possibly Carcinogenic".cleanOrNull()
+        )
+    }
+
+    @Test
+    fun `a missing or placeholder WHO-IARC classification is hidden`() {
+        assertNull((null as String?).cleanOrNull())
+        assertNull("unknown".cleanOrNull())
+        assertNull("-".cleanOrNull())
+    }
 }

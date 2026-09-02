@@ -95,6 +95,7 @@ fun ScanHomeScreen(
     val context = LocalContext.current
     val recentScans by viewModel.scanHistory.collectAsState()
     val barcodeLookupState by viewModel.barcodeLookupState.collectAsState()
+    val pendingBarcode by viewModel.pendingBarcode.collectAsState()
     val isDark = isSystemInDarkTheme()
 
     var isOcrMode by remember { mutableStateOf(false) }
@@ -177,6 +178,16 @@ fun ScanHomeScreen(
             }
     }
 
+    // Both the gallery pick and the camera capture below call the SAME
+    // viewModel.analyzeLabelImage(bitmap) -- it internally attaches
+    // `pendingBarcode` (if any) via the backend's optional multipart
+    // `barcode` field, and drives the SAME Searching/LabelScanRequired/
+    // Failed card this screen already renders for a barcode lookup (see
+    // MainViewModel.BarcodeLookupUiState's docs). Neither launcher
+    // navigates directly anymore -- navigation only happens via
+    // navigateToResultEvent, on a genuine complete success, exactly
+    // like the barcode flow (requirement: gallery-picked photos must
+    // combine with a pending barcode exactly like camera photos do).
     val imagePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
@@ -186,10 +197,11 @@ fun ScanHomeScreen(
                 val bitmap = BitmapFactory.decodeStream(inputStream)
                 if (bitmap != null) {
                     viewModel.analyzeLabelImage(bitmap)
-                    onNavigateToResult()
+                } else {
+                    Toast.makeText(context, "Unable to read the selected image.", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
+                Toast.makeText(context, "Unable to process the selected image.", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -207,7 +219,6 @@ fun ScanHomeScreen(
                 val bitmap = decodeCapturedBitmap(context, uri)
                 if (bitmap != null) {
                     viewModel.analyzeLabelImage(bitmap)
-                    onNavigateToResult()
                 } else {
                     Toast.makeText(context, "Unable to read the captured image.", Toast.LENGTH_SHORT).show()
                 }
@@ -424,23 +435,34 @@ fun ScanHomeScreen(
             }
         }
 
-        // Barcode lookup state: stays on this screen the whole time --
-        // see MainViewModel.BarcodeLookupUiState.
+        // Barcode/label-image lookup state: stays on this screen the
+        // whole time -- see MainViewModel.BarcodeLookupUiState.
         item {
             when (val lookupState = barcodeLookupState) {
                 is BarcodeLookupUiState.Searching -> {
-                    BarcodeSearchingCard()
+                    BarcodeSearchingCard(isAnalyzingPhoto = pendingBarcode != null || isOcrMode)
                 }
 
                 is BarcodeLookupUiState.LabelScanRequired -> {
                     LabelScanRequiredCard(
                         state = lookupState,
                         onScanLabel = {
-                            viewModel.dismissBarcodeLookupState()
+                            // Deliberately does NOT call
+                            // dismissBarcodeLookupState() first -- this card
+                            // (and pendingBarcode) must stay exactly as they
+                            // are underneath the camera activity. If the
+                            // camera is cancelled, cameraLauncher's callback
+                            // below never calls the ViewModel at all, so
+                            // this SAME card simply reappears with nothing
+                            // to restore. Only a genuine submission
+                            // (analyzeLabelImage) transitions the state --
+                            // to Searching on capture, back to
+                            // LabelScanRequired/Failed if it's still
+                            // incomplete or fails.
                             isOcrMode = true
                             startIngredientPhotoCapture()
                         },
-                        onDismiss = { viewModel.dismissBarcodeLookupState() }
+                        onDismiss = { viewModel.cancelPendingScanFlow() }
                     )
                 }
 
@@ -448,10 +470,36 @@ fun ScanHomeScreen(
                     BarcodeLookupFailedCard(
                         message = lookupState.message,
                         onRetry = {
-                            viewModel.dismissBarcodeLookupState()
-                            (lastSubmittedBarcode ?: lookupState.barcode).let(submitBarcode)
+                            if (isPhotoUploadRetry(pendingBarcode)) {
+                                // The failure happened uploading a label
+                                // photo for a still-pending barcode -- retry
+                                // means "take that photo again", not
+                                // "resubmit a barcode string" (there's no
+                                // bitmap left to resend). Do NOT dismiss the
+                                // card first -- if the camera is cancelled,
+                                // this Failed card must simply still be there.
+                                isOcrMode = true
+                                startIngredientPhotoCapture()
+                            } else {
+                                // A plain barcode-lookup failure -- nothing
+                                // camera-related pending, safe to clear the
+                                // card before resubmitting the same barcode.
+                                viewModel.dismissBarcodeLookupState()
+                                (lastSubmittedBarcode ?: lookupState.barcode).let(submitBarcode)
+                            }
                         },
-                        onDismiss = { viewModel.dismissBarcodeLookupState() }
+                        onDismiss = {
+                            // A failed label-photo upload for a pending
+                            // barcode is an explicit refusal of the whole
+                            // flow, not just "hide this card" -- clear
+                            // pendingBarcode too, so a LATER standalone
+                            // submission never silently attaches it.
+                            if (shouldCancelFlowOnFailedDismiss(pendingBarcode)) {
+                                viewModel.cancelPendingScanFlow()
+                            } else {
+                                viewModel.dismissBarcodeLookupState()
+                            }
+                        }
                     )
                 }
 
@@ -625,10 +673,21 @@ fun ScanHomeScreen(
                             Button(
                                 onClick = {
                                     if (rawTextInput.isNotBlank()) {
+                                        // Does NOT navigate directly anymore
+                                        // (review round 2, finding 2): this
+                                        // now shares the same
+                                        // Searching/LabelScanRequired/Failed
+                                        // state machine as a barcode lookup
+                                        // or label photo -- navigation only
+                                        // happens via navigateToResultEvent,
+                                        // on a genuine complete success, so
+                                        // a partial result shows the same
+                                        // card instead of a fabricated
+                                        // result screen.
                                         viewModel.analyzeOcrText(rawTextInput)
-                                        onNavigateToResult()
                                     }
                                 },
+                                enabled = !isSearchingBarcode,
                                 modifier = Modifier.align(Alignment.End),
                                 shape = RoundedCornerShape(NutriGuardRadius.small),
                                 colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
@@ -766,12 +825,13 @@ private fun SampleProductCard(
 
 
 /**
- * Shown on the Scan screen (never a navigation) while
- * `POST /api/v1/scan/barcode` is in flight -- see
- * `MainViewModel.BarcodeLookupUiState.Searching`.
+ * Shown on the Scan screen (never a navigation) while either
+ * `POST /api/v1/scan/barcode` or `POST /api/v1/scan/label-image` is in
+ * flight -- see `MainViewModel.BarcodeLookupUiState.Searching`, which
+ * both share.
  */
 @Composable
-private fun BarcodeSearchingCard() {
+private fun BarcodeSearchingCard(isAnalyzingPhoto: Boolean) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(NutriGuardRadius.large),
@@ -792,13 +852,17 @@ private fun BarcodeSearchingCard() {
             Spacer(modifier = Modifier.width(14.dp))
             Column {
                 Text(
-                    text = "Searching product…",
+                    text = if (isAnalyzingPhoto) "Analyzing label…" else "Searching product…",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    text = "Checking our database and trusted product sources",
+                    text = if (isAnalyzingPhoto) {
+                        "Reading nutrition and ingredient information from the photo"
+                    } else {
+                        "Checking our database and trusted product sources"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -808,12 +872,57 @@ private fun BarcodeSearchingCard() {
 }
 
 /**
+ * The scan/rescan call-to-action label is ALWAYS this exact text --
+ * never the backend's raw `suggestedAction` (a technical/generic hint,
+ * not user-facing copy) and never varies by which evidence group is
+ * still missing (see [missingEvidenceMessages] for that instead).
+ */
+internal const val SCAN_LABEL_ACTION_TEXT = "Scan label for more information"
+
+/** Fixed copy for each still-missing evidence group -- shown ABOVE the (always-identical) action button so the user knows what the next photo needs to capture. Both can apply at once (requirement: sequential photos for each missing group, combined by the backend into the same product). */
+internal fun missingEvidenceMessages(nutritionScanRequired: Boolean?, ingredientsScanRequired: Boolean?): List<String> =
+    buildList {
+        if (nutritionScanRequired == true) add("Nutrition information is still needed")
+        if (ingredientsScanRequired == true) add("Ingredient information is still needed")
+    }
+
+/**
+ * Review finding (round 2): a [BarcodeLookupUiState.Failed] card can
+ * mean EITHER a plain barcode-lookup failure (nothing camera-related
+ * pending -- safe to dismiss the card before resubmitting the barcode
+ * string) OR a label-photo UPLOAD failure for a still-[pendingBarcode]
+ * (there is no bitmap left to resend -- retrying means reopening the
+ * camera, and the card must NOT be dismissed first, so it's still
+ * there if the camera capture is itself cancelled). `true` -- take the
+ * photo-retry branch -- exactly when a barcode is pending.
+ */
+internal fun isPhotoUploadRetry(pendingBarcode: String?): Boolean = pendingBarcode != null
+
+/**
+ * Review finding (round 2): tapping "Dismiss" on a [BarcodeLookupUiState.Failed]
+ * card that resulted from a label-photo upload failure for a
+ * [pendingBarcode] is an explicit refusal of the WHOLE flow (there is
+ * no barcode-only failure to fall back to) -- `cancelPendingScanFlow()`
+ * must run so `pendingBarcode` is cleared and a LATER standalone
+ * submission never silently attaches it. A plain barcode-lookup
+ * failure (no pending barcode) only needs the ordinary
+ * `dismissBarcodeLookupState()`.
+ */
+internal fun shouldCancelFlowOnFailedDismiss(pendingBarcode: String?): Boolean = pendingBarcode != null
+
+/**
  * Shown when the backend answers `PRODUCT_NOT_FOUND` with
- * `details.labelScanRequired = true` -- the barcode is unknown, or was
- * found but its data is too incomplete for a confident analysis. Never
- * navigates anywhere on its own; the user stays on the Scan workflow
- * and either scans the ingredient label (the reliable fallback) or
- * dismisses this card.
+ * `details.labelScanRequired = true` -- the barcode/photo is unknown,
+ * or was found but its data is too incomplete for a confident
+ * analysis. Never navigates anywhere on its own; the user stays on the
+ * Scan workflow and either scans the label (attaching `pendingBarcode`
+ * automatically, see `MainViewModel.analyzeLabelImage`) or dismisses
+ * the whole flow.
+ *
+ * Never renders a Health Score here -- [state.healthScore] is only
+ * ever consulted for [state.healthScoreAvailable] purposes and is
+ * otherwise ignored; a `null`/unavailable score must never be shown as
+ * `0`, and this card never shows a numeric score in the first place.
  */
 @Composable
 private fun LabelScanRequiredCard(
@@ -824,6 +933,8 @@ private fun LabelScanRequiredCard(
     val identity = state.discoveredIdentity
     val identityName = identity?.productName?.cleanOrNull()
     val identityBrand = identity?.brand?.cleanOrNull()
+    val missingMessages = missingEvidenceMessages(state.nutritionScanRequired, state.ingredientsScanRequired)
+    val verifiedIngredientNames = state.ingredients.mapNotNull { it.commonName.cleanOrNull() }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -876,6 +987,41 @@ private fun LabelScanRequiredCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
+            // Already-verified evidence -- never discarded just because
+            // the OTHER evidence group is still missing.
+            if (verifiedIngredientNames.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = "Verified ingredients so far",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = verifiedIngredientNames.joinToString(", "),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            // What's still needed -- one line per missing evidence group,
+            // so two sequential photos (nutrition panel, then ingredient
+            // list, or vice versa) each know what to capture next.
+            if (missingMessages.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Column {
+                    missingMessages.forEach { message ->
+                        Text(
+                            text = message,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(14.dp))
 
             Row(
@@ -894,7 +1040,7 @@ private fun LabelScanRequiredCard(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(state.suggestedAction?.cleanOrNull() ?: "Scan Ingredient Label", fontSize = 13.sp)
+                    Text(SCAN_LABEL_ACTION_TEXT, fontSize = 13.sp)
                 }
                 TextButton(onClick = onDismiss) {
                     Text("Dismiss")

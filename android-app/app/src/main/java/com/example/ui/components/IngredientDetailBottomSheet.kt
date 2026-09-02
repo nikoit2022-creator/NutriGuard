@@ -36,9 +36,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.IngredientEntity
 import com.example.data.model.RiskLevel
+import com.example.data.remote.dto.cleanOrNull
 import com.example.ui.theme.NutriGuardRadius
-import com.example.ui.theme.RiskRed
 import com.example.ui.theme.getRiskUiColor
+import com.example.ui.theme.getWhoIarcUiColor
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -111,7 +112,7 @@ fun IngredientDetailBottomSheet(
                 color = MaterialTheme.colorScheme.onSurface
             )
 
-            if (ingredient.scientificName.hasDisplayValue()) {
+            if (ingredient.scientificName.cleanOrNull() != null) {
                 Text(
                     text = ingredient.scientificName,
                     style = MaterialTheme.typography.bodyMedium,
@@ -139,7 +140,8 @@ fun IngredientDetailBottomSheet(
                     )
                 }
 
-                if (ingredient.eNumber.hasDisplayValue()) {
+                val displayENumber = ingredient.eNumber.cleanOrNull()
+                if (displayENumber != null) {
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(NutriGuardRadius.small))
@@ -147,7 +149,7 @@ fun IngredientDetailBottomSheet(
                             .padding(horizontal = 10.dp, vertical = 5.dp)
                     ) {
                         Text(
-                            text = "E-Number: ${ingredient.eNumber}",
+                            text = "E-Number: $displayENumber",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -169,9 +171,13 @@ fun IngredientDetailBottomSheet(
             InfoSectionItem("FDA (US Food & Drug) Status", ingredient.fdaStatus)
 
             ingredient.whoIarcClassification
-                ?.takeIf { it.hasDisplayValue() }
-                ?.let {
-                    InfoSectionItem("WHO / IARC Classification", it, highlightColor = RiskRed)
+                .cleanOrNull()
+                ?.let { classification ->
+                    InfoSectionItem(
+                        "WHO / IARC Classification",
+                        classification,
+                        highlightColor = getWhoIarcUiColor(classification).main
+                    )
                 }
 
             InfoSectionItem("Countries Banned or Restricted", ingredient.countriesRestrictedOrBanned)
@@ -191,7 +197,7 @@ private fun InfoSectionItem(
     content: String,
     highlightColor: Color? = null
 ) {
-    if (!content.hasDisplayValue()) return
+    val displayContent = content.cleanOrNull() ?: return
 
     Column(modifier = Modifier.padding(vertical = 6.dp)) {
         Text(
@@ -202,13 +208,9 @@ private fun InfoSectionItem(
         )
         Spacer(modifier = Modifier.height(2.dp))
         Text(
-            text = content,
+            text = displayContent,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurface
         )
     }
 }
-
-
-private fun String?.hasDisplayValue(): Boolean =
-    !isNullOrBlank() && !equals("null", ignoreCase = true)

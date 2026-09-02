@@ -38,8 +38,32 @@ class FakeProductAnalysisSource(
     var lastBarcodeArgument: String? = null
         private set
 
+    var analyzeImageLabelCallCount: Int = 0
+        private set
+
+    /** The `barcode` argument [analyzeImageLabel] was last called with -- lets a test assert whether/what pendingBarcode was attached to a camera/gallery submission. */
+    var lastImageLabelBarcodeArgument: String? = null
+        private set
+
+    var analyzeOcrTextCallCount: Int = 0
+        private set
+
+    /** The `barcode` argument [analyzeOcrText] was last called with -- lets a test assert whether/what pendingBarcode was attached to a manual text submission. */
+    var lastOcrTextBarcodeArgument: String? = null
+        private set
+
+    /** The `rawText` argument [analyzeOcrText] was last called with. */
+    var lastOcrTextArgument: String? = null
+        private set
+
     /** Optional artificial suspend delay before resolving [barcodeResult], to observe the Searching window. */
     var barcodeResultDelayMillis: Long = 0
+
+    /** Optional artificial suspend delay before resolving [imageResult], to observe the Searching window. */
+    var imageResultDelayMillis: Long = 0
+
+    /** Optional artificial suspend delay before resolving [ocrResult], to observe the Searching window. */
+    var ocrResultDelayMillis: Long = 0
 
     override suspend fun saveUserProfile(profile: UserHealthProfile) {
         // no-op: not exercised by the barcode-flow tests
@@ -54,9 +78,24 @@ class FakeProductAnalysisSource(
         return barcodeResult.getOrThrow()
     }
 
-    override suspend fun analyzeOcrText(rawText: String): FullProductAnalysis = ocrResult.getOrThrow()
+    override suspend fun analyzeOcrText(rawText: String, barcode: String?): FullProductAnalysis {
+        analyzeOcrTextCallCount += 1
+        lastOcrTextArgument = rawText
+        lastOcrTextBarcodeArgument = barcode
+        if (ocrResultDelayMillis > 0) {
+            kotlinx.coroutines.delay(ocrResultDelayMillis)
+        }
+        return ocrResult.getOrThrow()
+    }
 
-    override suspend fun analyzeImageLabel(bitmap: Bitmap): FullProductAnalysis = imageResult.getOrThrow()
+    override suspend fun analyzeImageLabel(bitmap: Bitmap, barcode: String?): FullProductAnalysis {
+        analyzeImageLabelCallCount += 1
+        lastImageLabelBarcodeArgument = barcode
+        if (imageResultDelayMillis > 0) {
+            kotlinx.coroutines.delay(imageResultDelayMillis)
+        }
+        return imageResult.getOrThrow()
+    }
 }
 
 /** Minimal, obviously-fake [FullProductAnalysis] builder for test scripting. */
