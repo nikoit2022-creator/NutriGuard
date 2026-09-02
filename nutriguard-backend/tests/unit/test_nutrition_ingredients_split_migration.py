@@ -58,11 +58,32 @@ def test_migration_adds_has_verified_ingredients_with_safe_backfill():
     assert "'products'" in source
     assert "has_verified_ingredients" in source
     # NOT NULL on an existing table needs a server_default so existing
-    # rows don't break the migration.
-    assert "server_default=sa.text('true')" in source
+    # rows don't break the migration -- `false` (review round 5, finding
+    # 2: fail-safe, not fail-open) is BOTH the temporary default needed
+    # to satisfy NOT NULL here AND this column's correct final default.
+    assert "server_default=sa.text('false')" in source
     # Conservative backfill: copies the OLD model's combined-completeness
     # proxy (has_verified_nutrition) verbatim, never inspects text
     # content or upgrades a row based on a non-empty placeholder value.
     assert "UPDATE products SET has_verified_ingredients = has_verified_nutrition" in source
     assert "def downgrade" in source
     assert "drop_column('products', 'has_verified_ingredients')" in source
+
+
+def test_migration_flips_the_two_pre_existing_verification_columns_to_fail_safe_defaults():
+    """Review round 5, finding 2: `is_verified`/`has_verified_nutrition`
+    (added by the earlier `cf5522508f9a` migration with a fail-open
+    `server_default=true`) must have their DEFAULT flipped to `false`
+    here, and `downgrade()` must restore the exact original `true`
+    default for both -- never leave a fail-open default reachable by a
+    future bare INSERT after either an upgrade or a downgrade."""
+    source = (
+        BACKEND_ROOT / "alembic" / "versions" / f"{REVISION}_split_nutrition_ingredients_verification.py"
+    ).read_text()
+    upgrade_src, downgrade_src = source.split("def downgrade", 1)
+
+    assert "alter_column('products', 'is_verified', server_default=sa.text('false'))" in upgrade_src
+    assert "alter_column('products', 'has_verified_nutrition', server_default=sa.text('false'))" in upgrade_src
+
+    assert "alter_column('products', 'has_verified_nutrition', server_default=sa.text('true'))" in downgrade_src
+    assert "alter_column('products', 'is_verified', server_default=sa.text('true'))" in downgrade_src

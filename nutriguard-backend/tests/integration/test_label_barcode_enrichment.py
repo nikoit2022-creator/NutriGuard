@@ -305,6 +305,7 @@ async def test_verified_local_data_is_not_overwritten_by_ocr(app_client, monkeyp
         source="label_scan",
         is_verified=True,
         has_verified_nutrition=True,
+        has_verified_ingredients=True,
     )
     db_session.add(verified)
     await db_session.commit()
@@ -507,14 +508,22 @@ async def test_literal_placeholder_barcode_values_become_none(app_client, monkey
 
 @pytest.mark.asyncio
 async def test_ocr_text_without_barcode_is_backward_compatible(app_client):
+    """No `barcode` field at all -> still routed to the standalone
+    (no-barcode) pipeline, same synthetic `ocr_...` identity as always.
+    V12 (review round 5, finding 1): the RESPONSE shape for this
+    endpoint changed (see `test_standalone_ocr_text_...` below) -- this
+    test only pins that omitting the field is still handled the same
+    way `_upload`'s placeholder-barcode tests above pin it for
+    `/scan/label-image`."""
     headers = await _register_device(app_client, "ocr-text-no-barcode-device")
     resp = await app_client.post(
         "/api/v1/scan/ocr-text",
         json={"rawText": "Water, Sugar, Salt, Citric Acid"},
         headers=headers,
     )
-    assert resp.status_code == 200
-    assert resp.json()["product"]["barcode"].startswith("ocr_")
+    assert resp.status_code == 404
+    barcode = resp.json()["error"]["details"]["discoveredIdentity"]["barcode"]
+    assert barcode.startswith("ocr_")
 
 
 @pytest.mark.asyncio
@@ -1464,7 +1473,14 @@ async def test_standalone_label_image_null_nutrition_field_is_not_fabricated_ver
 ):
     """Gemini succeeds and gives real ingredients, but explicitly nulls
     one nutrition value (the label was unreadable there) -- must NOT
-    silently score from a placeholder zero."""
+    silently score from a placeholder zero.
+
+    V12 (review round 5, finding 3): this is exactly the normal
+    "ingredients-only photo" case (the Android "Ingredient Label" tab's
+    everyday output when only the ingredients list, not the nutrition
+    panel, was in frame) -- the response must hand back the genuinely
+    verified ingredient evidence as useful partial data, not just a
+    bare retry signal."""
     _mock_full_gemini(monkeypatch, sodiumMg=None)
     headers = await _register_device(app_client, "standalone-null-nutrition-device")
 
@@ -1474,9 +1490,26 @@ async def test_standalone_label_image_null_nutrition_field_is_not_fabricated_ver
     assert error["code"] == "PRODUCT_NOT_FOUND"
     assert error["details"]["labelScanRequired"] is True
 
+    # Additive partial-analysis fields (finding 3): no fabricated/zero
+    # score, but the genuinely verified ingredients ARE included.
+    assert error["details"]["analysisComplete"] is False
+    assert error["details"]["healthScoreAvailable"] is False
+    assert error["details"]["healthScore"] is None
+    assert error["details"]["nutritionScanRequired"] is True
+    assert error["details"]["ingredientsScanRequired"] is False
+    ingredients_out = error["details"]["ingredients"]
+    assert len(ingredients_out) >= 1
+    names = {ing["commonName"] for ing in ingredients_out}
+    assert "Sugar" in names
+    # Full IngredientOut-shaped entries (same shape the success response's
+    # `ingredients` array already uses) -- not a truncated summary.
+    assert "riskLevel" in ingredients_out[0]
+    assert "isVegan" in ingredients_out[0]
+
     barcode = error["details"]["discoveredIdentity"]["barcode"]
     stored = await db_session.get(Product, barcode)
     assert stored.has_verified_nutrition is False
+    assert stored.has_verified_ingredients is True
     assert float(stored.sodium_mg) == 0.0  # safe neutral, never a garbage/rejected value
 
 
@@ -1525,38 +1558,239 @@ async def test_standalone_label_image_no_raw_image_bytes_persisted(app_client, m
 
 
 @pytest.mark.asyncio
-async def test_standalone_ocr_text_prefers_bulgarian_over_other_language_duplicate(app_client):
+async def test_standalone_label_image_incomplete_response_still_preserves_provenance_and_no_image_bytes(
+    app_client, monkeypatch, db_session
+):
+    """The provenance/no-image-bytes guarantees above must hold for the
+    INCOMPLETE (404 partial) path too, not only the success path --
+    `_record_label_provenance` and `PIL.Image.verify()`-only image
+    handling both run before the completeness check."""
+    image_bytes = _fake_jpeg_bytes()
+    _mock_full_gemini(monkeypatch, sodiumMg=None)
+    headers = await _register_device(app_client, "standalone-incomplete-provenance-device")
+
+    files = {"image": ("label.jpg", image_bytes, "image/jpeg")}
+    resp = await app_client.post("/api/v1/scan/label-image", headers=headers, files=files)
+    assert resp.status_code == 404
+    barcode = resp.json()["error"]["details"]["discoveredIdentity"]["barcode"]
+
+    sources = (
+        await db_session.execute(
+            select(ProductSource).where(ProductSource.barcode == barcode, ProductSource.provider == "label_ocr")
+        )
+    ).scalars().all()
+    assert len(sources) == 1
+
+    stored = await db_session.get(Product, barcode)
+    for column in Product.__table__.columns:
+        value = getattr(stored, column.name)
+        if isinstance(value, str) and image_bytes.decode("latin-1") in value:
+            raise AssertionError(f"raw image bytes leaked into column {column.name!r}")
+
+
+@pytest.mark.asyncio
+async def test_neither_standalone_incomplete_response_creates_a_scan_history_entry(
+    app_client, monkeypatch, db_session
+):
+    """Neither incomplete standalone path (label-image or ocr-text) may
+    leave behind a scan-history entry carrying a fake/placeholder score
+    -- `_finalize_standalone_label_analysis` only calls
+    `scan_history_repository.insert` AFTER the completeness gate."""
+    from app.models.scan_history import ScanHistory
+
+    _mock_full_gemini(monkeypatch, sodiumMg=None)
+    headers = await _register_device(app_client, "no-scan-history-device")
+
+    img_resp = await _upload(app_client, headers)
+    assert img_resp.status_code == 404
+
+    ocr_resp = await app_client.post(
+        "/api/v1/scan/ocr-text", json={"rawText": "Water, Sugar, Salt"}, headers=headers
+    )
+    assert ocr_resp.status_code == 404
+
+    count = (await db_session.execute(select(func.count()).select_from(ScanHistory))).scalar_one()
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_barcode_nutrition_plus_partial_ingredients_completes_normally(
+    app_client, monkeypatch, db_session
+):
+    """Review round 5, finding 3's explicit "completes normally" case:
+    an existing row that already has verified NUTRITION (e.g. from a
+    trusted barcode provider) plus a label scan that genuinely completes
+    the INGREDIENTS group must return the normal, full `200` success
+    response -- never the partial/incomplete shape -- once both groups
+    are verified."""
+    barcode = "3422812463847"
+    existing = Product(
+        barcode=barcode,
+        product_name="Nutrition-Known Product",
+        brand="DiscoveredBrand",
+        category="cat",
+        raw_ingredient_text="",
+        ingredient_ids="",
+        health_score=0,
+        nova_group=0,
+        sugar_grams=4.0,
+        sodium_mg=40.0,
+        saturated_fat_grams=0.0,
+        allergens_detected="",
+        source="open_food_facts",
+        is_verified=False,
+        has_verified_nutrition=True,
+        has_verified_ingredients=False,
+    )
+    db_session.add(existing)
+    await db_session.commit()
+
+    _mock_full_gemini(monkeypatch)
+    headers = await _register_device(app_client, "nutrition-plus-partial-ingredients-device")
+
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["product"]["barcode"] == barcode
+    assert 0 <= body["healthScore"] <= 100
+    assert "product" in body and "ingredients" in body
+
+    db_session.expire_all()
+    stored = await db_session.get(Product, barcode)
+    assert stored.is_verified is True
+    assert stored.has_verified_ingredients is True
+    # Nutrition was already verified and must be UNCHANGED by this call.
+    assert float(stored.sugar_grams) == 4.0
+
+
+@pytest.mark.asyncio
+async def test_standalone_ocr_text_prefers_bulgarian_over_other_language_duplicate(app_client, db_session):
+    """The language policy (EN/BG preference) still applies to standalone
+    OCR text even though the response is now gated on completeness (V12,
+    review round 5, finding 1) -- the language-resolved text isn't
+    surfaced in the 404 body itself (see `_label_scan_required_details`),
+    so this checks the PERSISTED row directly, same pattern the other
+    `standalone_label_image_*` language tests in this section use."""
     headers = await _register_device(app_client, "standalone-ocr-bg-preferred-device")
     resp = await app_client.post(
         "/api/v1/scan/ocr-text",
         json={"rawText": "Вода, Захар, Сол / Wasser, Zucker, Salz"},
         headers=headers,
     )
-    # This endpoint never gates its response on completeness (its
-    # nutrition is always a heuristic guess, by long-standing design --
-    # see `analyze_ocr_text`'s docstring) -- it must still succeed.
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "Захар" in body["product"]["rawIngredientText"]
-    assert "Zucker" not in body["product"]["rawIngredientText"]
+    assert resp.status_code == 404  # ingredients verified, nutrition never is -- see below
+    barcode = resp.json()["error"]["details"]["discoveredIdentity"]["barcode"]
+
+    stored = await db_session.get(Product, barcode)
+    assert "Захар" in stored.raw_ingredient_text
+    assert "Zucker" not in stored.raw_ingredient_text
+
+
+# V12 (PR #9 review round 5, finding 1): the `always_verified` escape
+# hatch that used to force EVERY standalone `/scan/ocr-text` call to
+# `200`/`is_verified=True` regardless of nutrition trustworthiness has
+# been removed. This endpoint's nutrition is ALWAYS a heuristic guess,
+# never genuinely extracted -- so it can now NEVER complete the
+# NUTRITION group on its own, and a standalone OCR-text submission
+# CONSISTENTLY returns the partial/`labelScanRequired` response instead
+# of a fabricated `200`. See README section 11.11.
 
 
 @pytest.mark.asyncio
-async def test_standalone_ocr_text_still_always_succeeds_even_when_nutrition_is_heuristic(app_client, db_session):
-    """Confirms the deliberate scoping decision documented in
-    `analyze_ocr_text`/`_finalize_standalone_label_analysis`
-    (`always_verified=True`): this endpoint's response is never gated,
-    and the persisted row stays fully `is_verified` so a later
-    `POST /scan/barcode` lookup of the same synthetic id still works."""
-    headers = await _register_device(app_client, "standalone-ocr-always-verified-device")
+async def test_standalone_ocr_text_returns_partial_ingredients_without_health_score(app_client, db_session):
+    headers = await _register_device(app_client, "standalone-ocr-partial-device")
     resp = await app_client.post(
         "/api/v1/scan/ocr-text", json={"rawText": "Water, Sugar, Salt"}, headers=headers
     )
-    assert resp.status_code == 200
-    barcode = resp.json()["product"]["barcode"]
+    assert resp.status_code == 404
+    error = resp.json()["error"]
+    assert error["code"] == "PRODUCT_NOT_FOUND"
+    assert "healthScore" not in resp.json()  # not a FullProductAnalysisOut body at all
+    details = error["details"]
+    assert details["labelScanRequired"] is True
+    assert details["analysisComplete"] is False
+    assert details["healthScoreAvailable"] is False
+    assert details["healthScore"] is None
+    assert details["nutritionScanRequired"] is True
+    assert details["ingredientsScanRequired"] is False  # literal OCR text IS trustworthy ingredient evidence
+    ingredients_out = details["ingredients"]
+    assert len(ingredients_out) >= 1
+    names = {ing["commonName"] for ing in ingredients_out}
+    assert "Sugar" in names
 
+    barcode = details["discoveredIdentity"]["barcode"]
+    stored = await db_session.get(Product, barcode)
+    assert stored.has_verified_nutrition is False
+    assert stored.has_verified_ingredients is True
+    assert stored.is_verified is False
+
+    # Consistent everywhere: a LATER lookup of the same (still
+    # incomplete) synthetic id also correctly stays gated -- no
+    # endpoint fabricates verification for it.
+    lookup = await app_client.post("/api/v1/scan/barcode", json={"barcode": barcode}, headers=headers)
+    assert lookup.status_code == 404
+    assert lookup.json()["error"]["details"]["labelScanRequired"] is True
+
+
+@pytest.mark.asyncio
+async def test_standalone_ocr_text_gemini_success_still_does_not_verify_nutrition(app_client, monkeypatch):
+    """Even when Gemini's OWN JSON call succeeds for `/scan/ocr-text`,
+    its nutrition figures are still always recomputed by the
+    deterministic keyword heuristic, never genuinely extracted (the
+    documented `gemini_result_parser.py` quirk) -- so Gemini succeeding
+    must not, by itself, fabricate verified nutrition either."""
+    from app.integrations.gemini import gemini_service
+
+    async def fake_analyze_text(raw_text: str) -> str:
+        return json.dumps(
+            {
+                "productName": "Gemini Parsed Product",
+                "brand": "Some Brand",
+                "rawIngredientText": raw_text,
+                "ingredients": [{"commonName": "Sugar"}],
+            }
+        )
+
+    monkeypatch.setattr(gemini_service, "analyze_text", fake_analyze_text)
+    headers = await _register_device(app_client, "standalone-ocr-gemini-success-device")
+
+    resp = await app_client.post(
+        "/api/v1/scan/ocr-text", json={"rawText": "Water, Sugar, Salt"}, headers=headers
+    )
+    assert resp.status_code == 404
+    assert resp.json()["error"]["details"]["nutritionScanRequired"] is True
+
+
+@pytest.mark.asyncio
+async def test_ocr_text_with_barcode_then_label_image_completes_the_product(app_client, monkeypatch, db_session):
+    """Review round 5, finding 1's required scenario: LATER trustworthy
+    nutrition evidence can still complete a product whose ingredients
+    were established via `/scan/ocr-text` + a barcode, even though
+    standalone OCR text alone can never do so."""
+    barcode = "3166119052716"
+    headers = await _register_device(app_client, "ocr-then-label-completes-device")
+
+    ocr_resp = await app_client.post(
+        "/api/v1/scan/ocr-text",
+        json={"rawText": "Contains: Sodium Nitrite, Corn Syrup", "barcode": barcode},
+        headers=headers,
+    )
+    assert ocr_resp.status_code == 404
+    assert ocr_resp.json()["error"]["details"]["ingredientsScanRequired"] is False
+    assert ocr_resp.json()["error"]["details"]["nutritionScanRequired"] is True
+
+    _mock_full_gemini(monkeypatch, sugarGrams=1.0, sodiumMg=1.0, saturatedFatGrams=1.0)
+    resp = await _upload(app_client, headers, barcode=barcode)
+    assert resp.status_code == 200
+    assert resp.json()["product"]["barcode"] == barcode
+
+    db_session.expire_all()
     stored = await db_session.get(Product, barcode)
     assert stored.is_verified is True
+    assert stored.has_verified_nutrition is True
+    assert stored.has_verified_ingredients is True
+    # Ingredients came from the OCR-text call, NOT overwritten by the
+    # (already-locked) label-image call's own text.
+    assert "Sodium Nitrite" in stored.raw_ingredient_text
 
     lookup = await app_client.post("/api/v1/scan/barcode", json={"barcode": barcode}, headers=headers)
     assert lookup.status_code == 200
