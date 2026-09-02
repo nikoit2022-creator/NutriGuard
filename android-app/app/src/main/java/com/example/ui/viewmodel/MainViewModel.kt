@@ -17,6 +17,7 @@ import com.example.data.remote.BarcodeScanException
 import com.example.data.remote.BarcodeTimeoutException
 import com.example.data.remote.DiscoveredIdentity
 import com.example.data.remote.LabelScanRequiredException
+import com.example.data.remote.dto.toEntities
 import com.example.data.repository.FullProductAnalysis
 import com.example.data.repository.ProductAnalysisSource
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -37,11 +38,16 @@ sealed interface AnalysisUiState {
 }
 
 /**
- * Drives the Scan screen's reaction to a barcode lookup: it stays on
- * this screen (`ScanHomeScreen`) for the whole [Searching] window and
- * only navigates to Product Details once [scanBarcode] resolves with a
- * genuine success (see [navigateToResultEvent]) -- never eagerly, and
- * never for [LabelScanRequired] or [Failed].
+ * Drives the Scan screen's reaction to EITHER a barcode lookup
+ * (`scanBarcode`) OR a label-image submission (`analyzeLabelImage`) --
+ * both endpoints share this one state machine (and this one card area
+ * on `ScanHomeScreen`) because they now share the identical result
+ * shape: a genuine success, a structured partial ("more evidence
+ * needed") result, or a retryable failure. The screen stays put for
+ * the whole [Searching] window and only navigates to Product Details
+ * once a call resolves with a genuine success (see
+ * [navigateToResultEvent]) -- never eagerly, and never for
+ * [LabelScanRequired] or [Failed].
  */
 sealed interface BarcodeLookupUiState {
     object Idle : BarcodeLookupUiState
@@ -49,16 +55,48 @@ sealed interface BarcodeLookupUiState {
 
     /**
      * Backend returned `PRODUCT_NOT_FOUND` with `details.labelScanRequired = true`
-     * (barcode unknown, or found but too incomplete for a confident
-     * analysis) -- never a fabricated product. [discoveredIdentity] is
-     * only non-null when the backend actually found something worth
+     * -- the product/photo is not yet enough for a confident analysis,
+     * but never a fabricated one either. [discoveredIdentity] is only
+     * non-null when the backend actually found something worth
      * showing.
+     *
+     * [analysisComplete]/[healthScoreAvailable]/[healthScore]/
+     * [nutritionScanRequired]/[ingredientsScanRequired]/[ingredients]
+     * mirror the backend's V12 additive partial-analysis payload and
+     * are only populated for a genuine partial result -- all `null`/
+     * empty for a plain "barcode not found anywhere" 404. [healthScore]
+     * must NEVER be treated as `0` when `healthScoreAvailable` is false
+     * or absent -- it means "not computed", not "a score of zero".
+     * [ingredients] is the ALREADY-VERIFIED evidence for this row (from
+     * a prior scan, or from THIS submission) -- safe to show as-is, it
+     * is never fabricated.
      */
     data class LabelScanRequired(
         val reason: String,
         val suggestedAction: String?,
-        val discoveredIdentity: DiscoveredIdentity?
-    ) : BarcodeLookupUiState
+        val discoveredIdentity: DiscoveredIdentity?,
+        val analysisComplete: Boolean?,
+        val healthScoreAvailable: Boolean?,
+        val healthScore: Int?,
+        val nutritionScanRequired: Boolean?,
+        val ingredientsScanRequired: Boolean?,
+        val ingredients: List<IngredientEntity>
+    ) : BarcodeLookupUiState {
+        companion object {
+            fun from(e: LabelScanRequiredException, idPrefixForSyntheticIds: String): LabelScanRequired =
+                LabelScanRequired(
+                    reason = e.reason,
+                    suggestedAction = e.suggestedAction,
+                    discoveredIdentity = e.discoveredIdentity,
+                    analysisComplete = e.analysisComplete,
+                    healthScoreAvailable = e.healthScoreAvailable,
+                    healthScore = e.healthScore,
+                    nutritionScanRequired = e.nutritionScanRequired,
+                    ingredientsScanRequired = e.ingredientsScanRequired,
+                    ingredients = e.ingredients.toEntities(idPrefixForSyntheticIds)
+                )
+        }
+    }
 
     /** Network failure, timeout, or an unexpected server/parse error -- always retryable. */
     data class Failed(val message: String, val barcode: String) : BarcodeLookupUiState
@@ -73,6 +111,22 @@ class MainViewModel(
 
     private val _barcodeLookupState = MutableStateFlow<BarcodeLookupUiState>(BarcodeLookupUiState.Idle)
     val barcodeLookupState: StateFlow<BarcodeLookupUiState> = _barcodeLookupState.asStateFlow()
+
+    // The real barcode a `LabelScanRequired` result is for -- set the
+    // moment `scanBarcode` receives it (see that function), so a
+    // follow-up label-image submission (`analyzeLabelImage`) can attach
+    // it via the backend's optional `barcode` multipart field and
+    // combine both sources into ONE product. Deliberately a SEPARATE
+    // StateFlow from [barcodeLookupState]: dismissing/replacing the
+    // CARD (`dismissBarcodeLookupState`) must not lose this -- it is
+    // only ever cleared by a genuinely successful analysis or an
+    // explicit whole-flow cancellation (`cancelPendingScanFlow`), never
+    // implicitly. NEVER a synthetic `img_.../ocr_...` id -- only
+    // `scanBarcode`'s own (real, user-submitted) barcode argument sets
+    // this; a standalone label-image response's synthetic id is never
+    // adopted here.
+    private val _pendingBarcode = MutableStateFlow<String?>(null)
+    val pendingBarcode: StateFlow<String?> = _pendingBarcode.asStateFlow()
 
     // One-shot "navigate to Product Details now" signal for a successful
     // barcode lookup -- a StateFlow would re-fire navigation on every
@@ -125,13 +179,18 @@ class MainViewModel(
                 val result = repository.analyzeBarcode(barcode)
                 _analysisState.value = AnalysisUiState.Success(result)
                 _barcodeLookupState.value = BarcodeLookupUiState.Idle
+                // A genuine, complete result -- clear any stale pending
+                // barcode from an earlier, now-superseded incomplete flow.
+                _pendingBarcode.value = null
                 _navigateToResultEvent.tryEmit(Unit)
             } catch (e: LabelScanRequiredException) {
-                _barcodeLookupState.value = BarcodeLookupUiState.LabelScanRequired(
-                    reason = e.reason,
-                    suggestedAction = e.suggestedAction,
-                    discoveredIdentity = e.discoveredIdentity
-                )
+                // Requirement: never clear the pending barcode BEFORE the
+                // request -- this IS the request that establishes it, so
+                // set it here, unconditionally (overwriting whatever was
+                // pending before, if anything, since this is a fresh
+                // user-initiated lookup for THIS barcode).
+                _pendingBarcode.value = barcode
+                _barcodeLookupState.value = BarcodeLookupUiState.LabelScanRequired.from(e, barcode)
             } catch (e: BarcodeTimeoutException) {
                 _barcodeLookupState.value = BarcodeLookupUiState.Failed(
                     e.message ?: "The request timed out. Please try again.",
@@ -166,9 +225,29 @@ class MainViewModel(
         }
     }
 
-    /** Dismisses a [BarcodeLookupUiState.LabelScanRequired] or [BarcodeLookupUiState.Failed] card without navigating anywhere. */
+    /**
+     * Dismisses a [BarcodeLookupUiState.LabelScanRequired] or
+     * [BarcodeLookupUiState.Failed] card back to [BarcodeLookupUiState.Idle]
+     * WITHOUT navigating anywhere and WITHOUT clearing [pendingBarcode]
+     * -- e.g. tapping "Scan label for more information" hides the card
+     * (to make room for the camera) but the flow is still very much
+     * active. Use [cancelPendingScanFlow] to actually abandon the flow.
+     */
     fun dismissBarcodeLookupState() {
         _barcodeLookupState.value = BarcodeLookupUiState.Idle
+    }
+
+    /**
+     * Explicitly abandons the current pending-barcode flow (e.g. the
+     * user taps "Dismiss" on a [BarcodeLookupUiState.LabelScanRequired]
+     * card rather than taking another photo) -- clears BOTH the card
+     * state AND [pendingBarcode], so a later label-image submission
+     * starts a fresh, unlinked (standalone) analysis instead of
+     * silently still attaching an abandoned barcode.
+     */
+    fun cancelPendingScanFlow() {
+        _barcodeLookupState.value = BarcodeLookupUiState.Idle
+        _pendingBarcode.value = null
     }
 
     fun analyzeOcrText(text: String) {
@@ -183,14 +262,74 @@ class MainViewModel(
         }
     }
 
+    /**
+     * Submits a label photo (Ingredient Label camera capture OR a
+     * gallery pick -- both routes call this same function, see
+     * `ScanHomeScreen`) for analysis. Shares [barcodeLookupState] with
+     * [scanBarcode] (see that state's docs): stays on the Scan screen
+     * showing [BarcodeLookupUiState.Searching], and only navigates on a
+     * genuine, complete success.
+     *
+     * If [pendingBarcode] is currently set (a prior `scanBarcode` call
+     * returned `labelScanRequired`, or an earlier photo for the SAME
+     * barcode was itself still incomplete), it is automatically
+     * attached to this submission so the backend combines this photo
+     * with that barcode identity into ONE product -- this is what lets
+     * two sequential photos (e.g. nutrition panel, then ingredients
+     * list) merge into the same result. [pendingBarcode] is cleared
+     * only on a genuine full success; a request that comes back STILL
+     * incomplete (another [LabelScanRequiredException]) leaves it
+     * untouched, so a follow-up photo keeps combining into the same
+     * product. Standalone submissions (no [pendingBarcode] set) are
+     * unaffected either way -- exactly the pre-existing behavior.
+     */
     fun analyzeLabelImage(bitmap: Bitmap) {
+        if (_barcodeLookupState.value is BarcodeLookupUiState.Searching) return
+        _barcodeLookupState.value = BarcodeLookupUiState.Searching
+        val barcodeForThisSubmission = _pendingBarcode.value
         viewModelScope.launch {
-            _analysisState.value = AnalysisUiState.Loading
             try {
-                val result = repository.analyzeImageLabel(bitmap)
+                val result = repository.analyzeImageLabel(bitmap, barcodeForThisSubmission)
                 _analysisState.value = AnalysisUiState.Success(result)
+                _barcodeLookupState.value = BarcodeLookupUiState.Idle
+                _pendingBarcode.value = null
+                _navigateToResultEvent.tryEmit(Unit)
+            } catch (e: LabelScanRequiredException) {
+                // Still incomplete -- a useful partial result, not a
+                // generic error (never navigate away). pendingBarcode is
+                // deliberately left exactly as it was: unchanged if this
+                // submission was barcode-linked (so the NEXT photo keeps
+                // combining into the same product), still null if this
+                // was a standalone submission (never adopt the
+                // synthetic id a standalone response's own identity
+                // carries -- see LabelScanRequiredException's docs).
+                val idPrefix = barcodeForThisSubmission ?: e.discoveredIdentity?.barcode ?: "label_scan"
+                _barcodeLookupState.value = BarcodeLookupUiState.LabelScanRequired.from(e, idPrefix)
+            } catch (e: BarcodeTimeoutException) {
+                _barcodeLookupState.value = BarcodeLookupUiState.Failed(
+                    e.message ?: "The request timed out. Please try again.",
+                    barcodeForThisSubmission ?: ""
+                )
+            } catch (e: BarcodeNetworkException) {
+                _barcodeLookupState.value = BarcodeLookupUiState.Failed(
+                    e.message ?: "Unable to reach the server. Please check your connection.",
+                    barcodeForThisSubmission ?: ""
+                )
+            } catch (e: BarcodeAuthException) {
+                _barcodeLookupState.value = BarcodeLookupUiState.Failed(
+                    e.message ?: "Your session could not be verified. Please restart the app and try again.",
+                    barcodeForThisSubmission ?: ""
+                )
+            } catch (e: BarcodeScanException) {
+                _barcodeLookupState.value = BarcodeLookupUiState.Failed(
+                    e.message ?: "Something went wrong analyzing this label. Please try again.",
+                    barcodeForThisSubmission ?: ""
+                )
             } catch (e: Exception) {
-                _analysisState.value = AnalysisUiState.Error(e.localizedMessage ?: "Failed to analyze image label")
+                _barcodeLookupState.value = BarcodeLookupUiState.Failed(
+                    e.localizedMessage ?: "Something went wrong analyzing this label. Please try again.",
+                    barcodeForThisSubmission ?: ""
+                )
             }
         }
     }

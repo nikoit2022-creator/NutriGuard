@@ -252,14 +252,17 @@ data class ParsedScanData(
     val warnings: List<HealthWarning>
 )
 
-fun ScanLabelImageResponseDto.toParsedEntities(): ParsedScanData {
-    val productDto = product
-
-    val nonNullBarcode = productDto?.barcode?.takeIf { it.isNotBlank() }
-        ?: ("SYNTH_IMG_" + UUID.randomUUID().toString().replace("-", "").take(12))
-
-    val ingredientEntities = ingredients?.mapIndexed { index, ing ->
-        val ingId = ing.id?.takeIf { it.isNotBlank() } ?: "ING_${nonNullBarcode}_$index"
+/**
+ * Converts backend [IngredientDto]s into domain [IngredientEntity]s,
+ * synthesizing a stable id (`ING_<idPrefix>_<index>`) for any entry the
+ * backend didn't give an id — shared by the full-success parsing below
+ * AND by a partial/`labelScanRequired` result's already-verified
+ * `ingredients` list (see [com.example.data.remote.BackendErrorDetailsDto]),
+ * so both render identically instead of two divergent mappings.
+ */
+fun List<IngredientDto>.toEntities(idPrefix: String): List<IngredientEntity> =
+    mapIndexed { index, ing ->
+        val ingId = ing.id?.takeIf { it.isNotBlank() } ?: "ING_${idPrefix}_$index"
         IngredientEntity(
             id = ingId,
             commonName = ing.commonName ?: "Unknown Ingredient",
@@ -293,7 +296,15 @@ fun ScanLabelImageResponseDto.toParsedEntities(): ParsedScanData {
             badForChildren = ing.badForChildren ?: false,
             badForHighCholesterol = ing.badForHighCholesterol ?: false
         )
-    } ?: emptyList()
+    }
+
+fun ScanLabelImageResponseDto.toParsedEntities(): ParsedScanData {
+    val productDto = product
+
+    val nonNullBarcode = productDto?.barcode?.takeIf { it.isNotBlank() }
+        ?: ("SYNTH_IMG_" + UUID.randomUUID().toString().replace("-", "").take(12))
+
+    val ingredientEntities = (ingredients ?: emptyList()).toEntities(nonNullBarcode)
 
     val joinedIngredientIds = ingredientEntities.map { it.id }.joinToString(",")
 

@@ -44,7 +44,16 @@ interface ProductAnalysisSource {
     suspend fun saveUserProfile(profile: UserHealthProfile)
     suspend fun analyzeBarcode(barcode: String): FullProductAnalysis
     suspend fun analyzeOcrText(rawText: String): FullProductAnalysis
-    suspend fun analyzeImageLabel(bitmap: Bitmap): FullProductAnalysis
+
+    /**
+     * [barcode], when non-null, is forwarded to the backend's optional
+     * multipart `barcode` field (see [com.example.data.remote.NutriGuardApiService.scanLabelImage])
+     * so this label photo combines with an already-known barcode
+     * identity into ONE canonical product instead of a synthetic
+     * `img_...` row. Must always be a real barcode -- never a synthetic
+     * id from a previous standalone response.
+     */
+    suspend fun analyzeImageLabel(bitmap: Bitmap, barcode: String? = null): FullProductAnalysis
 }
 
 class FoodAnalysisRepository(
@@ -205,10 +214,15 @@ class FoodAnalysisRepository(
         )
     }
 
-    override suspend fun analyzeImageLabel(bitmap: Bitmap): FullProductAnalysis = withContext(Dispatchers.IO) {
+    override suspend fun analyzeImageLabel(bitmap: Bitmap, barcode: String?): FullProductAnalysis = withContext(Dispatchers.IO) {
         // Step 1: Call NutriGuard FastAPI Backend (POST /api/v1/scan/label-image)
-        // No silent fallback to local analysis in strict integration mode
-        val parsedData = apiService.scanLabelImage(bitmap)
+        // No silent fallback to local analysis in strict integration mode.
+        // May throw LabelScanRequiredException (a genuine partial result,
+        // not a generic error -- see NutriGuardApiService.scanLabelImage's
+        // docs) / BarcodeNetworkException / BarcodeTimeoutException /
+        // BarcodeServerException / BarcodeAuthException / BarcodeParseException
+        // -- all handled by MainViewModel, never silently swallowed here.
+        val parsedData = apiService.scanLabelImage(bitmap, barcode)
         val analyzedProd = parsedData.product
         val ingList = parsedData.ingredients
 

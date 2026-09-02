@@ -83,37 +83,8 @@ class NutriGuardApiService(
 
         response.use { resp ->
             val responseBody = resp.body?.string() ?: ""
-
             if (!resp.isSuccessful) {
-                if (resp.code == 404) {
-                    val backendError = BackendErrorDto.fromJson(responseBody)
-                    val details = backendError?.details
-                    if (backendError?.code == "PRODUCT_NOT_FOUND" && details?.labelScanRequired == true) {
-                        throw LabelScanRequiredException(
-                            reason = details.reason
-                                ?: "This product could not be fully identified from its barcode.",
-                            suggestedAction = details.suggestedAction,
-                            providersChecked = details.providersChecked,
-                            discoveredIdentity = details.discoveredIdentity
-                        )
-                    }
-                }
-                if (resp.code == 401 || resp.code == 403) {
-                    // AuthInterceptor already retried once with a refreshed/
-                    // re-authenticated token (see its docs); reaching here
-                    // means that also failed, so the device genuinely
-                    // couldn't be authenticated -- not just "a server error".
-                    Log.e(TAG, "NutriGuard Backend authentication failure HTTP ${resp.code}")
-                    throw BarcodeAuthException(
-                        resp.code,
-                        "Your session could not be verified. Please restart the app and try again."
-                    )
-                }
-                Log.e(TAG, "NutriGuard Backend error HTTP ${resp.code}")
-                throw BarcodeServerException(
-                    resp.code,
-                    "NutriGuard backend returned an unexpected error (HTTP ${resp.code}). Please try again."
-                )
+                handleUnsuccessfulResponse(resp.code, responseBody)
             }
 
             try {
@@ -130,22 +101,41 @@ class NutriGuardApiService(
     /**
      * Sends an image bitmap to the NutriGuard FastAPI backend endpoint:
      * POST /api/v1/scan/label-image
+     *
+     * [barcode], when non-null/non-blank, is sent as the optional
+     * multipart `barcode` field so the backend combines this label
+     * photo with an already-known barcode identity into ONE canonical
+     * product instead of a synthetic `img_...` row (see
+     * `app/api/v1/scan.py::scan_label_image`'s `barcode` form field). It
+     * must always be a REAL barcode the user scanned/typed -- never a
+     * synthetic `img_.../ocr_...` id a previous standalone response
+     * returned (see `MainViewModel`'s docs on `pendingBarcode`).
+     *
+     * On a structured "not found / label scan required" response throws
+     * [LabelScanRequiredException] exactly like [scanBarcode] does -- a
+     * label photo can be genuinely useful (e.g. it verified the
+     * ingredients but the nutrition panel wasn't legible) without being
+     * a complete result, and callers must treat that as a partial
+     * result to build on, not a generic failure. On any other failure
+     * throws the same [BarcodeScanException] hierarchy [scanBarcode]
+     * uses, for identical typed error handling on both endpoints.
      */
-    suspend fun scanLabelImage(bitmap: Bitmap): ParsedScanData = withContext(Dispatchers.IO) {
+    suspend fun scanLabelImage(bitmap: Bitmap, barcode: String? = null): ParsedScanData = withContext(Dispatchers.IO) {
         val stream = ByteArrayOutputStream()
         val compressSuccess = bitmap.compress(Bitmap.CompressFormat.JPEG, 80, stream)
         if (!compressSuccess) {
             throw IOException("Failed to compress image bitmap to JPEG format")
         }
         val byteArray = stream.toByteArray()
-
-        val requestBody = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addPart(buildLabelImagePart(byteArray))
-            .build()
+        val cleanedBarcode = barcode?.trim()?.takeIf { it.isNotEmpty() }
+        val requestBody = buildLabelImageRequestBody(byteArray, cleanedBarcode)
 
         val endpointUrl = "$baseUrl/api/v1/scan/label-image"
-        Log.d(TAG, "Executing scanLabelImage POST request to: $endpointUrl (payload size: ${byteArray.size} bytes)")
+        Log.d(
+            TAG,
+            "Executing scanLabelImage POST request to: $endpointUrl " +
+                "(payload size: ${byteArray.size} bytes, barcode: ${if (cleanedBarcode != null) "present" else "none"})"
+        )
 
         val request = Request.Builder()
             .url(endpointUrl)
@@ -153,18 +143,29 @@ class NutriGuardApiService(
             .header("Accept", "application/json")
             .build()
 
+        // Deliberately the base httpClient, unmodified -- image upload
+        // must keep its existing connect/read/write timeouts exactly as
+        // configured above, not the barcode-lookup call's shorter bound.
         val response = try {
             httpClient.newCall(request).execute()
+        } catch (e: SocketTimeoutException) {
+            Log.w(TAG, "Label image upload timed out calling $endpointUrl")
+            throw BarcodeTimeoutException(
+                "The label analysis is taking too long. Please check your connection and try again.",
+                e
+            )
         } catch (e: IOException) {
             Log.e(TAG, "Network connection failure to $endpointUrl: ${e.localizedMessage}", e)
-            throw IOException("Backend connection failed: Unable to reach NutriGuard server at $baseUrl. Check network and backend status.")
+            throw BarcodeNetworkException(
+                "Unable to reach the NutriGuard server. Check your network connection and try again.",
+                e
+            )
         }
 
         response.use { resp ->
             val responseBody = resp.body?.string() ?: ""
             if (!resp.isSuccessful) {
-                Log.e(TAG, "NutriGuard Backend error HTTP ${resp.code}: $responseBody")
-                throw IOException("NutriGuard Backend error (HTTP ${resp.code}): ${responseBody.take(200)}")
+                handleUnsuccessfulResponse(resp.code, responseBody)
             }
 
             try {
@@ -173,9 +174,58 @@ class NutriGuardApiService(
                 return@withContext dto.toParsedEntities()
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to parse backend response JSON: ${e.localizedMessage}. Response was: $responseBody", e)
-                throw IOException("Invalid response structure received from NutriGuard backend: ${e.localizedMessage}")
+                throw BarcodeParseException("Received an unexpected response from the server.", e)
             }
         }
+    }
+
+    /**
+     * Shared non-2xx handling for both [scanBarcode] and [scanLabelImage]
+     * -- both endpoints use the identical error envelope, including the
+     * structured `PRODUCT_NOT_FOUND` / `labelScanRequired` shape (see
+     * [LabelScanRequiredException]'s docs on the additive V12 fields). A
+     * 404 is NOT automatically that exception -- only a 404 whose body
+     * actually parses as that documented shape is; any other 404 (or
+     * any other non-2xx) falls through to [BarcodeServerException] /
+     * [BarcodeAuthException], same as before. Always throws -- never
+     * returns normally.
+     */
+    private fun handleUnsuccessfulResponse(statusCode: Int, responseBody: String): Nothing {
+        if (statusCode == 404) {
+            val backendError = BackendErrorDto.fromJson(responseBody)
+            val details = backendError?.details
+            if (backendError?.code == "PRODUCT_NOT_FOUND" && details?.labelScanRequired == true) {
+                throw LabelScanRequiredException(
+                    reason = details.reason
+                        ?: "This product could not be fully identified.",
+                    suggestedAction = details.suggestedAction,
+                    providersChecked = details.providersChecked,
+                    discoveredIdentity = details.discoveredIdentity,
+                    analysisComplete = details.analysisComplete,
+                    healthScoreAvailable = details.healthScoreAvailable,
+                    healthScore = details.healthScore,
+                    nutritionScanRequired = details.nutritionScanRequired,
+                    ingredientsScanRequired = details.ingredientsScanRequired,
+                    ingredients = details.ingredients
+                )
+            }
+        }
+        if (statusCode == 401 || statusCode == 403) {
+            // AuthInterceptor already retried once with a refreshed/
+            // re-authenticated token (see its docs); reaching here
+            // means that also failed, so the device genuinely
+            // couldn't be authenticated -- not just "a server error".
+            Log.e(TAG, "NutriGuard Backend authentication failure HTTP $statusCode")
+            throw BarcodeAuthException(
+                statusCode,
+                "Your session could not be verified. Please restart the app and try again."
+            )
+        }
+        Log.e(TAG, "NutriGuard Backend error HTTP $statusCode")
+        throw BarcodeServerException(
+            statusCode,
+            "NutriGuard backend returned an unexpected error (HTTP $statusCode). Please try again."
+        )
     }
 
     companion object {
@@ -195,6 +245,27 @@ class NutriGuardApiService(
                 filename = "food_label.jpg",
                 body = byteArray.toRequestBody("image/jpeg".toMediaType())
             )
+        }
+
+        /**
+         * Builds the full multipart body for POST /api/v1/scan/label-image:
+         * the required "image" part, plus an OPTIONAL "barcode" text part
+         * (see `app/api/v1/scan.py::scan_label_image`'s `barcode` form
+         * field) -- added ONLY when [barcode] is non-null (the caller is
+         * responsible for trimming/blank-filtering it first; this
+         * function trusts whatever it's given, matching the backend's
+         * own "omitted, blank, or a literal placeholder -> behaves
+         * exactly as if not sent" tolerance one layer up in
+         * [scanLabelImage]).
+         */
+        internal fun buildLabelImageRequestBody(byteArray: ByteArray, barcode: String?): MultipartBody {
+            val builder = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addPart(buildLabelImagePart(byteArray))
+            if (barcode != null) {
+                builder.addFormDataPart("barcode", barcode)
+            }
+            return builder.build()
         }
     }
 }

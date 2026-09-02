@@ -1,5 +1,6 @@
 package com.example.data.remote
 
+import com.example.data.remote.dto.IngredientDto
 import com.example.data.remote.dto.cleanOrNull
 import org.json.JSONArray
 import org.json.JSONObject
@@ -48,12 +49,34 @@ class BarcodeParseException(message: String, cause: Throwable? = null) : Barcode
  * found but is too incomplete for a confident analysis. Never carries
  * fabricated product data — [discoveredIdentity] is only populated when
  * the backend actually found *something* worth showing.
+ *
+ * [suggestedAction] is parsed for completeness but deliberately UNUSED
+ * for the primary call-to-action text in the UI (the backend's raw
+ * `suggestedAction` string is a technical/generic hint, not a
+ * user-facing label) — callers should always render a fixed
+ * "Scan label for more information" action instead.
+ *
+ * The remaining fields mirror the backend's V12 additive partial-
+ * analysis payload (see `_label_scan_required_details` in
+ * `nutriguard-backend/app/services/food_analysis.py`) and are only
+ * populated for a genuine partial result (an identity WAS
+ * discovered/persisted) — for a plain "nothing found anywhere" 404
+ * (`_not_found_details`, no such row exists yet), all five are `null`/
+ * empty, since the backend never sends them for that shape. A `null`
+ * [healthScore] must NEVER be rendered as `0` — it means "not computed
+ * at all", not "a score of zero".
  */
 class LabelScanRequiredException(
     val reason: String,
     val suggestedAction: String?,
     val providersChecked: List<String>,
-    val discoveredIdentity: DiscoveredIdentity?
+    val discoveredIdentity: DiscoveredIdentity?,
+    val analysisComplete: Boolean? = null,
+    val healthScoreAvailable: Boolean? = null,
+    val healthScore: Int? = null,
+    val nutritionScanRequired: Boolean? = null,
+    val ingredientsScanRequired: Boolean? = null,
+    val ingredients: List<IngredientDto> = emptyList()
 ) : BarcodeScanException(reason)
 
 /**
@@ -103,12 +126,28 @@ data class BackendErrorDto(
     }
 }
 
+/**
+ * Mirrors the backend's V12 additive partial-analysis fields (see
+ * `_label_scan_required_details`): [analysisComplete]/
+ * [healthScoreAvailable]/[healthScore]/[nutritionScanRequired]/
+ * [ingredientsScanRequired]/[ingredients] are all `null`/empty when the
+ * backend didn't send them (the plain "nothing found anywhere" 404
+ * shape, `_not_found_details`, predates these fields and never carries
+ * them) — a client must treat "absent" the same as "unknown", never
+ * infer `false`/`0`/complete from a missing field.
+ */
 data class BackendErrorDetailsDto(
     val labelScanRequired: Boolean,
     val reason: String?,
     val suggestedAction: String?,
     val providersChecked: List<String>,
-    val discoveredIdentity: DiscoveredIdentity?
+    val discoveredIdentity: DiscoveredIdentity?,
+    val analysisComplete: Boolean?,
+    val healthScoreAvailable: Boolean?,
+    val healthScore: Int?,
+    val nutritionScanRequired: Boolean?,
+    val ingredientsScanRequired: Boolean?,
+    val ingredients: List<IngredientDto>
 ) {
     companion object {
         fun fromJson(details: JSONObject): BackendErrorDetailsDto {
@@ -133,13 +172,38 @@ data class BackendErrorDetailsDto(
                 parsed.takeUnless { d -> d.isEmpty }
             }
 
+            val ingredientsList = mutableListOf<IngredientDto>()
+            val ingredientsArray = details.optJSONArray("ingredients")
+            if (ingredientsArray != null) {
+                for (i in 0 until ingredientsArray.length()) {
+                    val ingObj = ingredientsArray.optJSONObject(i)
+                    if (ingObj != null) {
+                        ingredientsList.add(IngredientDto.fromJson(ingObj))
+                    }
+                }
+            }
+
             return BackendErrorDetailsDto(
                 labelScanRequired = details.optBoolean("labelScanRequired", false),
                 reason = details.optString("reason").cleanOrNull(),
                 suggestedAction = details.optString("suggestedAction").cleanOrNull(),
                 providersChecked = providers,
-                discoveredIdentity = identity
+                discoveredIdentity = identity,
+                analysisComplete = details.optNullableBoolean("analysisComplete"),
+                healthScoreAvailable = details.optNullableBoolean("healthScoreAvailable"),
+                healthScore = details.optNullableInt("healthScore"),
+                nutritionScanRequired = details.optNullableBoolean("nutritionScanRequired"),
+                ingredientsScanRequired = details.optNullableBoolean("ingredientsScanRequired"),
+                ingredients = ingredientsList
             )
         }
+
+        /** `null` when the key is absent OR its value is JSON `null` -- [JSONObject.optBoolean] can't distinguish "absent" from "false" otherwise. */
+        private fun JSONObject.optNullableBoolean(key: String): Boolean? =
+            if (has(key) && !isNull(key)) optBoolean(key) else null
+
+        /** `null` when the key is absent OR its value is JSON `null` -- [JSONObject.optInt] can't distinguish "absent"/"null" from `0` otherwise. */
+        private fun JSONObject.optNullableInt(key: String): Int? =
+            if (has(key) && !isNull(key)) optInt(key) else null
     }
 }
