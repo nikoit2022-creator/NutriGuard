@@ -76,10 +76,9 @@ import com.example.ui.components.RecognizedIngredientsSection
 import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.NutriGuardSpacing
+import com.example.ui.theme.PastelInk
 import com.example.ui.theme.PastelLavender
-import com.example.ui.theme.PastelLavenderDark
 import com.example.ui.theme.PastelSky
-import com.example.ui.theme.PastelSkyDark
 import com.example.ui.theme.RiskGreen
 import com.example.ui.theme.RiskOrange
 import com.example.ui.theme.RiskRed
@@ -962,13 +961,7 @@ private fun LabelScanRequiredCard(
     val identityBrand = identity?.brand?.cleanOrNull()
     val missingMessages = missingEvidenceMessages(state.nutritionScanRequired, state.ingredientsScanRequired)
     val hasRecognizedIngredients = state.ingredients.isNotEmpty()
-    val dark = isSystemInDarkTheme()
-    val cardBackground = when {
-        hasRecognizedIngredients && dark -> PastelLavenderDark
-        hasRecognizedIngredients -> PastelLavender
-        dark -> PastelSkyDark
-        else -> PastelSky
-    }
+    val cardBackground = if (hasRecognizedIngredients) PastelLavender else PastelSky
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -979,7 +972,7 @@ private fun LabelScanRequiredCard(
         elevation = CardDefaults.cardElevation(defaultElevation = 5.dp),
         border = androidx.compose.foundation.BorderStroke(
             1.dp,
-            MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+            PastelInk.copy(alpha = 0.12f)
         )
     ) {
         Column(modifier = Modifier.padding(18.dp)) {
@@ -988,7 +981,7 @@ private fun LabelScanRequiredCard(
                     modifier = Modifier
                         .size(42.dp)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)),
+                        .background(Color.White.copy(alpha = 0.70f)),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -998,7 +991,7 @@ private fun LabelScanRequiredCard(
                             Icons.Default.SearchOff
                         },
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
+                        tint = PastelInk,
                         modifier = Modifier.size(22.dp)
                     )
                 }
@@ -1008,7 +1001,7 @@ private fun LabelScanRequiredCard(
                         text = if (hasRecognizedIngredients) "Ingredients recognized" else "Label Scan Needed",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = PastelInk
                     )
                     Text(
                         text = if (hasRecognizedIngredients) {
@@ -1017,7 +1010,7 @@ private fun LabelScanRequiredCard(
                             "One more scan will help complete the product"
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = PastelInk.copy(alpha = 0.68f)
                     )
                 }
             }
@@ -1039,12 +1032,12 @@ private fun LabelScanRequiredCard(
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface
+                color = PastelInk
             )
             Text(
                 text = "Product identity is not confirmed yet",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = PastelInk.copy(alpha = 0.64f)
             )
             Spacer(modifier = Modifier.height(6.dp))
 
@@ -1052,13 +1045,13 @@ private fun LabelScanRequiredCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(NutriGuardRadius.medium))
-                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.62f))
+                    .background(Color.White.copy(alpha = 0.62f))
                     .padding(NutriGuardSpacing.md)
             ) {
                 Text(
                     text = state.reason,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = PastelInk.copy(alpha = 0.74f)
                 )
             }
 
@@ -1083,7 +1076,7 @@ private fun LabelScanRequiredCard(
                             text = message,
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = PastelInk.copy(alpha = 0.72f)
                         )
                     }
                 }
@@ -1095,14 +1088,14 @@ private fun LabelScanRequiredCard(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(NutriGuardRadius.medium))
-                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f))
+                        .background(Color.White.copy(alpha = 0.72f))
                         .padding(horizontal = NutriGuardSpacing.md, vertical = NutriGuardSpacing.sm)
                 ) {
                     Text(
                         text = "Health Score pending • Scan the missing label information to complete it",
                         style = MaterialTheme.typography.bodySmall,
                         fontWeight = FontWeight.Medium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = PastelInk.copy(alpha = 0.72f)
                     )
                 }
             }
