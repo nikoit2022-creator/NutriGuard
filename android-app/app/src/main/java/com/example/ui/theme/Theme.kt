@@ -44,6 +44,33 @@ private val LightColorScheme = lightColorScheme(
     outlineVariant = Color(0xFFE2E8F0)
 )
 
+private val ScannerColorScheme = lightColorScheme(
+    primary = ScannerViolet,
+    onPrimary = Color.White,
+    secondary = ScannerFuchsia,
+    onSecondary = Color.White,
+    primaryContainer = ScannerHeroStart,
+    onPrimaryContainer = ScannerSlatePrimary,
+    background = ScannerPageBackground,
+    surface = Color.White,
+    surfaceVariant = Color(0xFFF8FAFC),
+    onSurface = ScannerSlatePrimary,
+    onSurfaceVariant = ScannerSlateSecondary,
+    outline = ScannerSoftBorder,
+    outlineVariant = Color(0xFFE2E8F0),
+    error = RiskRed
+)
+
+/** A stable light presentation for the scanner flow, independent of system dark mode. */
+@Composable
+fun NutriGuardScannerTheme(content: @Composable () -> Unit) {
+    MaterialTheme(
+        colorScheme = ScannerColorScheme,
+        typography = Typography,
+        content = content
+    )
+}
+
 @Composable
 fun NutriGuardTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
