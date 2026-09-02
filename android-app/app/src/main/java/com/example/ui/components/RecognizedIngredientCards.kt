@@ -52,16 +52,13 @@ import com.example.ui.model.RecognizedIngredientUiModel
 import com.example.ui.model.toRecognizedIngredientUiModel
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.NutriGuardSpacing
-import com.example.ui.theme.PastelButter
 import com.example.ui.theme.PastelInk
 import com.example.ui.theme.PastelLavender
-import com.example.ui.theme.PastelMint
-import com.example.ui.theme.PastelPeach
-import com.example.ui.theme.PastelRose
 import com.example.ui.theme.RiskGreen
 import com.example.ui.theme.RiskOrange
 import com.example.ui.theme.RiskRed
 import com.example.ui.theme.RiskYellow
+import com.example.ui.theme.ScannerSoftBorder
 
 private const val COLLAPSED_INGREDIENT_COUNT = 4
 
@@ -253,10 +250,10 @@ fun RecognizedIngredientCard(
         modifier = modifier
             .fillMaxWidth()
             .then(interactionModifier),
-        shape = RoundedCornerShape(NutriGuardRadius.editorialCard),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = ratingColors.cardBackground),
-        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp),
-        border = BorderStroke(1.dp, ratingColors.accent.copy(alpha = 0.18f))
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        border = BorderStroke(1.dp, ScannerSoftBorder)
     ) {
         Row(
             modifier = Modifier
@@ -265,7 +262,7 @@ fun RecognizedIngredientCard(
         ) {
             Box(
                 modifier = Modifier
-                    .width(6.dp)
+                    .width(4.dp)
                     .fillMaxHeight()
                     .background(ratingColors.accent)
             )
@@ -404,33 +401,33 @@ private fun ratingColors(rating: IngredientSafetyRating): RatingColors {
     return when (rating) {
         IngredientSafetyRating.LOW_CONCERN -> RatingColors(
             RiskGreen,
-            RiskGreen.copy(alpha = 0.14f),
+            Color(0xFFECFDF5),
             RiskGreen,
-            PastelMint
+            Color.White
         )
         IngredientSafetyRating.MODERATE -> RatingColors(
             RiskYellow,
-            RiskYellow.copy(alpha = 0.14f),
+            Color(0xFFFFFBEB),
             RiskYellow,
-            PastelButter
+            Color.White
         )
         IngredientSafetyRating.POTENTIAL_CONCERN -> RatingColors(
             RiskOrange,
-            RiskOrange.copy(alpha = 0.14f),
+            Color(0xFFFFF7ED),
             RiskOrange,
-            PastelPeach
+            Color.White
         )
         IngredientSafetyRating.HIGH_CONCERN -> RatingColors(
             RiskRed,
-            RiskRed.copy(alpha = 0.14f),
+            Color(0xFFFFF1F2),
             RiskRed,
-            PastelRose
+            Color.White
         )
         IngredientSafetyRating.LIMITED_DATA -> RatingColors(
             PastelInk.copy(alpha = 0.58f),
-            Color.White.copy(alpha = 0.64f),
+            Color(0xFFF1F5F9),
             PastelInk.copy(alpha = 0.68f),
-            PastelLavender
+            Color.White
         )
     }
 }

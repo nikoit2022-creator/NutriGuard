@@ -13,7 +13,6 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -48,7 +47,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -63,6 +61,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -75,14 +74,23 @@ import com.example.ui.components.IngredientDetailBottomSheet
 import com.example.ui.components.RecognizedIngredientsSection
 import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.NutriGuardRadius
+import com.example.ui.theme.NutriGuardScannerTheme
 import com.example.ui.theme.NutriGuardSpacing
 import com.example.ui.theme.PastelInk
-import com.example.ui.theme.PastelLavender
-import com.example.ui.theme.PastelSky
 import com.example.ui.theme.RiskGreen
 import com.example.ui.theme.RiskOrange
 import com.example.ui.theme.RiskRed
 import com.example.ui.theme.RiskYellow
+import com.example.ui.theme.ScannerFuchsia
+import com.example.ui.theme.ScannerHeroEnd
+import com.example.ui.theme.ScannerHeroMiddle
+import com.example.ui.theme.ScannerHeroStart
+import com.example.ui.theme.ScannerPageBackground
+import com.example.ui.theme.ScannerSlateMuted
+import com.example.ui.theme.ScannerSlatePrimary
+import com.example.ui.theme.ScannerSlateSecondary
+import com.example.ui.theme.ScannerSoftBorder
+import com.example.ui.theme.ScannerViolet
 import com.example.ui.viewmodel.BarcodeLookupUiState
 import com.example.ui.viewmodel.MainViewModel
 import com.google.mlkit.vision.barcode.common.Barcode
@@ -102,7 +110,6 @@ fun ScanHomeScreen(
     val recentScans by viewModel.scanHistory.collectAsState()
     val barcodeLookupState by viewModel.barcodeLookupState.collectAsState()
     val pendingBarcode by viewModel.pendingBarcode.collectAsState()
-    val isDark = isSystemInDarkTheme()
 
     var isOcrMode by remember { mutableStateOf(false) }
     var showManualEntry by remember { mutableStateOf(false) }
@@ -265,12 +272,18 @@ fun ScanHomeScreen(
         }
     }
 
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(NutriGuardSpacing.lg)
-    ) {
+    NutriGuardScannerTheme {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(ScannerPageBackground)
+        ) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(NutriGuardSpacing.lg)
+            ) {
         // App Header
         item {
             Spacer(modifier = Modifier.height(NutriGuardSpacing.md))
@@ -281,15 +294,16 @@ fun ScanHomeScreen(
             ) {
                 Column {
                     Text(
-                        text = "NutriGuard",
-                        style = MaterialTheme.typography.headlineLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
+                        text = "NUTRIGUARD • INGREDIENT SCANNER",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Medium,
+                        color = ScannerViolet
                     )
                     Text(
-                        text = "Know what's really in your food",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        text = "Scan a Product",
+                        style = MaterialTheme.typography.headlineLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = ScannerSlatePrimary
                     )
                 }
 
@@ -297,12 +311,12 @@ fun ScanHomeScreen(
                     onClick = onNavigateToLibrary,
                     modifier = Modifier
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .background(Color.White)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Search,
                         contentDescription = "Search Ingredient Database",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        tint = ScannerSlateSecondary
                     )
                 }
             }
@@ -310,16 +324,20 @@ fun ScanHomeScreen(
 
         // Primary Scan Hero Card
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(NutriGuardRadius.large),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (isDark) MaterialTheme.colorScheme.surface else Color(0xFFF0FDF4)
-                ),
-                border = androidx.compose.foundation.BorderStroke(
-                    1.dp,
-                    if (isDark) MaterialTheme.colorScheme.outline else EmeraldPrimary.copy(alpha = 0.2f)
-                )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(NutriGuardRadius.hero))
+                    .background(
+                        Brush.linearGradient(
+                            colors = listOf(ScannerHeroStart, ScannerHeroMiddle, ScannerHeroEnd)
+                        )
+                    )
+                    .border(
+                        1.dp,
+                        Color.White.copy(alpha = 0.72f),
+                        RoundedCornerShape(NutriGuardRadius.hero)
+                    )
             ) {
                 Column(
                     modifier = Modifier.padding(20.dp),
@@ -329,14 +347,14 @@ fun ScanHomeScreen(
                     Row(
                         modifier = Modifier
                             .clip(RoundedCornerShape(NutriGuardRadius.pill))
-                            .background(if (isDark) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFE2E8F0))
+                            .background(Color.White.copy(alpha = 0.68f))
                             .padding(4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(NutriGuardRadius.pill))
-                                .background(if (!isOcrMode) EmeraldPrimary else Color.Transparent)
+                                .background(if (!isOcrMode) ScannerViolet else Color.Transparent)
                                 .clickable { isOcrMode = false }
                                 .padding(horizontal = 16.dp, vertical = 6.dp)
                         ) {
@@ -344,14 +362,14 @@ fun ScanHomeScreen(
                                 text = "Barcode",
                                 fontSize = 13.sp,
                                 fontWeight = if (!isOcrMode) FontWeight.SemiBold else FontWeight.Normal,
-                                color = if (!isOcrMode) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                                color = if (!isOcrMode) Color.White else ScannerSlateSecondary
                             )
                         }
 
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(NutriGuardRadius.pill))
-                                .background(if (isOcrMode) EmeraldPrimary else Color.Transparent)
+                                .background(if (isOcrMode) ScannerViolet else Color.Transparent)
                                 .clickable { isOcrMode = true }
                                 .padding(horizontal = 16.dp, vertical = 6.dp)
                         ) {
@@ -359,23 +377,23 @@ fun ScanHomeScreen(
                                 text = "Ingredient Label",
                                 fontSize = 13.sp,
                                 fontWeight = if (isOcrMode) FontWeight.SemiBold else FontWeight.Normal,
-                                color = if (isOcrMode) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                                color = if (isOcrMode) Color.White else ScannerSlateSecondary
                             )
                         }
                     }
 
                     Spacer(modifier = Modifier.height(20.dp))
 
-                    // Scanner Viewfinder Graphic
+                    // Primary scan action, adapted from the approved gradient scanner hero.
                     Box(
                         modifier = Modifier
-                            .size(130.dp)
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(if (isDark) Color(0xFF1E2D42) else EmeraldPrimary.copy(alpha = 0.08f))
-                            .border(
-                                2.dp,
-                                EmeraldPrimary.copy(alpha = 0.6f),
-                                RoundedCornerShape(20.dp)
+                            .fillMaxWidth()
+                            .height(156.dp)
+                            .clip(RoundedCornerShape(24.dp))
+                            .background(
+                                Brush.linearGradient(
+                                    colors = listOf(ScannerViolet, ScannerFuchsia)
+                                )
                             )
                             .clickable(enabled = !isSearchingBarcode) {
                                 if (isOcrMode) {
@@ -393,15 +411,15 @@ fun ScanHomeScreen(
                             Icon(
                                 imageVector = if (isOcrMode) Icons.Default.DocumentScanner else Icons.Default.QrCodeScanner,
                                 contentDescription = "Scanner",
-                                tint = EmeraldPrimary,
-                                modifier = Modifier.size(48.dp)
+                                tint = Color.White,
+                                modifier = Modifier.size(52.dp)
                             )
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
-                                text = "Tap to Scan",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = EmeraldPrimary
+                                text = if (isOcrMode) "Scan Ingredient Label" else "Scan Barcode",
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color.White
                             )
                         }
                     }
@@ -411,31 +429,39 @@ fun ScanHomeScreen(
                     Text(
                         text = if (isOcrMode) "Point camera at food ingredient list" else "Scan barcode on any food packaging",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = ScannerSlateSecondary
                     )
 
                     Spacer(modifier = Modifier.height(18.dp))
 
                     // Secondary Action: Upload Photo
-                    OutlinedButton(
-                        onClick = { imagePickerLauncher.launch("image/*") },
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(44.dp),
-                        shape = RoundedCornerShape(NutriGuardRadius.medium),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                            .height(48.dp)
+                            .clip(RoundedCornerShape(NutriGuardRadius.medium))
+                            .background(Color.White.copy(alpha = 0.82f))
+                            .border(
+                                1.dp,
+                                Color.White,
+                                RoundedCornerShape(NutriGuardRadius.medium)
+                            )
+                            .clickable { imagePickerLauncher.launch("image/*") },
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
                             imageVector = Icons.Default.PhotoLibrary,
                             contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurface,
+                            tint = ScannerSlateSecondary,
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Upload Photo from Gallery",
+                            text = "Open Gallery",
                             fontSize = 13.sp,
-                            color = MaterialTheme.colorScheme.onSurface
+                            fontWeight = FontWeight.Medium,
+                            color = ScannerSlateSecondary
                         )
                     }
                 }
@@ -524,10 +550,11 @@ fun ScanHomeScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Recent Scans",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface
+                        text = "HISTORY • ${recentScans.size}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Medium,
+                        color = ScannerSlateMuted,
+                        letterSpacing = 1.2.sp
                     )
                 }
 
@@ -538,17 +565,25 @@ fun ScanHomeScreen(
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(NutriGuardRadius.medium))
+                                .clip(RoundedCornerShape(16.dp))
                                 .clickable(enabled = !isSearchingBarcode) {
                                     val barcode = scan.barcode
                                     if (!barcode.isNullOrBlank()) {
                                         submitBarcode(barcode)
                                     }
                                 },
-                            shape = RoundedCornerShape(NutriGuardRadius.medium),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = Color.White),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, ScannerSoftBorder)
                         ) {
+                            val score = scan.healthScore
+                            val scoreColor = when {
+                                score >= 80 -> RiskGreen
+                                score >= 60 -> RiskYellow
+                                score >= 40 -> RiskOrange
+                                else -> RiskRed
+                            }
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -556,26 +591,26 @@ fun ScanHomeScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(4.dp)
+                                        .height(54.dp)
+                                        .clip(RoundedCornerShape(NutriGuardRadius.pill))
+                                        .background(scoreColor)
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         text = scan.productName,
                                         style = MaterialTheme.typography.titleSmall,
                                         fontWeight = FontWeight.SemiBold,
-                                        color = MaterialTheme.colorScheme.onSurface
+                                        color = ScannerSlatePrimary
                                     )
                                     Text(
                                         text = "${scan.brand} • ${scan.scanType}",
                                         style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        color = ScannerSlateMuted
                                     )
-                                }
-
-                                val score = scan.healthScore
-                                val scoreColor = when {
-                                    score >= 80 -> RiskGreen
-                                    score >= 60 -> RiskYellow
-                                    score >= 40 -> RiskOrange
-                                    else -> RiskRed
                                 }
 
                                 Box(
@@ -760,10 +795,12 @@ fun ScanHomeScreen(
         }
     }
 
-    IngredientDetailBottomSheet(
-        ingredient = selectedIngredient,
-        onDismiss = { selectedIngredient = null }
-    )
+            IngredientDetailBottomSheet(
+                ingredient = selectedIngredient,
+                onDismiss = { selectedIngredient = null }
+            )
+        }
+    }
 }
 
 @Composable
@@ -961,19 +998,24 @@ private fun LabelScanRequiredCard(
     val identityBrand = identity?.brand?.cleanOrNull()
     val missingMessages = missingEvidenceMessages(state.nutritionScanRequired, state.ingredientsScanRequired)
     val hasRecognizedIngredients = state.ingredients.isNotEmpty()
-    val cardBackground = if (hasRecognizedIngredients) PastelLavender else PastelSky
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(NutriGuardRadius.hero),
-        colors = CardDefaults.cardColors(
-            containerColor = cardBackground
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 5.dp),
-        border = androidx.compose.foundation.BorderStroke(
-            1.dp,
-            PastelInk.copy(alpha = 0.12f)
-        )
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(NutriGuardRadius.hero))
+            .background(
+                Brush.linearGradient(
+                    colors = if (hasRecognizedIngredients) {
+                        listOf(ScannerHeroStart, ScannerHeroMiddle)
+                    } else {
+                        listOf(ScannerHeroStart, ScannerHeroEnd)
+                    }
+                )
+            )
+            .border(
+                1.dp,
+                Color.White.copy(alpha = 0.74f),
+                RoundedCornerShape(NutriGuardRadius.hero)
+            )
     ) {
         Column(modifier = Modifier.padding(18.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {

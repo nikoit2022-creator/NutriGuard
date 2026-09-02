@@ -47,6 +47,18 @@ val PastelPeachDark = Color(0xFF49301E)
 val PastelRoseDark = Color(0xFF482638)
 val PastelButterDark = Color(0xFF443817)
 
+// Product Scanner visual language (adapted from the approved UI reference).
+val ScannerPageBackground = Color(0xFFF8F7FF)
+val ScannerHeroStart = Color(0xFFEDE9FF)
+val ScannerHeroMiddle = Color(0xFFFCE4F8)
+val ScannerHeroEnd = Color(0xFFFFECD9)
+val ScannerViolet = Color(0xFF8B5CF6)
+val ScannerFuchsia = Color(0xFFD946EF)
+val ScannerSlatePrimary = Color(0xFF1E293B)
+val ScannerSlateSecondary = Color(0xFF64748B)
+val ScannerSlateMuted = Color(0xFF94A3B8)
+val ScannerSoftBorder = Color(0xFFF1F5F9)
+
 // Color-coded Risk Levels for Food Ingredients
 val RiskGreen = Color(0xFF16A34A)       // Safe
 val RiskYellow = Color(0xFFD97706)      // Moderate
