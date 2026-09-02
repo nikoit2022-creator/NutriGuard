@@ -73,4 +73,29 @@ class ScanHomeScreenTest {
         // actually act on.
         assertTrue(missingEvidenceMessages(nutritionScanRequired = null, ingredientsScanRequired = null).isEmpty())
     }
+
+    // --- Failed-card retry/dismiss branching (review round 2 finding 1:
+    // "pending barcode can be left invisibly active") -----------------
+
+    @Test
+    fun isPhotoUploadRetry_true_whenABarcodeIsPending() {
+        assertTrue(isPhotoUploadRetry("4006381333931"))
+    }
+
+    @Test
+    fun isPhotoUploadRetry_false_forAPlainBarcodeLookupFailure() {
+        assertEquals(false, isPhotoUploadRetry(null))
+    }
+
+    @Test
+    fun shouldCancelFlowOnFailedDismiss_true_whenABarcodeIsPending() {
+        // Dismissing a failed label-photo-upload card is an explicit
+        // refusal of the WHOLE flow -- must cancel, not merely hide.
+        assertTrue(shouldCancelFlowOnFailedDismiss("4006381333931"))
+    }
+
+    @Test
+    fun shouldCancelFlowOnFailedDismiss_false_forAPlainBarcodeLookupFailure() {
+        assertEquals(false, shouldCancelFlowOnFailedDismiss(null))
+    }
 }

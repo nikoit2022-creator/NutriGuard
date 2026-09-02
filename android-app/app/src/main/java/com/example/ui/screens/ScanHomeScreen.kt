@@ -447,7 +447,18 @@ fun ScanHomeScreen(
                     LabelScanRequiredCard(
                         state = lookupState,
                         onScanLabel = {
-                            viewModel.dismissBarcodeLookupState()
+                            // Deliberately does NOT call
+                            // dismissBarcodeLookupState() first -- this card
+                            // (and pendingBarcode) must stay exactly as they
+                            // are underneath the camera activity. If the
+                            // camera is cancelled, cameraLauncher's callback
+                            // below never calls the ViewModel at all, so
+                            // this SAME card simply reappears with nothing
+                            // to restore. Only a genuine submission
+                            // (analyzeLabelImage) transitions the state --
+                            // to Searching on capture, back to
+                            // LabelScanRequired/Failed if it's still
+                            // incomplete or fails.
                             isOcrMode = true
                             startIngredientPhotoCapture()
                         },
@@ -459,20 +470,36 @@ fun ScanHomeScreen(
                     BarcodeLookupFailedCard(
                         message = lookupState.message,
                         onRetry = {
-                            viewModel.dismissBarcodeLookupState()
-                            if (pendingBarcode != null) {
+                            if (isPhotoUploadRetry(pendingBarcode)) {
                                 // The failure happened uploading a label
                                 // photo for a still-pending barcode -- retry
                                 // means "take that photo again", not
                                 // "resubmit a barcode string" (there's no
-                                // bitmap left to resend).
+                                // bitmap left to resend). Do NOT dismiss the
+                                // card first -- if the camera is cancelled,
+                                // this Failed card must simply still be there.
                                 isOcrMode = true
                                 startIngredientPhotoCapture()
                             } else {
+                                // A plain barcode-lookup failure -- nothing
+                                // camera-related pending, safe to clear the
+                                // card before resubmitting the same barcode.
+                                viewModel.dismissBarcodeLookupState()
                                 (lastSubmittedBarcode ?: lookupState.barcode).let(submitBarcode)
                             }
                         },
-                        onDismiss = { viewModel.dismissBarcodeLookupState() }
+                        onDismiss = {
+                            // A failed label-photo upload for a pending
+                            // barcode is an explicit refusal of the whole
+                            // flow, not just "hide this card" -- clear
+                            // pendingBarcode too, so a LATER standalone
+                            // submission never silently attaches it.
+                            if (shouldCancelFlowOnFailedDismiss(pendingBarcode)) {
+                                viewModel.cancelPendingScanFlow()
+                            } else {
+                                viewModel.dismissBarcodeLookupState()
+                            }
+                        }
                     )
                 }
 
@@ -646,10 +673,21 @@ fun ScanHomeScreen(
                             Button(
                                 onClick = {
                                     if (rawTextInput.isNotBlank()) {
+                                        // Does NOT navigate directly anymore
+                                        // (review round 2, finding 2): this
+                                        // now shares the same
+                                        // Searching/LabelScanRequired/Failed
+                                        // state machine as a barcode lookup
+                                        // or label photo -- navigation only
+                                        // happens via navigateToResultEvent,
+                                        // on a genuine complete success, so
+                                        // a partial result shows the same
+                                        // card instead of a fabricated
+                                        // result screen.
                                         viewModel.analyzeOcrText(rawTextInput)
-                                        onNavigateToResult()
                                     }
                                 },
+                                enabled = !isSearchingBarcode,
                                 modifier = Modifier.align(Alignment.End),
                                 shape = RoundedCornerShape(NutriGuardRadius.small),
                                 colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
@@ -847,6 +885,30 @@ internal fun missingEvidenceMessages(nutritionScanRequired: Boolean?, ingredient
         if (nutritionScanRequired == true) add("Nutrition information is still needed")
         if (ingredientsScanRequired == true) add("Ingredient information is still needed")
     }
+
+/**
+ * Review finding (round 2): a [BarcodeLookupUiState.Failed] card can
+ * mean EITHER a plain barcode-lookup failure (nothing camera-related
+ * pending -- safe to dismiss the card before resubmitting the barcode
+ * string) OR a label-photo UPLOAD failure for a still-[pendingBarcode]
+ * (there is no bitmap left to resend -- retrying means reopening the
+ * camera, and the card must NOT be dismissed first, so it's still
+ * there if the camera capture is itself cancelled). `true` -- take the
+ * photo-retry branch -- exactly when a barcode is pending.
+ */
+internal fun isPhotoUploadRetry(pendingBarcode: String?): Boolean = pendingBarcode != null
+
+/**
+ * Review finding (round 2): tapping "Dismiss" on a [BarcodeLookupUiState.Failed]
+ * card that resulted from a label-photo upload failure for a
+ * [pendingBarcode] is an explicit refusal of the WHOLE flow (there is
+ * no barcode-only failure to fall back to) -- `cancelPendingScanFlow()`
+ * must run so `pendingBarcode` is cleared and a LATER standalone
+ * submission never silently attaches it. A plain barcode-lookup
+ * failure (no pending barcode) only needs the ordinary
+ * `dismissBarcodeLookupState()`.
+ */
+internal fun shouldCancelFlowOnFailedDismiss(pendingBarcode: String?): Boolean = pendingBarcode != null
 
 /**
  * Shown when the backend answers `PRODUCT_NOT_FOUND` with

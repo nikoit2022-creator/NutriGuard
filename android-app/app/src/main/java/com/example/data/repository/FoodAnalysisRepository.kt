@@ -10,12 +10,10 @@ import com.example.data.model.ProductEntity
 import com.example.data.model.ScanHistoryEntity
 import com.example.data.model.UserHealthProfile
 import com.example.data.remote.NutriGuardApiService
-import com.example.service.ai.GeminiAnalysisEngine
 import com.example.util.HealthScoreCalculator
 import com.example.util.PersonalizedWarningEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.withContext
 
@@ -43,7 +41,16 @@ interface ProductAnalysisSource {
 
     suspend fun saveUserProfile(profile: UserHealthProfile)
     suspend fun analyzeBarcode(barcode: String): FullProductAnalysis
-    suspend fun analyzeOcrText(rawText: String): FullProductAnalysis
+
+    /**
+     * [barcode], when non-null, is forwarded to the backend's optional
+     * `barcode` JSON field (see [com.example.data.remote.NutriGuardApiService.scanOcrText])
+     * so this text combines with an already-known barcode identity into
+     * ONE canonical product instead of a synthetic `ocr_...` row. Must
+     * always be a real barcode -- never a synthetic id from a previous
+     * standalone response.
+     */
+    suspend fun analyzeOcrText(rawText: String, barcode: String? = null): FullProductAnalysis
 
     /**
      * [barcode], when non-null, is forwarded to the backend's optional
@@ -175,11 +182,25 @@ class FoodAnalysisRepository(
         )
     }
 
-    override suspend fun analyzeOcrText(rawText: String): FullProductAnalysis = withContext(Dispatchers.IO) {
-        val dbIngs = ingredientDao.getAllIngredients().first()
-        val (analyzedProd, ingList) = GeminiAnalysisEngine.analyzeIngredientText(rawText, dbIngs)
-        val profile = userProfileDao.getProfileSync() ?: UserHealthProfile()
+    override suspend fun analyzeOcrText(rawText: String, barcode: String?): FullProductAnalysis = withContext(Dispatchers.IO) {
+        // Calls the backend's POST /api/v1/scan/ocr-text (review round 2,
+        // finding 2) -- no local GeminiAnalysisEngine fallback and no
+        // locally-computed Health Score anymore: the backend is the sole
+        // source of truth for whether nutrition/ingredient evidence is
+        // genuinely verified, exactly like analyzeImageLabel. May throw
+        // LabelScanRequiredException (a genuine partial result, not a
+        // generic error) / BarcodeNetworkException / BarcodeTimeoutException /
+        // BarcodeServerException / BarcodeAuthException / BarcodeParseException
+        // -- all handled by MainViewModel.
+        val parsedData = apiService.scanOcrText(rawText, barcode)
+        val analyzedProd = parsedData.product
+        val ingList = parsedData.ingredients
 
+        if (ingList.isNotEmpty()) {
+            ingredientDao.insertAll(ingList)
+        }
+
+        val profile = userProfileDao.getProfileSync() ?: UserHealthProfile()
         val scoreBreakdown = HealthScoreCalculator.calculate(
             ingredients = ingList,
             sugarGrams = analyzedProd.sugarGrams,
@@ -189,6 +210,9 @@ class FoodAnalysisRepository(
             hasPreservatives = analyzedProd.hasPreservatives,
             novaGroup = analyzedProd.novaGroup
         )
+
+        val personalizedWarnings = PersonalizedWarningEngine.generateWarnings(analyzedProd, ingList, profile)
+        val allWarnings = (parsedData.warnings + personalizedWarnings).distinctBy { "${it.title}_${it.condition}" }
 
         val finalProd = analyzedProd.copy(healthScore = scoreBreakdown.totalScore)
         productDao.insertProduct(finalProd)
@@ -203,13 +227,11 @@ class FoodAnalysisRepository(
             )
         )
 
-        val warnings = PersonalizedWarningEngine.generateWarnings(finalProd, ingList, profile)
-
         return@withContext FullProductAnalysis(
             product = finalProd,
             ingredients = ingList,
             healthScore = scoreBreakdown.totalScore,
-            warnings = warnings,
+            warnings = allWarnings,
             isFromDatabaseCache = false
         )
     }

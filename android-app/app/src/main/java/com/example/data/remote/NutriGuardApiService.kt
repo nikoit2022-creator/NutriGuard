@@ -99,6 +99,81 @@ class NutriGuardApiService(
     }
 
     /**
+     * Sends free-text label/ingredient content to the NutriGuard FastAPI
+     * backend endpoint: POST /api/v1/scan/ocr-text
+     *
+     * JSON body per the exact OpenAPI schema (`OcrTextScanRequest`):
+     * `{"rawText": "...", "barcode": "..."}` -- NOT `text` (the field is
+     * `rawText`, camelCase, matching every other request/response field
+     * on this API). [barcode], when non-null/non-blank, is sent as
+     * `barcode` so the backend combines this text with an already-known
+     * barcode identity into ONE canonical product, exactly like
+     * [scanLabelImage]'s optional multipart field -- must always be a
+     * REAL barcode the user scanned/typed, never a synthetic
+     * `img_.../ocr_...` id a previous standalone response returned.
+     *
+     * Shares [scanBarcode]/[scanLabelImage]'s exact typed-exception and
+     * structured-404 handling ([handleUnsuccessfulResponse]) -- no local
+     * fallback analysis and no locally-fabricated Health Score exist on
+     * this client anymore; an incomplete result throws
+     * [LabelScanRequiredException] like everywhere else, for the caller
+     * to treat as a genuine partial result.
+     */
+    suspend fun scanOcrText(rawText: String, barcode: String? = null): ParsedScanData = withContext(Dispatchers.IO) {
+        val cleanedBarcode = barcode?.trim()?.takeIf { it.isNotEmpty() }
+        val jsonPayload = buildOcrTextRequestJson(rawText, cleanedBarcode)
+        val endpointUrl = "$baseUrl/api/v1/scan/ocr-text"
+        Log.d(
+            TAG,
+            "Executing scanOcrText POST request to: $endpointUrl " +
+                "(barcode: ${if (cleanedBarcode != null) "present" else "none"})"
+        )
+
+        val request = Request.Builder()
+            .url(endpointUrl)
+            .post(jsonPayload.toString().toRequestBody("application/json".toMediaType()))
+            .header("Accept", "application/json")
+            .build()
+
+        // Deliberately the base httpClient (same one scanLabelImage
+        // uses), NOT barcodeHttpClient's tighter callTimeout -- OCR-text
+        // analysis can invoke the same server-side Gemini/translation
+        // processing a label-image scan does, and no new timeout
+        // configuration was requested for this endpoint.
+        val response = try {
+            httpClient.newCall(request).execute()
+        } catch (e: SocketTimeoutException) {
+            Log.w(TAG, "OCR text analysis timed out calling $endpointUrl")
+            throw BarcodeTimeoutException(
+                "The text analysis is taking too long. Please check your connection and try again.",
+                e
+            )
+        } catch (e: IOException) {
+            Log.e(TAG, "Network connection failure to $endpointUrl: ${e.localizedMessage}", e)
+            throw BarcodeNetworkException(
+                "Unable to reach the NutriGuard server. Check your network connection and try again.",
+                e
+            )
+        }
+
+        response.use { resp ->
+            val responseBody = resp.body?.string() ?: ""
+            if (!resp.isSuccessful) {
+                handleUnsuccessfulResponse(resp.code, responseBody)
+            }
+
+            try {
+                val jsonObject = JSONObject(responseBody)
+                val dto = ScanLabelImageResponseDto.fromJson(jsonObject)
+                return@withContext dto.toParsedEntities()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to parse backend OCR text response JSON: ${e.localizedMessage}", e)
+                throw BarcodeParseException("Received an unexpected response from the server.", e)
+            }
+        }
+    }
+
+    /**
      * Sends an image bitmap to the NutriGuard FastAPI backend endpoint:
      * POST /api/v1/scan/label-image
      *
@@ -266,6 +341,22 @@ class NutriGuardApiService(
                 builder.addFormDataPart("barcode", barcode)
             }
             return builder.build()
+        }
+
+        /**
+         * Builds the JSON body for POST /api/v1/scan/ocr-text, matching
+         * the backend's `OcrTextScanRequest` schema exactly: `rawText`
+         * (required), and `barcode` (added ONLY when non-null -- the
+         * caller is responsible for trimming/blank-filtering it first,
+         * same convention as [buildLabelImageRequestBody]).
+         */
+        internal fun buildOcrTextRequestJson(rawText: String, barcode: String?): JSONObject {
+            return JSONObject().apply {
+                put("rawText", rawText)
+                if (barcode != null) {
+                    put("barcode", barcode)
+                }
+            }
         }
     }
 }

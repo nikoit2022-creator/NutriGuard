@@ -250,14 +250,69 @@ class MainViewModel(
         _pendingBarcode.value = null
     }
 
+    /**
+     * Submits typed/pasted label text (the "Manual Barcode or Text
+     * Lookup" panel on the Scan screen) for analysis via
+     * `POST /api/v1/scan/ocr-text` (review round 2, finding 2). Shares
+     * [barcodeLookupState] with [scanBarcode]/[analyzeLabelImage] (see
+     * that state's docs) -- stays on the Scan screen showing
+     * [BarcodeLookupUiState.Searching], and only navigates on a
+     * genuine, complete success; a structured partial result shows the
+     * verified evidence and what's still missing, exactly like a label
+     * photo, never a locally-fabricated Health Score.
+     *
+     * [pendingBarcode] is attached automatically exactly like
+     * [analyzeLabelImage] -- a barcode-linked text submission keeps it
+     * until a genuine full success or an explicit cancel; a standalone
+     * submission (no pending barcode) never adopts the synthetic
+     * `ocr_.../img_...` id a plain response's own identity carries.
+     */
     fun analyzeOcrText(text: String) {
+        if (_barcodeLookupState.value is BarcodeLookupUiState.Searching) return
+        _barcodeLookupState.value = BarcodeLookupUiState.Searching
+        val barcodeForThisSubmission = _pendingBarcode.value
         viewModelScope.launch {
-            _analysisState.value = AnalysisUiState.Loading
             try {
-                val result = repository.analyzeOcrText(text)
+                val result = repository.analyzeOcrText(text, barcodeForThisSubmission)
                 _analysisState.value = AnalysisUiState.Success(result)
+                _barcodeLookupState.value = BarcodeLookupUiState.Idle
+                _pendingBarcode.value = null
+                _navigateToResultEvent.tryEmit(Unit)
+            } catch (e: LabelScanRequiredException) {
+                // Still incomplete -- a useful partial result, not a
+                // generic error (never navigate away). pendingBarcode is
+                // left exactly as it was, same rationale as
+                // analyzeLabelImage: unchanged if barcode-linked (so a
+                // follow-up photo/text submission keeps combining into
+                // the same product), still null for a standalone
+                // submission.
+                val idPrefix = barcodeForThisSubmission ?: e.discoveredIdentity?.barcode ?: "ocr_text"
+                _barcodeLookupState.value = BarcodeLookupUiState.LabelScanRequired.from(e, idPrefix)
+            } catch (e: BarcodeTimeoutException) {
+                _barcodeLookupState.value = BarcodeLookupUiState.Failed(
+                    e.message ?: "The request timed out. Please try again.",
+                    barcodeForThisSubmission ?: ""
+                )
+            } catch (e: BarcodeNetworkException) {
+                _barcodeLookupState.value = BarcodeLookupUiState.Failed(
+                    e.message ?: "Unable to reach the server. Please check your connection.",
+                    barcodeForThisSubmission ?: ""
+                )
+            } catch (e: BarcodeAuthException) {
+                _barcodeLookupState.value = BarcodeLookupUiState.Failed(
+                    e.message ?: "Your session could not be verified. Please restart the app and try again.",
+                    barcodeForThisSubmission ?: ""
+                )
+            } catch (e: BarcodeScanException) {
+                _barcodeLookupState.value = BarcodeLookupUiState.Failed(
+                    e.message ?: "Something went wrong analyzing this text. Please try again.",
+                    barcodeForThisSubmission ?: ""
+                )
             } catch (e: Exception) {
-                _analysisState.value = AnalysisUiState.Error(e.localizedMessage ?: "Failed to process ingredient text")
+                _barcodeLookupState.value = BarcodeLookupUiState.Failed(
+                    e.localizedMessage ?: "Something went wrong analyzing this text. Please try again.",
+                    barcodeForThisSubmission ?: ""
+                )
             }
         }
     }

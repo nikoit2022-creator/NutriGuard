@@ -485,4 +485,299 @@ class MainViewModelBarcodeTest {
 
         assertEquals(1, fake.analyzeImageLabelCallCount)
     }
+
+    // --- Review round 2 finding 1: "pending barcode can be left
+    // invisibly active" -- ScanHomeScreen no longer calls
+    // dismissBarcodeLookupState()/cancelPendingScanFlow() before
+    // opening the camera for "Scan label for more information" or a
+    // photo-upload retry, so a cancelled camera (or a cancelled gallery
+    // pick, which never called the ViewModel at all even before this
+    // fix) leaves NOTHING to restore -- the card/pendingBarcode were
+    // simply never touched. These tests exercise that invariant at the
+    // ViewModel boundary: a "cancelled camera/gallery" is, from the
+    // ViewModel's perspective, the complete ABSENCE of a call between
+    // the card appearing and a later real submission -- so the
+    // meaningful regression check is that the state survives that gap
+    // untouched, and a later genuine photo still correctly combines
+    // with the SAME preserved barcode. -----------------------------
+
+    @Test
+    fun `a cancelled camera capture leaves the visible LabelScanRequired flow untouched`() = runTest(testDispatcher) {
+        val fake = FakeProductAnalysisSource()
+        fake.barcodeResult = Result.failure(
+            LabelScanRequiredException("nutrition still needed", null, emptyList(), null)
+        )
+        val viewModel = MainViewModel(fake)
+        viewModel.scanBarcode("4006381333931")
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        val stateBeforeCancel = viewModel.barcodeLookupState.value
+        val pendingBeforeCancel = viewModel.pendingBarcode.value
+        assertTrue(stateBeforeCancel is BarcodeLookupUiState.LabelScanRequired)
+        assertEquals("4006381333931", pendingBeforeCancel)
+
+        // Simulating "the user tapped Scan label for more information,
+        // the camera opened, and they cancelled it": ScanHomeScreen's
+        // onScanLabel no longer calls anything on the ViewModel up
+        // front, and a cancelled TakePicture result never calls
+        // analyzeLabelImage either -- i.e. nothing happens here at all.
+
+        // The card and pending barcode must be EXACTLY as they were --
+        // nothing was silently dismissed or cleared.
+        assertEquals(stateBeforeCancel, viewModel.barcodeLookupState.value)
+        assertEquals(pendingBeforeCancel, viewModel.pendingBarcode.value)
+
+        // And a genuine follow-up photo (the user tries again) still
+        // correctly combines with the SAME preserved barcode -- proving
+        // the flow wasn't just visually present but actually intact.
+        fake.imageResult = Result.success(sampleFullProductAnalysis(barcode = "4006381333931"))
+        viewModel.analyzeLabelImage(fakeBitmap())
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals("4006381333931", fake.lastImageLabelBarcodeArgument)
+        assertNull(viewModel.pendingBarcode.value)
+    }
+
+    @Test
+    fun `a cancelled gallery pick leaves the visible LabelScanRequired flow untouched`() = runTest(testDispatcher) {
+        // At the ViewModel boundary, a gallery pick is indistinguishable
+        // from a camera capture -- both call analyzeLabelImage(bitmap)
+        // (see ScanHomeScreen's imagePickerLauncher/cameraLauncher). A
+        // cancelled gallery pick (uri == null) never calls it at all.
+        val fake = FakeProductAnalysisSource()
+        fake.barcodeResult = Result.failure(
+            LabelScanRequiredException("ingredients still needed", null, emptyList(), null)
+        )
+        val viewModel = MainViewModel(fake)
+        viewModel.scanBarcode("5000112548167")
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        val stateBeforeCancel = viewModel.barcodeLookupState.value
+        assertTrue(stateBeforeCancel is BarcodeLookupUiState.LabelScanRequired)
+        assertEquals("5000112548167", viewModel.pendingBarcode.value)
+
+        // Simulated gallery cancellation: no call at all.
+
+        assertEquals(stateBeforeCancel, viewModel.barcodeLookupState.value)
+        assertEquals("5000112548167", viewModel.pendingBarcode.value)
+
+        fake.imageResult = Result.success(sampleFullProductAnalysis(barcode = "5000112548167"))
+        viewModel.analyzeLabelImage(fakeBitmap())
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals("5000112548167", fake.lastImageLabelBarcodeArgument)
+    }
+
+    @Test
+    fun `dismissing a failed label-photo upload clears pendingBarcode`() = runTest(testDispatcher) {
+        val fake = FakeProductAnalysisSource()
+        fake.barcodeResult = Result.failure(LabelScanRequiredException("incomplete", null, emptyList(), null))
+        val viewModel = MainViewModel(fake)
+        viewModel.scanBarcode("4006381333931")
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        fake.imageResult = Result.failure(BarcodeNetworkException("offline"))
+        viewModel.analyzeLabelImage(fakeBitmap())
+        testDispatcher.scheduler.advanceUntilIdle()
+        assertTrue(viewModel.barcodeLookupState.value is BarcodeLookupUiState.Failed)
+        assertEquals("4006381333931", viewModel.pendingBarcode.value)
+
+        // This is exactly what ScanHomeScreen's BarcodeLookupFailedCard
+        // onDismiss now does when a barcode is pending (see
+        // shouldCancelFlowOnFailedDismiss) -- not the plain
+        // dismissBarcodeLookupState().
+        viewModel.cancelPendingScanFlow()
+
+        assertEquals(BarcodeLookupUiState.Idle, viewModel.barcodeLookupState.value)
+        assertNull(viewModel.pendingBarcode.value)
+    }
+
+    @Test
+    fun `after dismissing a failed upload, the next image submission is sent standalone (no barcode)`() = runTest(testDispatcher) {
+        val fake = FakeProductAnalysisSource()
+        fake.barcodeResult = Result.failure(LabelScanRequiredException("incomplete", null, emptyList(), null))
+        val viewModel = MainViewModel(fake)
+        viewModel.scanBarcode("4006381333931")
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        fake.imageResult = Result.failure(BarcodeNetworkException("offline"))
+        viewModel.analyzeLabelImage(fakeBitmap())
+        testDispatcher.scheduler.advanceUntilIdle()
+        assertEquals("4006381333931", viewModel.pendingBarcode.value)
+
+        viewModel.cancelPendingScanFlow()
+        assertNull(viewModel.pendingBarcode.value)
+
+        // A completely new, unrelated standalone submission afterward --
+        // must never silently carry the abandoned barcode forward.
+        fake.imageResult = Result.success(sampleFullProductAnalysis(barcode = "img_9999999999"))
+        viewModel.analyzeLabelImage(fakeBitmap())
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(2, fake.analyzeImageLabelCallCount)
+        assertNull(
+            "a submission after an explicit cancel must be standalone, never linked to the abandoned barcode",
+            fake.lastImageLabelBarcodeArgument
+        )
+    }
+
+    // --- Review round 2 finding 2: POST /api/v1/scan/ocr-text
+    // integration (analyzeOcrText no longer uses the local
+    // GeminiAnalysisEngine / a locally-computed Health Score -- it now
+    // shares the exact same backend-call + partial-result state machine
+    // as analyzeLabelImage). There is no separate FoodAnalysisRepository
+    // test file in this project (see FakeProductAnalysisSource's own
+    // KDoc) -- ViewModel-level tests against that fake are this
+    // project's established way of covering the repository boundary,
+    // and NutriGuardApiService's own request-building is covered
+    // directly in ScanLabelImageDtoTest ("buildOcrTextRequestJson..."). ---
+
+    @Test
+    fun `analyzeOcrText without a pending barcode submits a standalone request`() = runTest(testDispatcher) {
+        val fake = FakeProductAnalysisSource()
+        fake.ocrResult = Result.success(sampleFullProductAnalysis(barcode = "ocr_1234567890"))
+        val viewModel = MainViewModel(fake)
+
+        assertNull(viewModel.pendingBarcode.value)
+        viewModel.analyzeOcrText("Water, Sugar, Salt")
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(1, fake.analyzeOcrTextCallCount)
+        assertEquals("Water, Sugar, Salt", fake.lastOcrTextArgument)
+        assertNull(
+            "a standalone submission must never invent a barcode",
+            fake.lastOcrTextBarcodeArgument
+        )
+    }
+
+    @Test
+    fun `analyzeOcrText attaches pendingBarcode when one is active`() = runTest(testDispatcher) {
+        val fake = FakeProductAnalysisSource()
+        fake.barcodeResult = Result.failure(LabelScanRequiredException("incomplete", null, emptyList(), null))
+        val viewModel = MainViewModel(fake)
+        viewModel.scanBarcode("4006381333931")
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        fake.ocrResult = Result.success(sampleFullProductAnalysis(barcode = "4006381333931"))
+        viewModel.analyzeOcrText("Water, Sugar, Salt")
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals("4006381333931", fake.lastOcrTextBarcodeArgument)
+    }
+
+    @Test
+    fun `a structured partial result from analyzeOcrText never navigates and never fabricates a score`() = runTest(testDispatcher) {
+        val fake = FakeProductAnalysisSource()
+        fake.ocrResult = Result.failure(
+            LabelScanRequiredException(
+                reason = "Ingredients verified, nutrition still needed.",
+                suggestedAction = null,
+                providersChecked = emptyList(),
+                discoveredIdentity = DiscoveredIdentity("ocr_1234567890", "Diagnostic Product", null, null),
+                analysisComplete = false,
+                healthScoreAvailable = false,
+                healthScore = null,
+                nutritionScanRequired = true,
+                ingredientsScanRequired = false,
+                ingredients = listOf(IngredientDto(id = "sugar", commonName = "Sugar"))
+            )
+        )
+        val viewModel = MainViewModel(fake)
+        var navigated = false
+        val collectJob = collectNavigation(viewModel) { navigated = true }
+
+        viewModel.analyzeOcrText("Water, Sugar, Salt")
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        assertFalse("a partial OCR-text result must never navigate", navigated)
+        assertTrue(viewModel.analysisState.value !is AnalysisUiState.Success)
+        val state = viewModel.barcodeLookupState.value
+        assertTrue(state is BarcodeLookupUiState.LabelScanRequired)
+        state as BarcodeLookupUiState.LabelScanRequired
+        assertEquals(false, state.healthScoreAvailable)
+        assertNull("never a fabricated/zero score for an incomplete result", state.healthScore)
+        assertEquals(true, state.nutritionScanRequired)
+        assertEquals(1, state.ingredients.size)
+        // Standalone (no pendingBarcode before this call) -- the partial
+        // response's own synthetic identity must never become pending.
+        assertNull(viewModel.pendingBarcode.value)
+        collectJob.cancel()
+    }
+
+    @Test
+    fun `a fully successful analyzeOcrText navigates and clears pendingBarcode`() = runTest(testDispatcher) {
+        val fake = FakeProductAnalysisSource()
+        fake.barcodeResult = Result.failure(LabelScanRequiredException("incomplete", null, emptyList(), null))
+        val viewModel = MainViewModel(fake)
+        viewModel.scanBarcode("4006381333931")
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        fake.ocrResult = Result.success(sampleFullProductAnalysis(barcode = "4006381333931", healthScore = 61))
+        var navigated = false
+        val collectJob = collectNavigation(viewModel) { navigated = true }
+
+        viewModel.analyzeOcrText("Water, Sugar, Salt")
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        assertTrue(navigated)
+        val analysis = viewModel.analysisState.value
+        assertTrue(analysis is AnalysisUiState.Success)
+        assertEquals(61, (analysis as AnalysisUiState.Success).analysis.healthScore)
+        assertNull(viewModel.pendingBarcode.value)
+        assertEquals(BarcodeLookupUiState.Idle, viewModel.barcodeLookupState.value)
+        collectJob.cancel()
+    }
+
+    @Test
+    fun `sequential enrichment - an incomplete OCR-text result keeps pendingBarcode for a follow-up photo`() = runTest(testDispatcher) {
+        val fake = FakeProductAnalysisSource()
+        fake.barcodeResult = Result.failure(LabelScanRequiredException("incomplete", null, emptyList(), null))
+        val viewModel = MainViewModel(fake)
+        viewModel.scanBarcode("4006381333931")
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        // Text submission verifies ingredients but nutrition is still needed.
+        fake.ocrResult = Result.failure(
+            LabelScanRequiredException(
+                reason = "Ingredients verified, nutrition still needed.",
+                suggestedAction = null,
+                providersChecked = emptyList(),
+                discoveredIdentity = DiscoveredIdentity("4006381333931", "Diagnostic Product", null, null),
+                analysisComplete = false,
+                healthScoreAvailable = false,
+                healthScore = null,
+                nutritionScanRequired = true,
+                ingredientsScanRequired = false,
+                ingredients = listOf(IngredientDto(id = "sugar", commonName = "Sugar"))
+            )
+        )
+        viewModel.analyzeOcrText("Water, Sugar, Salt")
+        testDispatcher.scheduler.advanceUntilIdle()
+        assertEquals("4006381333931", viewModel.pendingBarcode.value)
+
+        // A follow-up label photo (nutrition panel) for the SAME barcode
+        // completes it -- proving OCR-text and label-image enrichment
+        // combine into the same pending flow.
+        fake.imageResult = Result.success(sampleFullProductAnalysis(barcode = "4006381333931"))
+        viewModel.analyzeLabelImage(fakeBitmap())
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals("4006381333931", fake.lastImageLabelBarcodeArgument)
+        assertNull(viewModel.pendingBarcode.value)
+    }
+
+    @Test
+    fun `analyzeOcrText ignores a repeated call while already in flight`() = runTest(testDispatcher) {
+        val fake = FakeProductAnalysisSource()
+        fake.ocrResult = Result.success(sampleFullProductAnalysis())
+        fake.ocrResultDelayMillis = 1000
+        val viewModel = MainViewModel(fake)
+
+        viewModel.analyzeOcrText("Water, Sugar, Salt")
+        viewModel.analyzeOcrText("Water, Sugar, Salt")
+
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(1, fake.analyzeOcrTextCallCount)
+    }
 }

@@ -276,4 +276,32 @@ class ScanLabelImageDtoTest {
             body.parts.any { it.headers?.get("Content-Disposition")?.contains("name=\"barcode\"") == true }
         )
     }
+
+    // TEST 5: POST /api/v1/scan/ocr-text's JSON body (review round 2,
+    // finding 2) -- the exact OpenAPI schema field is "rawText", NOT
+    // "text".
+
+    @Test
+    fun `buildOcrTextRequestJson uses the rawText field, not text`() {
+        val json = NutriGuardApiService.buildOcrTextRequestJson("Water, Sugar, Salt", null)
+
+        assertEquals("Water, Sugar, Salt", json.getString("rawText"))
+        assertFalse("the OpenAPI schema field is rawText, never text", json.has("text"))
+        assertFalse(json.has("barcode"))
+    }
+
+    @Test
+    fun `buildOcrTextRequestJson includes barcode when a pending barcode is supplied`() {
+        val json = NutriGuardApiService.buildOcrTextRequestJson("Water, Sugar, Salt", "4006381333931")
+
+        assertEquals("Water, Sugar, Salt", json.getString("rawText"))
+        assertEquals("4006381333931", json.getString("barcode"))
+    }
+
+    @Test
+    fun `buildOcrTextRequestJson omits barcode entirely for a standalone submission`() {
+        val json = NutriGuardApiService.buildOcrTextRequestJson("Water, Sugar, Salt", null)
+
+        assertFalse(json.has("barcode"))
+    }
 }
