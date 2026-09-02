@@ -9,13 +9,88 @@ TEST 7 and TEST 8 (existing auth/API tests still pass) are satisfied by
 the pre-existing `tests/integration/test_auth.py` and the rest of
 `tests/integration/test_scan_flow.py` continuing to pass unmodified.
 """
+import json
+
 import pytest
+
+from app.integrations.gemini import gemini_service
 
 
 async def _register_device(client, device_id="barcode-fix-device"):
     resp = await client.post("/api/v1/auth/device", json={"deviceId": device_id})
     token = resp.json()["accessToken"]
     return {"Authorization": f"Bearer {token}"}
+
+
+async def _seed_known_product(app_client, monkeypatch, headers, barcode: str) -> dict:
+    """
+    Seeds a fully verified, persisted product using two REAL production
+    pipelines combined (review round 5, finding 1: standalone
+    `/scan/ocr-text` alone can no longer produce a verified product --
+    its nutrition is always a heuristic guess, never genuinely known,
+    so `has_verified_nutrition` can never become True through it alone
+    -- see `food_analysis.analyze_ocr_text`'s docstring):
+
+      1. `/scan/ocr-text` WITH this barcode -- establishes the
+         INGREDIENTS evidence group from real, literal OCR text via the
+         SAME deterministic keyword heuristic this test's hand-derived
+         Health Score always relied on (`fallback_local_analysis`:
+         "sodium nitrite" -> sodium_mg=450.0, has_preservatives=True,
+         nova=4; "corn syrup" contributes no extra keyword deduction) --
+         still a 404 (`labelScanRequired`) on its own, exactly as
+         designed. The "Contains:" prefix is a real label word (and a
+         STRONG English-detection signal, see `language_detection.py`)
+         that `ocr_normalizer.normalize_and_extract_tokens` already
+         strips before ingredient matching -- it makes the text
+         confidently detect as English (this endpoint's barcode-linked
+         path runs `resolve_label_text` in strict mode until ingredients
+         are locked) without changing which two ingredients get matched
+         or any fallback-heuristic keyword outcome.
+      2. `/scan/label-image` WITH the SAME barcode and a mocked Gemini
+         payload supplying the matching real nutrition numbers --
+         completes the NUTRITION group. Because ingredients are already
+         locked from step 1, this call's own ingredient/NOVA/dietary-
+         flag data is never applied (see `_apply_label_enrichment`) --
+         only sugar/sodium/saturated-fat land, which is exactly what
+         this helper needs.
+
+    Returns the final, complete `FullProductAnalysisOut` body (step 2's
+    response) -- byte-for-byte the same shape the old single-call
+    `/scan/ocr-text` seed used to return.
+    """
+    seed = await app_client.post(
+        "/api/v1/scan/ocr-text",
+        json={"rawText": "Contains: Sodium Nitrite, Corn Syrup", "barcode": barcode},
+        headers=headers,
+    )
+    assert seed.status_code == 404  # ingredients-only partial, by design
+
+    async def fake_analyze_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        return json.dumps(
+            {
+                "productName": "Preserved Snack",
+                "rawIngredientText": "irrelevant -- ingredients are already locked",
+                "ingredients": [],
+                "sugarGrams": 2.0,
+                "sodiumMg": 450.0,
+                "saturatedFatGrams": 0.5,
+            }
+        )
+
+    monkeypatch.setattr(gemini_service, "analyze_image", fake_analyze_image)
+
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 16), color=(1, 2, 3)).save(buf, format="JPEG")
+    files = {"image": ("label.jpg", buf.getvalue(), "image/jpeg")}
+    complete = await app_client.post(
+        "/api/v1/scan/label-image", headers=headers, files=files, data={"barcode": barcode}
+    )
+    assert complete.status_code == 200
+    return complete.json()
 
 
 # TEST 1 + TEST 2 -----------------------------------------------------------
@@ -39,20 +114,17 @@ async def test_unknown_barcode_does_not_fabricate_product_or_claim_cache_hit(app
 
 
 # TEST 3 ----------------------------------------------------------------------
-# A known product (persisted via the OCR pipeline, the correct entry
-# point for analyzing label content) returns the real stored product.
+# A known product (persisted via the OCR + label-image pipelines, the
+# correct entry points for analyzing label content) returns the real
+# stored product.
 
 @pytest.mark.asyncio
-async def test_known_product_returns_real_stored_product(app_client):
+async def test_known_product_returns_real_stored_product(app_client, monkeypatch):
     headers = await _register_device(app_client, device_id="known-product-device-2")
+    barcode = "6639233214683"
 
-    seed = await app_client.post(
-        "/api/v1/scan/ocr-text",
-        json={"rawText": "Sodium Nitrite, Corn Syrup"},
-        headers=headers,
-    )
-    barcode = seed.json()["product"]["barcode"]
-    raw_text = seed.json()["product"]["rawIngredientText"]
+    seeded = await _seed_known_product(app_client, monkeypatch, headers, barcode)
+    raw_text = seeded["product"]["rawIngredientText"]
 
     resp = await app_client.post("/api/v1/scan/barcode", json={"barcode": barcode}, headers=headers)
     assert resp.status_code == 200
@@ -79,18 +151,13 @@ async def test_known_product_returns_real_stored_product(app_client):
 #   total = 100 - (32+0+10+0+0+10+20) = 100 - 72 = 28
 
 @pytest.mark.asyncio
-async def test_health_score_matches_hand_verified_formula_for_real_product(app_client):
+async def test_health_score_matches_hand_verified_formula_for_real_product(app_client, monkeypatch):
     headers = await _register_device(app_client, device_id="health-score-regression-device")
+    barcode = "8197369935639"
 
-    ocr_resp = await app_client.post(
-        "/api/v1/scan/ocr-text",
-        json={"rawText": "Sodium Nitrite, Corn Syrup"},
-        headers=headers,
-    )
-    assert ocr_resp.status_code == 200
-    assert ocr_resp.json()["healthScore"] == 28
+    seeded = await _seed_known_product(app_client, monkeypatch, headers, barcode)
+    assert seeded["healthScore"] == 28
 
-    barcode = ocr_resp.json()["product"]["barcode"]
     barcode_resp = await app_client.post(
         "/api/v1/scan/barcode", json={"barcode": barcode}, headers=headers
     )
@@ -109,18 +176,14 @@ async def test_health_score_matches_hand_verified_formula_for_real_product(app_c
 # product once the relevant health-profile flag is enabled.
 
 @pytest.mark.asyncio
-async def test_warnings_generated_for_real_product_after_enabling_profile_flag(app_client):
+async def test_warnings_generated_for_real_product_after_enabling_profile_flag(app_client, monkeypatch):
     headers = await _register_device(app_client, device_id="warning-regression-device")
+    barcode = "2729518175601"
 
-    ocr_resp = await app_client.post(
-        "/api/v1/scan/ocr-text",
-        json={"rawText": "Sodium Nitrite, Corn Syrup"},
-        headers=headers,
-    )
-    barcode = ocr_resp.json()["product"]["barcode"]
+    seeded = await _seed_known_product(app_client, monkeypatch, headers, barcode)
 
     # Baseline: no health conditions enabled -> no warnings.
-    assert ocr_resp.json()["warnings"] == []
+    assert seeded["warnings"] == []
 
     profile_resp = await app_client.put(
         "/api/v1/health-profile", json={"hasHypertension": True}, headers=headers

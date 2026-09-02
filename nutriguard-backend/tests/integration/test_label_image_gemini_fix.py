@@ -100,6 +100,14 @@ async def test_unusable_gemini_ingredient_objects_fall_back_to_raw_text(app_clie
         # its item schema. These objects are therefore valid Gemini output
         # but cannot be read as commonName/eNumber pairs.
         "ingredients": [{"name": "Water"}, {"name": "Salt"}],
+        # Complete, trustworthy nutrition (V11: this test is specifically
+        # about the ingredient-OBJECT-shape fallback, not about nutrition
+        # completeness -- explicit real values here keep the two concerns
+        # isolated so an incomplete-nutrition gate doesn't block this test).
+        "sugarGrams": 0.0,
+        "sodiumMg": 1.0,
+        "saturatedFatGrams": 0.0,
+        "novaGroup": 1,
     }
 
     async def fake_analyze_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
@@ -118,6 +126,19 @@ async def test_unusable_gemini_ingredient_objects_fall_back_to_raw_text(app_clie
 
 
 # 2. Gemini returns invalid JSON -> fallback used --------------------------
+#
+# V11 (PR #9 review round 4, finding 2): the deterministic keyword-
+# heuristic fallback's "raw text" is a hardcoded placeholder/error
+# string, not real label content -- its nutrition is guessed and its
+# "ingredients" are tokenized from that placeholder, so neither
+# evidence group is genuinely verified. `/scan/label-image` (unlike
+# `/scan/ocr-text`) now correctly refuses to return a confident-looking
+# Health Score for this case, returning the SAME structured
+# `labelScanRequired` response `/scan/barcode` already uses for an
+# incomplete product, instead of a fabricated `200` -- see README
+# section 11.9 and the module docstring's "Standalone label analysis"
+# section for the full rationale and the Android-facing contract note.
+
 
 @pytest.mark.asyncio
 async def test_invalid_gemini_json_triggers_fallback(app_client, monkeypatch):
@@ -128,11 +149,14 @@ async def test_invalid_gemini_json_triggers_fallback(app_client, monkeypatch):
 
     headers = await _register_device(app_client, "invalid-json-device")
     resp = await _upload(app_client, headers)
-    assert resp.status_code == 200
-    body = resp.json()
-    # Fallback placeholder product name, proving the deterministic path ran.
-    assert body["product"]["productName"] == "Scanned Label Product"
-    assert "AI response was unavailable or invalid" in body["product"]["rawIngredientText"]
+    assert resp.status_code == 404
+    error = resp.json()["error"]
+    assert error["code"] == "PRODUCT_NOT_FOUND"
+    assert error["details"]["labelScanRequired"] is True
+    # The deterministic fallback still ran (proving the fallback chain
+    # itself, unlike the fabricated-score behavior, is unchanged) --
+    # its placeholder identity is still surfaced for the client to show.
+    assert error["details"]["discoveredIdentity"]["productName"] == "Scanned Label Product"
 
 
 # 3. Gemini network timeout -> fallback used -------------------------------
@@ -146,9 +170,11 @@ async def test_gemini_network_timeout_triggers_fallback(app_client, monkeypatch)
 
     headers = await _register_device(app_client, "timeout-device")
     resp = await _upload(app_client, headers)
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["product"]["productName"] == "Scanned Label Product"
+    assert resp.status_code == 404
+    error = resp.json()["error"]
+    assert error["code"] == "PRODUCT_NOT_FOUND"
+    assert error["details"]["labelScanRequired"] is True
+    assert error["details"]["discoveredIdentity"]["productName"] == "Scanned Label Product"
 
 
 # 4. Gemini API key missing -> fallback used -------------------------------
@@ -163,9 +189,11 @@ async def test_missing_api_key_triggers_fallback(app_client):
 
     headers = await _register_device(app_client, "missing-key-device")
     resp = await _upload(app_client, headers)
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["product"]["productName"] == "Scanned Label Product"
+    assert resp.status_code == 404
+    error = resp.json()["error"]
+    assert error["code"] == "PRODUCT_NOT_FOUND"
+    assert error["details"]["labelScanRequired"] is True
+    assert error["details"]["discoveredIdentity"]["productName"] == "Scanned Label Product"
 
 
 # 5. Both Gemini and fallback fail -> AI_SERVICE_UNAVAILABLE ----------------

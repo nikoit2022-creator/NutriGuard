@@ -8,8 +8,11 @@ here the point is proving the whole stack (validation -> discovery ->
 persistence -> Health Score/Warnings -> API response) works together.
 """
 import asyncio
+import io
+import json
 
 import pytest
+from PIL import Image
 from sqlalchemy import func, select
 
 from app.core.config import settings
@@ -20,6 +23,7 @@ from app.integrations.barcode_providers.base import (
     ProviderProductResult,
     ProviderTimeoutError,
 )
+from app.integrations.gemini import gemini_service
 from app.models.product import Product
 from app.models.product_source import ProductSource
 from app.services import barcode_discovery
@@ -100,10 +104,34 @@ async def test_local_database_hit_makes_no_external_request(app_client, monkeypa
 
     monkeypatch.setattr(barcode_discovery, "discover_product", _must_not_be_called)
 
+    # Seeds a fully verified, locally-stored product via `/scan/label-image`
+    # (a single request can genuinely verify both evidence groups) --
+    # review round 5, finding 1: `/scan/ocr-text` alone can no longer do
+    # this, since its nutrition is always a heuristic guess, never
+    # genuinely verified.
+    async def fake_analyze_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        return json.dumps(
+            {
+                "productName": "Local Hit Product",
+                "rawIngredientText": "Sodium Nitrite, Corn Syrup",
+                "ingredients": [{"commonName": "Sodium Nitrite"}, {"commonName": "Corn Syrup"}],
+                "sugarGrams": 2.0,
+                "sodiumMg": 450.0,
+                "saturatedFatGrams": 0.5,
+            }
+        )
+
+    monkeypatch.setattr(gemini_service, "analyze_image", fake_analyze_image)
+
     headers = await _register_device(app_client, "discovery-local-hit")
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 16), color=(4, 5, 6)).save(buf, format="JPEG")
     seed = await app_client.post(
-        "/api/v1/scan/ocr-text", json={"rawText": "Sodium Nitrite, Corn Syrup"}, headers=headers
+        "/api/v1/scan/label-image",
+        headers=headers,
+        files={"image": ("label.jpg", buf.getvalue(), "image/jpeg")},
     )
+    assert seed.status_code == 200
     barcode = seed.json()["product"]["barcode"]
 
     resp = await app_client.post("/api/v1/scan/barcode", json={"barcode": barcode}, headers=headers)
@@ -136,7 +164,17 @@ async def test_open_food_facts_successful_discovery(app_client, monkeypatch, db_
         await db_session.execute(select(Product).where(Product.barcode == VALID_UNKNOWN_BARCODE))
     ).scalar_one()
     assert row.source == "open_food_facts"
-    assert row.is_verified is False
+    # V11 (PR #9 review round 4): `is_verified` now means "both
+    # evidence groups (nutrition, ingredients) are genuinely verified",
+    # not "was this locally-sourced" -- a genuinely complete discovery
+    # (this one has real nutrition AND real ingredients_text from
+    # `_off_result()`) is verified, and correctly protected from being
+    # overwritten by a later, lower-value re-discovery or a rejected
+    # label scan -- see test_food_analysis_discovery_bridge.py and
+    # README section 11.8.
+    assert row.has_verified_nutrition is True
+    assert row.has_verified_ingredients is True
+    assert row.is_verified is True
 
 
 @pytest.mark.asyncio
@@ -403,6 +441,8 @@ async def test_existing_verified_local_data_is_not_overwritten(app_client, monke
         allergens_detected="None",
         source="label_scan",
         is_verified=True,
+        has_verified_nutrition=True,
+        has_verified_ingredients=True,
     )
     db_session.add(verified)
     await db_session.flush()
@@ -449,6 +489,8 @@ async def test_persist_discovered_product_never_overwrites_verified_row_on_race(
         allergens_detected="None",
         source="label_scan",
         is_verified=True,
+        has_verified_nutrition=True,
+        has_verified_ingredients=True,
     )
     db_session.add(verified)
     await db_session.flush()
@@ -607,9 +649,15 @@ async def test_legacy_upc_a_row_is_found_by_a_later_equivalent_ean13_scan(app_cl
         saturated_fat_grams=0,
         allergens_detected="None",
         source="open_food_facts",
-        is_verified=False,
+        # A fully complete legacy row (real nutrition AND ingredients,
+        # matching how the pre-V11 migration backfill treats a row that
+        # was already fully verified -- see the a1b2c3d4e5f6 migration):
+        # `is_verified` now means "both evidence groups verified", not
+        # merely "not overwritten yet".
+        is_verified=True,
         source_confidence=0.75,
         has_verified_nutrition=True,
+        has_verified_ingredients=True,
     )
     db_session.add(legacy_row)
     await db_session.flush()

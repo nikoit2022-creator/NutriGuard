@@ -12,6 +12,14 @@ class BarcodeScanRequest(ORMModel):
 
 class OcrTextScanRequest(ORMModel):
     raw_text: str = Field(min_length=3)
+    # Optional: lets a client that already attempted POST /scan/barcode
+    # (and got `labelScanRequired`) resubmit the same barcode alongside
+    # free-text label content so the backend can enrich/create the
+    # canonical product for that barcode instead of a synthetic
+    # `ocr_...` one. Omitted (or blank/a placeholder like "null") ->
+    # behaves EXACTLY as before (see app.services.food_analysis.
+    # analyze_ocr_text) -- fully backward compatible.
+    barcode: str | None = Field(default=None, max_length=64)
 
 
 class FullProductAnalysisOut(ORMModel):

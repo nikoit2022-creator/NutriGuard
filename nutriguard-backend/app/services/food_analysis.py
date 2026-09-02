@@ -85,7 +85,13 @@ from typing import Any
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import AIServiceUnavailableError, ImageUnreadableError, ProductNotFoundError
+from app.core.exceptions import (
+    AIServiceUnavailableError,
+    ImageUnreadableError,
+    ProductNotFoundError,
+    ValidationAppError,
+)
+from app.integrations.barcode_providers.base import ProviderProductResult
 from app.integrations.gemini import GeminiUnavailableError, gemini_service
 from app.models.enums import ScanType, WarningSeverity
 from app.models.product import Product
@@ -97,12 +103,15 @@ from app.repositories import (
     product_source_repository,
     scan_history_repository,
 )
-from app.services import barcode_discovery, health_score, warning_engine
+from app.services import barcode_discovery, gemini_image_parser, health_score, warning_engine
 from app.services import barcode_validation
+from app.services.barcode_text_safety import is_placeholder
 from app.services.barcode_validation import validate_and_normalize
 from app.services.fallback_analysis import AnalyzedProductData, fallback_local_analysis
 from app.services.gemini_image_parser import parse_gemini_image_json_result
 from app.services.gemini_result_parser import parse_gemini_json_result
+from app.services import label_language
+from app.services.label_language import LabelTextResult, resolve_label_text
 from app.services.ocr_normalizer import create_synthetic_ingredient, match_against_database, normalize_and_extract_tokens
 from app.services.warning_engine import HealthWarning
 
@@ -143,8 +152,18 @@ def _to_product_model(
     *,
     source: str = "label_scan",
     source_confidence: float | None = None,
-    is_verified: bool = True,
-    has_verified_nutrition: bool = True,
+    # V12 (PR #9 review round 5, finding 2): these three used to default
+    # to True -- fail-OPEN, matching the (also since-reversed) `Product`
+    # column defaults. Every real call site already passes all three
+    # explicitly (see `_persist_discovered_product`, `_new_product_from_label`,
+    # `_finalize_standalone_label_analysis`); the default is deliberately
+    # never exercised by this app's own code and exists only as a last-
+    # resort safety net, so it must fail SAFE (unverified) rather than
+    # silently fabricate verified, Health-Score-eligible evidence for a
+    # future call site that forgets to pass one.
+    is_verified: bool = False,
+    has_verified_nutrition: bool = False,
+    has_verified_ingredients: bool = False,
 ) -> Product:
     now = datetime.now(timezone.utc)
     return Product(
@@ -174,6 +193,7 @@ def _to_product_model(
         source_confidence=source_confidence,
         is_verified=is_verified,
         has_verified_nutrition=has_verified_nutrition,
+        has_verified_ingredients=has_verified_ingredients,
         discovered_at=now if source != "label_scan" else None,
         last_verified_at=now,
     )
@@ -187,6 +207,7 @@ def _apply_discovered_fields(
     source: str,
     confidence: float,
     has_verified_nutrition: bool,
+    has_verified_ingredients: bool,
 ) -> None:
     """Overwrites a previously-discovered (never a verified/local) row
     with a higher-confidence re-discovery. Never called for a row whose
@@ -213,27 +234,33 @@ def _apply_discovered_fields(
     existing.source = source
     existing.source_confidence = confidence
     existing.has_verified_nutrition = has_verified_nutrition
+    existing.has_verified_ingredients = has_verified_ingredients
+    existing.is_verified = has_verified_nutrition and has_verified_ingredients
     existing.last_verified_at = datetime.now(timezone.utc)
     existing.timestamp = int(time.time() * 1000)
 
 
 def _to_analyzed_data_from_discovery(
     discovered: "barcode_discovery.DiscoveredProduct", db_ingredients: list[Any]
-) -> tuple[AnalyzedProductData, list[Any], bool]:
+) -> tuple[AnalyzedProductData, list[Any], bool, bool]:
     """
     Bridges a validated `DiscoveredProduct` (external, provider-sourced)
     into the same `AnalyzedProductData` shape the OCR/Gemini pipelines
     use, so it goes through the identical ingredient-matching, Health
     Score, and Warning Engine code paths — see module docstring, V5/V6.
 
-    Returns `(data, ingredients, has_verified_nutrition)`.
-    `has_verified_nutrition` is False whenever the discovery is
-    materially incomplete (no real nutrition figures AND/OR no
-    ingredient text — see `DiscoveredProduct.nutrition_known` /
-    `.ingredients_known`); the caller (`_persist_discovered_product` /
-    `analyze_barcode`) uses this to skip the Health Score/Warning
-    pipeline entirely for such a row — see V6 in the module docstring —
-    rather than trust a score computed from placeholder numbers.
+    Returns `(data, ingredients, nutrition_known, ingredients_known)`.
+    Deliberately TWO independent booleans (V11, PR #9 review round 4;
+    previously a single combined `is_complete` flag): a trusted provider
+    frequently states real per-100g nutrition with no `ingredients_text`
+    (or vice versa), and the caller (`_persist_discovered_product`) now
+    tracks each as its own `Product.has_verified_nutrition`/
+    `has_verified_ingredients` column so a LATER label scan for the same
+    barcode can independently complete whichever group the barcode
+    discovery didn't provide -- see the "Barcode + label enrichment"
+    section below and README section 11.8. `analyze_barcode` gates the
+    Health Score on `product.is_verified` (both true), never on either
+    flag alone, so neither is scored in isolation.
 
     Dietary flags/allergens: OFF's own structured tags (`dietary_flags`/
     `allergens` on `DiscoveredProduct`) are used where present. Anything
@@ -248,10 +275,12 @@ def _to_analyzed_data_from_discovery(
     Personalized Warning Engine already assumes when it warns a user off
     a product that isn't flagged as meeting their requirement.
     """
-    is_complete = discovered.nutrition_known and discovered.ingredients_known
+    nutrition_known = discovered.nutrition_known
+    ingredients_known = discovered.ingredients_known
+    is_complete = nutrition_known and ingredients_known
 
     ingredient_list: list[Any] = []
-    if discovered.ingredients_known:
+    if ingredients_known:
         tokens = normalize_and_extract_tokens(discovered.raw_ingredient_text)
         norm = match_against_database(tokens, db_ingredients)
         ingredient_list = list(norm.matched_ingredients)
@@ -261,22 +290,22 @@ def _to_analyzed_data_from_discovery(
     n = discovered.nutrition
     nova_group = n.nova_group
     if nova_group is None:
-        # Only guessed when there's real ingredient/nutrition data to
-        # base the guess on (same heuristic `fallback_local_analysis`
-        # uses for OCR text with no explicit NOVA signal); an
-        # incomplete discovery gets an explicit "unclassified" 0
-        # instead of a guess dressed up as a real NOVA group — moot for
-        # scoring either way since an incomplete row never reaches the
-        # Health Score Calculator (see docstring above), but this keeps
-        # the stored value honest for anyone inspecting the row directly.
+        # Only guessed when there's real ingredient data to base the
+        # guess on (same heuristic `fallback_local_analysis` uses for
+        # OCR text with no explicit NOVA signal); a discovery with no
+        # ingredients at all gets an explicit "unclassified" 0 instead
+        # of a guess dressed up as a real NOVA group -- NOVA
+        # classification is inferred from the ingredient list (additive
+        # count/presence), not the nutrition panel, so it tracks
+        # `ingredients_known` specifically, not overall completeness.
         nova_group = (
             (4 if (len(ingredient_list) > 5 or n.has_artificial_sweeteners or n.has_preservatives) else 3)
-            if is_complete
+            if ingredients_known
             else 0
         )
 
     flags = discovered.dietary_flags
-    allergens_text = ", ".join(discovered.allergens) if discovered.allergens else "None"
+    allergens_text = ", ".join(discovered.allergens) if discovered.allergens else ""
 
     data = AnalyzedProductData(
         barcode=discovered.barcode.gtin13,
@@ -299,7 +328,7 @@ def _to_analyzed_data_from_discovery(
         is_kosher=flags.get("is_kosher", False),
         allergens_detected=allergens_text,
     )
-    return data, ingredient_list, is_complete
+    return data, ingredient_list, nutrition_known, ingredients_known
 
 
 def _not_found_details(barcode: str, attempts: list["barcode_discovery.ProviderAttempt"]) -> dict:
@@ -311,15 +340,94 @@ def _not_found_details(barcode: str, attempts: list["barcode_discovery.ProviderA
     }
 
 
-def _label_scan_required_details(product: Product) -> dict:
+def _ingredient_out_dict(ing: Any) -> dict:
+    """Plain-dict mirror of `app.schemas.ingredient.IngredientOut`'s
+    camelCase shape, built BY HAND rather than by importing that schema
+    -- services stay schema-free (see CLAUDE.md section 2: routers own
+    `app/schemas/`); this is a raw `dict` placed straight into an
+    `AppError.details` payload, which bypasses `response_model`
+    serialization entirely (see `app.main._error_envelope`) -- so it
+    must already be plain, JSON-serializable data. Works identically for
+    a real `Ingredient` ORM row and a `SyntheticIngredient` (see
+    `ocr_normalizer.create_synthetic_ingredient`) -- both expose the
+    exact same attribute names. Field names/casing are kept in exact
+    sync with `IngredientOut` so a partial-analysis `ingredients` list
+    (see `_label_scan_required_details`) can be rendered by the SAME
+    Android model/adapter the normal success response's `ingredients`
+    array already uses -- no new client-side type.
+    """
+    risk_level = ing.risk_level
+    return {
+        "id": ing.id,
+        "commonName": ing.common_name,
+        "scientificName": ing.scientific_name,
+        "eNumber": ing.e_number,
+        "category": ing.category,
+        "description": ing.description,
+        "purposeInFood": ing.purpose_in_food,
+        "healthConcerns": ing.health_concerns,
+        "evidenceLevel": ing.evidence_level,
+        "countriesRestrictedOrBanned": ing.countries_restricted_or_banned,
+        "efsaStatus": ing.efsa_status,
+        "fdaStatus": ing.fda_status,
+        "whoIarcClassification": ing.who_iarc_classification,
+        "acceptableDailyIntake": ing.acceptable_daily_intake,
+        "sideEffects": ing.side_effects,
+        "allergens": ing.allergens,
+        "references": ing.references,
+        "riskLevel": risk_level.value if hasattr(risk_level, "value") else risk_level,
+        "isGluten": ing.is_gluten,
+        "isLactose": ing.is_lactose,
+        "isVegan": ing.is_vegan,
+        "isVegetarian": ing.is_vegetarian,
+        "isHalal": ing.is_halal,
+        "isKosher": ing.is_kosher,
+        "badForDiabetes": ing.bad_for_diabetes,
+        "badForHypertension": ing.bad_for_hypertension,
+        "badForKidneyDisease": ing.bad_for_kidney_disease,
+        "badForGout": ing.bad_for_gout,
+        "badForPregnancy": ing.bad_for_pregnancy,
+        "badForChildren": ing.bad_for_children,
+        "badForHighCholesterol": ing.bad_for_high_cholesterol,
+    }
+
+
+def _label_scan_required_details(product: Product, ingredients: list[Any] | None = None) -> dict:
     """Structured response for a barcode whose *identity* is known (was
     discovered and persisted — see `_persist_discovered_product`) but
     whose nutrition/ingredient data is too incomplete to compute a real
     Health Score. Deliberately shaped like `_not_found_details` (same
     `labelScanRequired`/`suggestedAction` keys) so a client can handle
     both with one code path, plus the identity fields worth showing the
-    user even without a score."""
-    return {
+    user even without a score.
+
+    V12 (PR #9 review round 5, finding 3): additive partial-analysis
+    fields, so an incomplete result doesn't have to discard a genuinely
+    USEFUL half of the analysis just because the OTHER evidence group is
+    still missing -- e.g. an ingredients-only label photo (the normal
+    output of the Android "Ingredient Label" tab when only the
+    ingredients list, not the nutrition panel, was in frame) should
+    still hand back its normalized/scientific ingredient analysis, not
+    just a bare "scan again" signal. See README section 11.11.
+
+    `ingredients` is the CALLER's job to pass, and ONLY when it is
+    genuinely trustworthy -- i.e. only when `product.
+    has_verified_ingredients` is True (see every caller of this
+    function). Left as `None` (nothing added to the response) whenever
+    there is no genuinely trustworthy partial data to return at all
+    (e.g. a full Gemini-and-fallback failure, where even the
+    "ingredients" are tokens from a hardcoded placeholder/error string,
+    never real label content) -- this function never fabricates
+    evidence, it only surfaces evidence that's already been judged
+    trustworthy elsewhere.
+
+    `nutritionScanRequired`/`ingredientsScanRequired` are reported
+    per-group (from `product.has_verified_nutrition`/
+    `has_verified_ingredients` directly) rather than assuming which one
+    is missing -- a barcode discovery can be missing either group (or
+    both), not only nutrition.
+    """
+    details = {
         "labelScanRequired": True,
         "reason": (
             "This product's identity was found, but its nutrition and/or ingredient data is "
@@ -332,7 +440,19 @@ def _label_scan_required_details(product: Product) -> dict:
             "imageUrl": product.image_url,
         },
         "suggestedAction": "Use POST /scan/label-image or POST /scan/ocr-text to analyze the product's label directly.",
+        # Additive (V12) -- a client that only inspects `labelScanRequired`
+        # (the pre-existing contract) is completely unaffected.
+        "analysisComplete": False,
+        "healthScoreAvailable": False,
+        # Explicitly null, never 0 or omitted -- 0 would read as a real
+        # (very poor) score rather than "not computed at all".
+        "healthScore": None,
+        "nutritionScanRequired": not product.has_verified_nutrition,
+        "ingredientsScanRequired": not product.has_verified_ingredients,
     }
+    if ingredients is not None:
+        details["ingredients"] = [_ingredient_out_dict(ing) for ing in ingredients]
+    return details
 
 
 async def _persist_discovered_product(
@@ -341,20 +461,36 @@ async def _persist_discovered_product(
     """
     Normalizes + validates + persists a multi-source discovery result.
     Concurrency-safe (see `product_repository.insert_new`) and never
-    overwrites an existing verified (local/OCR/label-image) row, nor an
-    existing externally-discovered row of equal-or-higher confidence —
-    see the module docstring's V5/V6 entries and README "Deviations".
+    overwrites an existing verified (`is_verified` -- both evidence
+    groups, see V11 below) row, nor an existing externally-discovered
+    row of equal-or-higher confidence — see the module docstring's
+    V5/V6 entries and README "Deviations".
 
     Always persists identity/provenance when a provider found *something*
-    — including a materially-incomplete, `has_verified_nutrition=False`
-    result — so a repeat scan doesn't re-hit external providers every
-    time and so the identity is available for `_label_scan_required_details`.
-    It is the caller's (`analyze_barcode`'s) job to check
-    `product.has_verified_nutrition` and refuse to compute/return a
-    Health Score for such a row.
+    — including a materially-incomplete, `is_verified=False` result —
+    so a repeat scan doesn't re-hit external providers every time and
+    so the identity is available for `_label_scan_required_details`. It
+    is the caller's (`analyze_barcode`'s) job to check `product.
+    is_verified` and refuse to compute/return a Health Score for such a
+    row.
+
+    V11 (PR #9 review round 4): `nutrition_known`/`ingredients_known`
+    are tracked as the two independent `has_verified_nutrition`/
+    `has_verified_ingredients` columns (previously combined into a
+    single `has_verified_nutrition` flag standing in for overall
+    completeness). `is_verified` is `nutrition_known AND
+    ingredients_known` -- a genuinely complete discovery (both groups
+    known from a trusted provider) is protected exactly like a
+    genuinely complete label-scan enrichment is, and a discovery that
+    only supplied one group stays open for a LATER barcode+label-image
+    scan (see `_apply_label_enrichment`) to independently complete the
+    other, without needing to re-supply what's already trusted.
     """
     all_db_ingredients = await ingredient_repository.get_all(db)
-    data, ingredients, has_verified_nutrition = _to_analyzed_data_from_discovery(discovered, all_db_ingredients)
+    data, ingredients, nutrition_known, ingredients_known = _to_analyzed_data_from_discovery(
+        discovered, all_db_ingredients
+    )
+    is_complete = nutrition_known and ingredients_known
     # Canonical GTIN-13 storage key (see product_repository.get_by_barcode_or_aliases)
     # — every equivalent representation of this barcode converges on one row.
     canonical_barcode = discovered.barcode.gtin13
@@ -365,9 +501,15 @@ async def _persist_discovered_product(
         ingredients,
         source=discovered.primary_provider,
         source_confidence=discovered.confidence,
-        is_verified=False,
-        has_verified_nutrition=has_verified_nutrition,
+        is_verified=is_complete,
+        has_verified_nutrition=nutrition_known,
+        has_verified_ingredients=ingredients_known,
     )
+    if not is_complete:
+        # Mirrors `_new_product_from_label`: an incomplete row must not
+        # carry a misleading verification timestamp (review round 3,
+        # finding 7's principle, applied here too).
+        candidate.last_verified_at = None
 
     inserted = await product_repository.insert_new(db, candidate)
     used_for_persisted_product = True
@@ -388,7 +530,8 @@ async def _persist_discovered_product(
                 ingredients,
                 source=discovered.primary_provider,
                 confidence=discovered.confidence,
-                has_verified_nutrition=has_verified_nutrition,
+                has_verified_nutrition=nutrition_known,
+                has_verified_ingredients=ingredients_known,
             )
             await db.flush()
             product = existing
@@ -540,12 +683,22 @@ async def analyze_barcode(db: AsyncSession, user_id: uuid.UUID, barcode: str) ->
 
     # Applies equally to a product just discovered above AND to a cache
     # hit of a previously-discovered-but-incomplete row: neither ever
-    # gets a fabricated/placeholder-derived Health Score (V6) — see
-    # `has_verified_nutrition`'s docstring on the Product model.
-    if not product.has_verified_nutrition:
+    # gets a fabricated/placeholder-derived Health Score (V6). `is_verified`
+    # (V11: both `has_verified_nutrition` AND `has_verified_ingredients`)
+    # is the single completeness gate — see `Product`'s docstring — so a
+    # row missing EITHER evidence group still correctly returns
+    # `labelScanRequired` here, exactly like a row missing both.
+    if not product.is_verified:
+        # V12 (review round 5, finding 3): a discovery that already
+        # established one evidence group (e.g. a trusted provider's real
+        # `ingredients_text` but no nutriments) hands that group back as
+        # genuinely useful partial data, not just a bare retry signal.
+        partial_ingredients = (
+            await fetch_ingredients_for_product(db, product) if product.has_verified_ingredients else None
+        )
         raise ProductNotFoundError(
             f"Product {product.barcode} was found but lacks sufficient verified data for a Health Score.",
-            details=_label_scan_required_details(product),
+            details=_label_scan_required_details(product, partial_ingredients),
         )
 
     ingredients = await fetch_ingredients_for_product(db, product)
@@ -579,17 +732,639 @@ async def analyze_barcode(db: AsyncSession, user_id: uuid.UUID, barcode: str) ->
 
 
 async def analyze_ocr_text(db: AsyncSession, user_id: uuid.UUID, raw_text: str) -> dict:
+    """
+    API Contract 6.2 (no barcode). V11 (PR #9 review round 4, finding
+    2): now applies the SAME language policy (English/Bulgarian
+    preference, other-language translation, ingredient normalization/
+    dedup) as the barcode-linked path, via the shared
+    `_finalize_standalone_label_analysis`.
+
+    CONTRACT CHANGE (V12, PR #9 review round 5, finding 1 -- see README
+    "Deviations" and section 11.11): this endpoint previously ALWAYS
+    returned `200` with `is_verified=True` (the now-removed
+    `always_verified` escape hatch), on the theory that literal
+    user-submitted OCR text is inherently trusted local-pipeline content.
+    Review round 5 found that unsafe specifically for NUTRITION: this
+    endpoint's nutrition figures are ALWAYS the deterministic keyword-
+    heuristic guess (the documented `gemini_result_parser.py` quirk --
+    see `analyze_ocr_text_with_barcode`'s docstring for the same point),
+    never genuinely extracted, regardless of Gemini's success or the
+    raw text's own quality -- so treating them as verified fabricated a
+    confident-looking Health Score from numbers that were always a
+    guess. Ingredients are different: `raw_text` here is the caller's
+    own genuine, literal text (the router rejects anything under 3
+    characters), so `has_verified_ingredients` DOES still become True,
+    same as before.
+
+    The practical effect: a standalone `/scan/ocr-text` call now
+    consistently returns the SAME structured `404 PRODUCT_NOT_FOUND` /
+    `labelScanRequired` response (with the partial, verified-ingredients
+    evidence attached -- see `_label_scan_required_details`) that
+    `/scan/label-image` already uses for an incomplete result, instead
+    of a `200` carrying a fabricated score -- since nutrition can never
+    be genuinely verified through THIS endpoint alone, that is now
+    EVERY call, not just a failure case. A barcode resubmitted through
+    `analyze_ocr_text_with_barcode` is unaffected by this scoping: an
+    EXISTING row's already-verified nutrition (from a trusted barcode
+    provider, or a later `/scan/label-image` call) is preserved and
+    still completes the product normally -- see that function's
+    docstring and README section 11.11's Android-facing contract note.
+    """
     all_db_ingredients = await ingredient_repository.get_all(db)
     data, ingredients = await _run_ai_or_fallback("Scanned Product", raw_text, all_db_ingredients)
+    validity = gemini_image_parser.LabelFieldValidity()
+    ingredients_trustworthy = True
 
-    barcode = data.barcode or f"ocr_{int(time.time() * 1000)}"
-    product = _to_product_model(barcode, data, ingredients)
-    product = await product_repository.upsert(db, product)
+    return await _finalize_standalone_label_analysis(
+        db,
+        user_id,
+        data,
+        ingredients,
+        validity,
+        ingredients_trustworthy,
+        barcode_prefix="ocr",
+        scan_type=ScanType.OCR_LABEL,
+        provenance_provider="ocr_text",
+    )
 
-    profile = await _get_profile_namespace(db, user_id)
-    score, warnings = _score_and_warnings(product, ingredients, profile)
-    product.health_score = score
+
+# ---------------------------------------------------------------------------
+# Barcode + label enrichment (V8, documented, see README section 11
+# "Barcode + label enrichment and multilingual label normalization").
+#
+# When barcode discovery (`analyze_barcode`) cannot produce a complete
+# product it returns `labelScanRequired` (see `_not_found_details` /
+# `_label_scan_required_details`). The Android client then resubmits a
+# label image (or OCR text) together with the *same* barcode, via the
+# optional `barcode` field on `/scan/label-image` and `/scan/ocr-text`
+# (see `app/api/v1/scan.py`). `analyze_label_image_with_barcode` /
+# `analyze_ocr_text_with_barcode` below combine that barcode identity
+# with the freshly-analyzed label content into ONE canonical,
+# barcode-keyed product row, instead of the synthetic `img_.../ocr_...`
+# row those two endpoints create when no barcode is supplied.
+#
+# Neither existing endpoint's no-barcode behavior is touched by any of
+# this: `analyze_label_image`/`analyze_ocr_text` above are unchanged,
+# and the router only calls into this section when a caller explicitly
+# supplies a barcode (see `app/api/v1/scan.py`).
+#
+# Merge rules (mirrors the barcode-discovery trust model in
+# `_persist_discovered_product` above, applied one layer down to
+# per-field merging rather than whole-row replacement):
+#   - A row that is already fully trusted (`is_verified` AND
+#     `has_verified_nutrition`) is NEVER modified by this path -- the
+#     label analysis is still run (so its provenance is recorded, see
+#     `_record_label_provenance`) but never allowed to overwrite it.
+#   - Otherwise, identity fields (name/brand/category/image) are kept
+#     from the existing row when already meaningful (not empty, not a
+#     known discovery placeholder like "Discovered Product"/"Unknown
+#     Brand") and filled from the label analysis only when missing.
+#   - Nutrition/ingredient fields are kept from the existing row only
+#     when `has_verified_nutrition` is already True; otherwise the
+#     fresh label analysis's numbers are used (real per-100g figures
+#     read directly off the physical label are always more trustworthy
+#     than a placeholder/zero-filled incomplete discovery).
+#   - `has_verified_nutrition` only flips True when the label analysis
+#     itself produced genuinely known nutrition (see
+#     `gemini_image_parser.nutrition_fields_present`) AND non-empty
+#     ingredient text -- the same "all three core numeric inputs
+#     required" gate `barcode_discovery.discover_product` already uses
+#     (V7). `is_verified` is kept equal to `has_verified_nutrition`: an
+#     incomplete row stays open to a *later* enrichment attempt for the
+#     same barcode, and only a genuinely complete one is protected from
+#     being overwritten again.
+#   - A barcode that fails `barcode_validation.validate_and_normalize`
+#     is rejected with the standard `ValidationAppError` before any
+#     work is done -- never silently treated as "no barcode".
+# ---------------------------------------------------------------------------
+
+# Identity values considered "not meaningful" -- either a generic
+# placeholder string (see `barcode_text_safety.is_placeholder` -- "",
+# "null", "none", "n/a", "unknown", ...; review finding 3 surfaced that
+# a legacy row's `allergens_detected="None"` must NOT be treated as a
+# real, protected value) or one of the explicit placeholder fallbacks
+# `barcode_discovery.py` / `_to_analyzed_data_from_discovery` writes
+# when a source didn't state a real value. An existing row holding one
+# of these is treated as missing that field for enrichment purposes,
+# not as a value to protect.
+_PLACEHOLDER_IDENTITY_VALUES = {"discovered product", "unknown brand"}
+
+
+def _is_meaningful_identity(value: str | None) -> bool:
+    if is_placeholder(value):
+        return False
+    return value.strip().lower() not in _PLACEHOLDER_IDENTITY_VALUES
+
+
+def _nutrition_group_is_complete(validity: "gemini_image_parser.LabelFieldValidity") -> bool:
+    """The NUTRITION evidence group: all three core numeric Health
+    Score inputs genuinely known. Independent of the ingredients group
+    -- see the section docstring above and README section 11.8."""
+    return validity.all_valid
+
+
+def _ingredients_group_is_complete(data: AnalyzedProductData, ingredients_trustworthy: bool) -> bool:
+    """The INGREDIENTS evidence group: real, trustworthy ingredient-list
+    text was extracted (not a heuristic guess from a placeholder/error
+    string -- see `ingredients_trustworthy`'s callers) AND it's actually
+    non-empty. Independent of the nutrition group."""
+    return ingredients_trustworthy and bool(data.raw_ingredient_text.strip())
+
+
+def _apply_label_enrichment(
+    existing: Product,
+    data: AnalyzedProductData,
+    ingredients: list[Any],
+    validity: "gemini_image_parser.LabelFieldValidity",
+    ingredients_trustworthy: bool,
+    source_label: str,
+) -> None:
+    """
+    Mutates `existing` IN PLACE, filling only what it is missing --
+    see the merge rules in the section docstring above. Never called
+    for a row that is already `is_verified` (see
+    `_persist_enriched_product`). Does NOT commit -- the caller
+    controls the single outer-transaction commit point (review round 3
+    finding 3; see `_finalize_barcode_enrichment`).
+
+    V11 (PR #9 review round 4) -- CUMULATIVE completeness across TWO
+    INDEPENDENT evidence groups, each with its own gate/commit
+    condition, so neither request ever needs to supply both at once:
+
+      - INGREDIENTS group (`existing.has_verified_ingredients`):
+        raw_ingredient_text/ingredient_ids, NOVA group, dietary flags,
+        and allergens -- all physically read off the ingredient list,
+        so they're gated and committed together. Only touched while
+        `not existing.has_verified_ingredients`; once genuinely
+        complete (`_ingredients_group_is_complete`), it's locked and
+        this attempt's ingredient data is never consulted again.
+      - NUTRITION group (`existing.has_verified_nutrition`):
+        sugar/sodium/saturated-fat, each still gated individually by
+        `validity` (review round 3 finding 1: a field this attempt
+        couldn't trust leaves an already-stored value from an EARLIER
+        attempt untouched, rather than blanking it). Only touched while
+        `not existing.has_verified_nutrition`; locked the same way once
+        `_nutrition_group_is_complete`.
+
+    Both blocks can fire in the SAME call (the common case: one label
+    photo supplies both), or only one can (a photo of just the
+    nutrition panel, or just the ingredients list) -- whichever group(s)
+    this attempt didn't complete simply stay exactly as they were,
+    ready for a LATER attempt to complete independently. `data.
+    sugar_grams`/etc. are already guaranteed safe regardless of
+    `validity` (never a boolean/NaN/Infinity/negative/out-of-range
+    value -- see `gemini_image_parser._safe_nutrition_value`/
+    `_safe_nova_group`), so even the very first fill-in can never write
+    garbage.
+    """
+    if not _is_meaningful_identity(existing.product_name):
+        existing.product_name = data.product_name
+    if not _is_meaningful_identity(existing.brand):
+        existing.brand = data.brand
+    if not _is_meaningful_identity(existing.category):
+        existing.category = data.category
+    if existing.image_url is None:
+        existing.image_url = data.image_url
+
+    newly_completed_group = False
+
+    if not existing.has_verified_ingredients:
+        existing.raw_ingredient_text = data.raw_ingredient_text
+        existing.ingredient_ids = _ingredient_ids_string(ingredients)
+        if validity.nova_valid:
+            existing.nova_group = data.nova_group
+        existing.has_artificial_sweeteners = data.has_artificial_sweeteners
+        existing.has_preservatives = data.has_preservatives
+        existing.is_gluten_free = data.is_gluten_free
+        existing.is_lactose_free = data.is_lactose_free
+        existing.is_vegan = data.is_vegan
+        existing.is_vegetarian = data.is_vegetarian
+        existing.is_halal = data.is_halal
+        existing.is_kosher = data.is_kosher
+        # Allergen text: only overwritten when this attempt actually
+        # names something -- an unknown/unreadable answer ("", see
+        # `gemini_image_parser._extract_allergens_text`) must never
+        # erase an allergen list a previous attempt already established
+        # (review round 3 finding 3).
+        if not _is_meaningful_identity(existing.allergens_detected):
+            existing.allergens_detected = data.allergens_detected
+
+        if _ingredients_group_is_complete(data, ingredients_trustworthy):
+            existing.has_verified_ingredients = True
+            newly_completed_group = True
+
+    if not existing.has_verified_nutrition:
+        if validity.sugar_valid:
+            existing.sugar_grams = data.sugar_grams
+        if validity.sodium_valid:
+            existing.sodium_mg = data.sodium_mg
+        if validity.saturated_fat_valid:
+            existing.saturated_fat_grams = data.saturated_fat_grams
+
+        if _nutrition_group_is_complete(validity):
+            existing.has_verified_nutrition = True
+            newly_completed_group = True
+
+    if newly_completed_group:
+        existing.source = source_label
+        existing.source_confidence = None
+
+    existing.is_verified = existing.has_verified_nutrition and existing.has_verified_ingredients
+    # Review round 3 finding 7: `last_verified_at` is a claim that
+    # verification actually happened -- only ever stamp it when the
+    # product is now (or still) FULLY verified (both groups). A row
+    # that's still missing one group after this attempt must not
+    # receive a timestamp implying it was just fully re-verified.
+    if existing.is_verified:
+        existing.last_verified_at = datetime.now(timezone.utc)
+    existing.timestamp = int(time.time() * 1000)
+
+
+def _new_product_from_label(
+    canonical_barcode: str,
+    data: AnalyzedProductData,
+    ingredients: list[Any],
+    validity: "gemini_image_parser.LabelFieldValidity",
+    ingredients_trustworthy: bool,
+    source_label: str,
+) -> Product:
+    nutrition_complete = _nutrition_group_is_complete(validity)
+    ingredients_complete = _ingredients_group_is_complete(data, ingredients_trustworthy)
+    is_complete = nutrition_complete and ingredients_complete
+    product = _to_product_model(
+        canonical_barcode,
+        data,
+        ingredients,
+        source=source_label,
+        source_confidence=None,
+        is_verified=is_complete,
+        has_verified_nutrition=nutrition_complete,
+        has_verified_ingredients=ingredients_complete,
+    )
+    if not is_complete:
+        # `_to_product_model` unconditionally stamps `last_verified_at`
+        # (correct for its OTHER callers, which only ever create
+        # fully-verified rows) -- an incomplete enrichment must not
+        # receive a misleading verification timestamp (review round 3
+        # finding 7).
+        product.last_verified_at = None
+    return product
+
+
+async def _persist_enriched_product(
+    db: AsyncSession,
+    existing: Product | None,
+    canonical_barcode: str,
+    data: AnalyzedProductData,
+    ingredients: list[Any],
+    validity: "gemini_image_parser.LabelFieldValidity",
+    ingredients_trustworthy: bool,
+    source_label: str,
+) -> tuple[Product, bool]:
+    """
+    Insert-or-merge for one barcode + label analysis. Returns
+    `(product, used_label_analysis)` -- `used_label_analysis` is False
+    only when an already fully-trusted row (`is_verified` -- BOTH
+    evidence groups, see V11 above) made the fresh label analysis
+    unnecessary.
+
+    Deliberately does NOT commit: the caller
+    (`_finalize_barcode_enrichment`) owns the single outer-transaction
+    commit point so product changes, provenance, score and scan history
+    all land atomically together or not at all (review round 3 finding 3).
+
+    Concurrency guarantee -- stated precisely, not overclaimed (review
+    round 3 finding 3): the brand-new-row case reuses `product_repository.
+    insert_new`'s SAVEPOINT-based primary-key-conflict handling, which
+    IS genuinely safe under real concurrent transactions (verified
+    against real, separate PostgreSQL connections -- see
+    `tests/postgres/test_concurrent_enrichment_postgres.py`): two
+    concurrent enrichments of the same brand-new barcode always
+    converge on exactly one row, never a duplicate, never a crash. The
+    EXISTING-row merge path (`_apply_label_enrichment` above) is only
+    BEST EFFORT: it reads `existing`, mutates it in memory, and flushes
+    -- with no optimistic-concurrency version column on `Product`, two
+    truly concurrent enrichments of the same already-existing
+    (incomplete) row can race, and the later COMMIT wins ("last write
+    wins"), not a merge of both attempts. This does not corrupt data or
+    duplicate rows -- SQLAlchemy's identity map plus the primary-key
+    UPDATE keeps it to one row either way -- but it is not linearizable.
+    Closing that gap would need a version/`xmin`-based optimistic lock
+    on `Product`, which is a real schema change deliberately left out of
+    this PR's scope; see the Postgres test file for the concurrent-INSERT
+    guarantee that IS proven, and this docstring as the honest statement
+    of what is not.
+    """
+    if existing is None:
+        candidate = _new_product_from_label(
+            canonical_barcode, data, ingredients, validity, ingredients_trustworthy, source_label
+        )
+        inserted = await product_repository.insert_new(db, candidate)
+        if inserted is not None:
+            return inserted, True
+        # Lost a race with a concurrent enrichment/discovery of the same barcode.
+        existing = await product_repository.get_by_barcode(db, canonical_barcode)
+        if existing is None:
+            raise AIServiceUnavailableError("Could not persist the enriched product.")
+
+    if existing.is_verified:
+        return existing, False
+
+    _apply_label_enrichment(existing, data, ingredients, validity, ingredients_trustworthy, source_label)
     await db.flush()
+    return existing, True
+
+
+# Review finding 7: the OCR-extraction pipeline (Gemini image analysis
+# for `label_ocr`, the text-analysis chain for `ocr_text`) never
+# reports its own extraction-quality/confidence figure -- unlike the
+# SEPARATE translation call, which does (self-reported, but never
+# trusted alone -- see `label_language._verify_translation_invariants`).
+# There is therefore no real per-request confidence value available for
+# the OCR provenance row, and `1.0` was a fabricated, unjustified "full
+# confidence" claim. `0.0` is not "zero confidence this is right" --
+# it's the conservative, explicitly-unknown sentinel already built into
+# the schema (`ProductSource.confidence`'s own `default=0`, the same
+# value `product_source_repository` already uses for "no signal"),
+# reused here rather than inventing a new nullable column.
+_OCR_PROVENANCE_CONFIDENCE_UNKNOWN = 0.0
+
+
+async def _record_label_provenance(
+    db: AsyncSession,
+    canonical_barcode: str,
+    provider_name: str,
+    data: AnalyzedProductData,
+    label_result: LabelTextResult,
+    *,
+    used_for_persisted_product: bool,
+) -> None:
+    """
+    Records label-OCR (and, when applicable, translation) provenance
+    through the EXISTING `product_sources` provenance table/repository
+    (see `app/models/product_source.py` / `product_source_repository.py`)
+    -- no schema migration needed: `language`, `confidence`, and
+    `raw_metadata_json` already carry everything the language policy
+    needs to record (detected language, whether translation was used,
+    translation model/confidence/status). See README section 11.4
+    "Provenance" / 11.5 "Why no migration was needed". Does NOT commit
+    -- see `_finalize_barcode_enrichment`'s single outer-transaction
+    commit point (review finding 3).
+    """
+    ocr_result = ProviderProductResult(
+        provider=provider_name,
+        external_id=None,
+        product_name=data.product_name,
+        brand=None,  # never claim provenance authorship of the brand
+        category=None,
+        image_url=None,
+        raw_ingredient_text=label_result.original_text,
+        language=label_result.detected_language if label_result.detected_language in ("en", "bg") else None,
+        raw_metadata={
+            "detectedLanguage": label_result.detected_language,
+            "translationUsed": label_result.translation_used,
+            "status": label_result.status,
+            "confidenceBasis": "not reported by the OCR/extraction pipeline",
+        },
+    )
+    await product_source_repository.record_discovery(
+        db,
+        barcode=canonical_barcode,
+        result=ocr_result,
+        confidence=_OCR_PROVENANCE_CONFIDENCE_UNKNOWN,
+        is_conflicting=False,
+        used_for_persisted_product=used_for_persisted_product,
+    )
+
+    if label_result.translation_used:
+        translation_result = ProviderProductResult(
+            provider="label_translation",
+            external_id=None,
+            product_name=None,
+            brand=None,
+            category=None,
+            image_url=None,
+            raw_ingredient_text=label_result.canonical_text,
+            language="en",
+            raw_metadata={
+                "sourceLanguage": label_result.detected_language,
+                "model": label_result.translation_model,
+                "status": label_result.status,
+            },
+        )
+        await product_source_repository.record_discovery(
+            db,
+            barcode=canonical_barcode,
+            result=translation_result,
+            confidence=label_result.translation_confidence or 0.0,
+            is_conflicting=False,
+            used_for_persisted_product=used_for_persisted_product,
+        )
+
+
+async def _run_label_image_pipeline(
+    image_bytes: bytes, all_db_ingredients: list[Any]
+) -> tuple[AnalyzedProductData, list[Any], "gemini_image_parser.LabelFieldValidity", bool]:
+    """
+    The Gemini-then-fallback chain for label-image analysis: try
+    Gemini's structured extraction; on any failure/invalid response,
+    fall back to the deterministic keyword heuristic. Shared by BOTH
+    `analyze_label_image` (standalone, no barcode) and
+    `analyze_label_image_with_barcode` (review round 4, finding 3:
+    "avoid duplicated pipelines" -- previously the standalone endpoint
+    had its own copy of this exact chain, which is how the two paths
+    drifted apart in the first place; see README section 11.9).
+
+    Returns `(data, ingredients, validity, ingredients_trustworthy)`:
+    `validity` is which nutrition/NOVA fields are genuinely,
+    individually trustworthy (see `gemini_image_parser.
+    label_field_validity`); `ingredients_trustworthy` is True only when
+    Gemini's structured extraction succeeded (`parsed is not None`) --
+    False whenever the deterministic fallback ran, since ITS "raw text"
+    for the label-image case is a hardcoded placeholder/error string
+    ("Ingredients could not be extracted...", see below), never real
+    label content, so ingredients tokenized from it are never
+    trustworthy evidence (contrast `analyze_ocr_text_with_barcode`,
+    where the fallback tokenizes the user's own genuine OCR text).
+    """
+    data: AnalyzedProductData | None = None
+    ingredients: list[Any] | None = None
+    validity = gemini_image_parser.LabelFieldValidity()
+    ingredients_trustworthy = False
+
+    try:
+        raw_response = await gemini_service.analyze_image(image_bytes)
+    except GeminiUnavailableError as exc:
+        logger.info("gemini_image_fallback_triggered", reason=str(exc))
+    else:
+        parsed = parse_gemini_image_json_result(raw_response, all_db_ingredients)
+        if parsed is not None:
+            data, ingredients = parsed
+            validity = gemini_image_parser.label_field_validity(raw_response)
+            ingredients_trustworthy = True
+        else:
+            logger.info("gemini_image_json_invalid_falling_back")
+
+    if data is None:
+        try:
+            data, ingredients = fallback_local_analysis(
+                "Scanned Label Product",
+                "Ingredients could not be extracted from the image; AI response was unavailable or invalid.",
+                all_db_ingredients,
+            )
+        except Exception as fallback_exc:  # noqa: BLE001
+            raise AIServiceUnavailableError(
+                "Both the AI service and the local fallback analysis failed."
+            ) from fallback_exc
+        # The keyword-heuristic fallback never extracts anything -- it
+        # guesses, from a placeholder string, not the actual label.
+        validity = gemini_image_parser.LabelFieldValidity()
+        ingredients_trustworthy = False
+
+    return data, ingredients, validity, ingredients_trustworthy
+
+
+async def _finalize_barcode_enrichment(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    barcode_raw: str,
+    barcode_info: "barcode_validation.BarcodeInfo",
+    data: AnalyzedProductData,
+    ingredients: list[Any],
+    validity: "gemini_image_parser.LabelFieldValidity",
+    ingredients_trustworthy: bool,
+    *,
+    scan_type: ScanType,
+    provenance_provider: str,
+) -> dict:
+    """
+    Shared tail end of `analyze_label_image_with_barcode` and
+    `analyze_ocr_text_with_barcode`: applies the language policy,
+    resolves/merges/persists the canonical product, records provenance,
+    and returns the same `FullProductAnalysisOut`-shaped dict every
+    other `analyze_*` function returns (API Contract compatible -- no
+    second response shape).
+
+    Transaction boundaries (review finding 3): exactly ONE `db.commit()`
+    call on every path through this function, not several --
+      - incomplete enrichment (nutrition still not verified after the
+        merge): ONE commit persists the product change and its
+        provenance together, then `ProductNotFoundError` is raised
+        (`labelScanRequired`) -- never a product row committed without
+        its provenance, and never a partial write left behind by a
+        later failure, because nothing before that commit is persisted
+        either.
+      - successful (verified) enrichment: product change + provenance +
+        Health Score + scan history are all flushed in-memory first and
+        committed together in the ONE final `db.commit()` below -- a
+        failure at ANY point before it (a provenance write error, a
+        scan-history write error, anything) rolls back the ENTIRE
+        attempt, including the product merge/insert, via `get_db`'s
+        `except Exception: await session.rollback()` (see
+        `app/database/session.py`). See
+        `tests/integration/test_label_barcode_enrichment.py`'s
+        `test_*_failure_rolls_back_*` tests for direct proof.
+    """
+    canonical_barcode = barcode_info.gtin13
+    alias_keys = barcode_validation.alias_keys(barcode_info)
+    existing = await product_repository.get_by_barcode_or_aliases(db, barcode_raw, alias_keys)
+
+    # V11 (PR #9 review round 4, finding 1): when the INGREDIENTS group
+    # is already verified and locked, this attempt's ingredient text is
+    # never going to be applied at all (see `_apply_label_enrichment`'s
+    # `if not existing.has_verified_ingredients` gate) -- so demanding a
+    # successful STRICT translation for text that will be discarded
+    # regardless is both wasted work and a spurious failure mode (e.g. a
+    # nutrition-only photo whose incidental OCR leftovers don't
+    # confidently classify as English must never block completing the
+    # NUTRITION group with a translation error). Lenient mode still
+    # applies the language policy and still contributes usable
+    # provenance text; it just never raises.
+    ingredients_already_locked = existing is not None and existing.has_verified_ingredients
+    label_result = await resolve_label_text(
+        data.raw_ingredient_text, strict=not ingredients_already_locked
+    )
+
+    # Review finding 6: canonical ingredient normalization runs for ANY
+    # real language content -- English, Bulgarian, or mixed EN/BG, and
+    # of course a translated result -- not only when `canonical_text`
+    # happens to differ textually from the original. The previous
+    # `if canonical_text != raw_ingredient_text` gate silently skipped
+    # this for pure-Bulgarian content (a single Bulgarian segment's
+    # `canonical_text` is normally byte-identical to the original), so
+    # its tokens never got Bulgarian-alias-substituted (see
+    # `label_language.bulgarian_ingredient_alias`) and could never
+    # dedupe against an equivalent English mention. Only a genuinely
+    # empty/"unknown" result (nothing tokenizable at all) is skipped.
+    # Skipped entirely when ingredients are already locked -- rebuilding
+    # an ingredient list that will never be applied is pure waste.
+    if not ingredients_already_locked and label_result.detected_language != "unknown" and label_result.canonical_text.strip():
+        tokens = normalize_and_extract_tokens(label_result.canonical_text)
+        # Bulgarian ingredient-list tokens are aliased to their English
+        # canonical form for MATCHING purposes only -- an English and a
+        # Bulgarian mention of the same ingredient then resolve to the
+        # same matched/synthetic ingredient instead of two. The text
+        # actually stored (`data.raw_ingredient_text`, set below) is
+        # untouched by this substitution -- English AND Bulgarian
+        # content are both preserved verbatim in what's displayed.
+        matchable_tokens = [label_language.bulgarian_ingredient_alias(t) or t for t in tokens]
+        norm = match_against_database(matchable_tokens, await ingredient_repository.get_all(db))
+        rebuilt: list[Any] = list(norm.matched_ingredients)
+        for unknown in norm.unknown_ingredients:
+            rebuilt.append(create_synthetic_ingredient(unknown))
+        if rebuilt:
+            ingredients = rebuilt
+    data.raw_ingredient_text = label_result.canonical_text
+
+    source_label = "label_scan_translated" if label_result.translation_used else "label_scan"
+    product, used_label_analysis = await _persist_enriched_product(
+        db, existing, canonical_barcode, data, ingredients, validity, ingredients_trustworthy, source_label
+    )
+    # Provenance must reference the row's ACTUAL persisted primary key
+    # (`product.barcode`), not `canonical_barcode`: a pre-existing row
+    # found via an alias (see `get_by_barcode_or_aliases`) may still be
+    # stored under a non-canonical key (e.g. a legacy 12-digit UPC-A),
+    # and `product_sources.barcode` is a foreign key into `products.barcode`
+    # -- writing the canonical form here would violate it whenever the
+    # two differ.
+    await _record_label_provenance(
+        db,
+        product.barcode,
+        provenance_provider,
+        data,
+        label_result,
+        used_for_persisted_product=used_label_analysis,
+    )
+
+    if not product.is_verified:
+        # Atomically persist ONLY the permitted incomplete identity +
+        # provenance (one commit, nothing else -- no Health Score, no
+        # scan history for a row that isn't verified) before surfacing
+        # the same structured `labelScanRequired` response
+        # `/scan/barcode` already uses for this situation. `is_verified`
+        # (V11: both `has_verified_nutrition` AND
+        # `has_verified_ingredients`) is the single completeness gate --
+        # a row missing either evidence group still correctly returns
+        # `labelScanRequired` here.
+        #
+        # V12 (review round 5, finding 3): if THIS attempt (or an
+        # earlier one) already locked in genuinely trustworthy
+        # ingredients, hand them back as useful partial data rather than
+        # discarding them -- e.g. a nutrition-panel-only follow-up photo
+        # for a product whose ingredients were already verified.
+        partial_ingredients = (
+            await fetch_ingredients_for_product(db, product) if product.has_verified_ingredients else None
+        )
+        await db.commit()
+        raise ProductNotFoundError(
+            f"Product {product.barcode} was found but lacks sufficient verified data for a Health Score.",
+            details=_label_scan_required_details(product, partial_ingredients),
+        )
+
+    ingredients_out = await fetch_ingredients_for_product(db, product)
+    profile = await _get_profile_namespace(db, user_id)
+    score, warnings = _score_and_warnings(product, ingredients_out, profile)
+    product.health_score = score
 
     await scan_history_repository.insert(
         db,
@@ -599,7 +1374,270 @@ async def analyze_ocr_text(db: AsyncSession, user_id: uuid.UUID, raw_text: str) 
             product_name=product.product_name,
             brand=product.brand,
             health_score=score,
-            scan_type=ScanType.OCR_LABEL,
+            scan_type=scan_type,
+        ),
+    )
+    # The single outer-transaction commit: product changes, provenance,
+    # Health Score, and scan history all land together, or (on any
+    # exception above) none of them do.
+    await db.commit()
+
+    return {
+        "product": product,
+        "ingredients": ingredients_out,
+        "health_score": score,
+        "warnings": warnings,
+        "is_from_database_cache": not used_label_analysis,
+    }
+
+
+async def analyze_label_image_with_barcode(
+    db: AsyncSession, user_id: uuid.UUID, image_bytes: bytes, barcode_raw: str
+) -> dict:
+    """
+    API Contract 6.3, extended (see `app/api/v1/scan.py`): combines a
+    supplied barcode with the label image analysis into one canonical,
+    persisted product (see the section docstring above for the full
+    merge design). Raises `ValidationAppError` for a barcode that
+    fails `barcode_validation.validate_and_normalize` -- the same
+    structured validation error every other invalid-input case in this
+    API uses.
+    """
+    barcode_info = validate_and_normalize(barcode_raw)
+    if barcode_info is None:
+        raise ValidationAppError(f"'{barcode_raw}' is not a valid barcode.")
+
+    from io import BytesIO
+
+    from PIL import Image
+
+    try:
+        Image.open(BytesIO(image_bytes)).verify()
+    except Exception as exc:  # noqa: BLE001
+        raise ImageUnreadableError("The uploaded file is not a readable image.") from exc
+
+    all_db_ingredients = await ingredient_repository.get_all(db)
+    data, ingredients, validity, ingredients_trustworthy = await _run_label_image_pipeline(
+        image_bytes, all_db_ingredients
+    )
+
+    return await _finalize_barcode_enrichment(
+        db,
+        user_id,
+        barcode_raw,
+        barcode_info,
+        data,
+        ingredients,
+        validity,
+        ingredients_trustworthy,
+        scan_type=ScanType.OCR_LABEL,
+        provenance_provider="label_ocr",
+    )
+
+
+async def analyze_ocr_text_with_barcode(
+    db: AsyncSession, user_id: uuid.UUID, raw_text: str, barcode_raw: str
+) -> dict:
+    """
+    API Contract 6.2, extended (see `app/api/v1/scan.py`): same
+    barcode + label-content merge as `analyze_label_image_with_barcode`,
+    sourced from free-text OCR content instead of an image.
+
+    Nutrition here is always treated as NOT genuinely known (an
+    all-`False` `LabelFieldValidity()`): `analyze_ocr_text`'s Gemini
+    path preserves a documented, tested quirk (see
+    `gemini_result_parser.py`) where nutrition figures always come from
+    the deterministic keyword-heuristic fallback recomputed against the
+    raw text, never from Gemini's own structured numbers -- i.e. they
+    are never genuinely-extracted real label data for this endpoint, by
+    long-standing, intentional design. A barcode resubmitted through
+    this endpoint therefore only reaches `has_verified_nutrition=True`
+    if the EXISTING row already had it (or a later `/scan/label-image`
+    call for the same barcode provides it).
+
+    Ingredients are different: `raw_text` here is always the caller's
+    OWN genuine, literal OCR/label text (the router already rejects
+    anything under 3 characters) -- unlike the label-image fallback's
+    placeholder error string, tokenizing it (via Gemini structured
+    output OR the deterministic fallback -- both operate on this SAME
+    real text) is genuinely trustworthy evidence, so
+    `ingredients_trustworthy=True` unconditionally here.
+    """
+    barcode_info = validate_and_normalize(barcode_raw)
+    if barcode_info is None:
+        raise ValidationAppError(f"'{barcode_raw}' is not a valid barcode.")
+
+    all_db_ingredients = await ingredient_repository.get_all(db)
+    data, ingredients = await _run_ai_or_fallback("Scanned Product", raw_text, all_db_ingredients)
+    validity = gemini_image_parser.LabelFieldValidity()
+    ingredients_trustworthy = True
+
+    return await _finalize_barcode_enrichment(
+        db,
+        user_id,
+        barcode_raw,
+        barcode_info,
+        data,
+        ingredients,
+        validity,
+        ingredients_trustworthy,
+        scan_type=ScanType.OCR_LABEL,
+        provenance_provider="ocr_text",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Standalone label analysis (V11, PR #9 review round 4, finding 2:
+# "apply the label language/safety policy to standalone Ingredient
+# Label scans"). `analyze_label_image`/`analyze_ocr_text` (no barcode)
+# now share this exact tail end with the barcode-linked path (finding
+# 3: "avoid duplicated pipelines") -- same language resolution
+# (`resolve_label_text`), same canonical ingredient normalization/
+# dedup, same `LabelFieldValidity`-gated nutrition/NOVA safety, same
+# real-JSON-null/no-fabricated-allergen handling (all already enforced
+# upstream, in `gemini_image_parser.py`/`_run_ai_or_fallback`, which
+# both paths already call) -- and the SAME real, honest
+# `has_verified_nutrition`/`has_verified_ingredients` flags, computed
+# the identical way `_new_product_from_label` computes them for the
+# barcode-linked path. No raw image bytes are ever stored (only
+# `PIL.Image.verify()` reads them, in memory); the original OCR/label
+# text is preserved via `_record_label_provenance`, the same existing
+# `product_sources` table the barcode-linked path already uses -- no
+# new table, no schema change for this either.
+#
+# API response change Android must handle (see README section 11.9 and
+# 11.11): `POST /scan/label-image` can return the EXISTING structured
+# `404 PRODUCT_NOT_FOUND` / `labelScanRequired` envelope (byte-for-byte
+# the same shape `/scan/barcode` already returns for this situation --
+# no new REQUIRED field, no OpenAPI schema change) instead of a `200`
+# carrying a confident-looking Health Score computed from placeholder-
+# zero nutrition. This can only happen when the label genuinely
+# couldn't be read reliably (Gemini unavailable/invalid response, or
+# explicit `null` nutrition fields) -- a normal, successful scan is
+# completely unaffected and returns exactly what it always has.
+#
+# CONTRACT CHANGE (V12, PR #9 review round 5, finding 1): `POST
+# /scan/ocr-text` (no barcode) is now gated the SAME way -- the
+# `always_verified` escape hatch that used to force every OCR-text
+# submission to `200` regardless of nutrition trustworthiness has been
+# REMOVED (see `analyze_ocr_text`'s docstring for the full rationale).
+# Because this endpoint's nutrition is ALWAYS a heuristic guess, never
+# genuinely extracted, a standalone OCR-text submission now
+# CONSISTENTLY returns this `404`/`labelScanRequired` response (with
+# its verified ingredient evidence attached as useful partial data --
+# see `_label_scan_required_details`) rather than occasionally, the way
+# `/scan/label-image` does. This is a real, intentional behavior change
+# for `/scan/ocr-text` specifically -- an Android client that assumed
+# this endpoint always returns `200` MUST be updated to handle this
+# response the same way it already has to handle `/scan/label-image`'s.
+# ---------------------------------------------------------------------------
+
+
+async def _finalize_standalone_label_analysis(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    data: AnalyzedProductData,
+    ingredients: list[Any],
+    validity: "gemini_image_parser.LabelFieldValidity",
+    ingredients_trustworthy: bool,
+    *,
+    barcode_prefix: str,
+    scan_type: ScanType,
+    provenance_provider: str,
+) -> dict:
+    """
+    Shared tail end of `analyze_label_image`/`analyze_ocr_text` (no
+    barcode) -- see the section docstring above. Always creates a fresh
+    row under a new synthetic `{barcode_prefix}_<timestamp>` id (there
+    is no existing-row alias lookup here, unlike the barcode-linked
+    `_finalize_barcode_enrichment`: a synthetic id is never resubmitted
+    by a client, so there is nothing to merge into).
+
+    `resolve_label_text(..., strict=False)`: a translation failure here
+    degrades gracefully (falls back to the original text) instead of
+    failing the whole request -- see that parameter's docstring for why
+    this matters specifically for a standalone, ad-hoc scan.
+
+    V12 (review round 5, finding 1): completeness is now UNCONDITIONALLY
+    the real, honest `_nutrition_group_is_complete`/
+    `_ingredients_group_is_complete` result for BOTH callers -- the
+    `always_verified` escape hatch that used to force `analyze_ocr_text`
+    straight to `is_verified=True` regardless of actual nutrition
+    trustworthiness has been removed entirely. Heuristic/fallback
+    nutrition must never set `has_verified_nutrition`; only genuinely
+    trustworthy evidence does, exactly like the barcode-linked path.
+    """
+    label_result = await resolve_label_text(data.raw_ingredient_text, strict=False)
+
+    # Same canonical (Bulgarian-alias-aware) ingredient rebuild the
+    # barcode-linked path uses -- see `_finalize_barcode_enrichment`'s
+    # identical block for the full rationale (review round 3 finding 6).
+    if label_result.detected_language != "unknown" and label_result.canonical_text.strip():
+        tokens = normalize_and_extract_tokens(label_result.canonical_text)
+        matchable_tokens = [label_language.bulgarian_ingredient_alias(t) or t for t in tokens]
+        norm = match_against_database(matchable_tokens, await ingredient_repository.get_all(db))
+        rebuilt: list[Any] = list(norm.matched_ingredients)
+        for unknown in norm.unknown_ingredients:
+            rebuilt.append(create_synthetic_ingredient(unknown))
+        if rebuilt:
+            ingredients = rebuilt
+    data.raw_ingredient_text = label_result.canonical_text
+
+    nutrition_complete = _nutrition_group_is_complete(validity)
+    ingredients_complete = _ingredients_group_is_complete(data, ingredients_trustworthy)
+    is_complete = nutrition_complete and ingredients_complete
+
+    barcode = f"{barcode_prefix}_{int(time.time() * 1000)}"
+    source_label = "label_scan_translated" if label_result.translation_used else "label_scan"
+    product = _to_product_model(
+        barcode,
+        data,
+        ingredients,
+        source=source_label,
+        source_confidence=None,
+        is_verified=is_complete,
+        has_verified_nutrition=nutrition_complete,
+        has_verified_ingredients=ingredients_complete,
+    )
+    if not is_complete:
+        product.last_verified_at = None
+    product = await product_repository.upsert(db, product)
+
+    await _record_label_provenance(
+        db,
+        product.barcode,
+        provenance_provider,
+        data,
+        label_result,
+        used_for_persisted_product=True,
+    )
+
+    if not is_complete:
+        # V12 (review round 5, finding 3): the ingredients group is
+        # often exactly what a standalone label-image/OCR-text scan DID
+        # establish (e.g. an ingredients-only photo, or any literal
+        # OCR-text submission) -- hand it back as useful partial data
+        # instead of a bare retry signal.
+        partial_ingredients = ingredients if ingredients_complete else None
+        await db.commit()
+        raise ProductNotFoundError(
+            f"Product {product.barcode} was found but lacks sufficient verified data for a Health Score.",
+            details=_label_scan_required_details(product, partial_ingredients),
+        )
+
+    profile = await _get_profile_namespace(db, user_id)
+    score, warnings = _score_and_warnings(product, ingredients, profile)
+    product.health_score = score
+
+    await scan_history_repository.insert(
+        db,
+        ScanHistory(
+            user_id=user_id,
+            barcode=product.barcode,
+            product_name=product.product_name,
+            brand=product.brand,
+            health_score=score,
+            scan_type=scan_type,
         ),
     )
     await db.commit()
@@ -615,13 +1653,18 @@ async def analyze_ocr_text(db: AsyncSession, user_id: uuid.UUID, raw_text: str) 
 
 async def analyze_label_image(db: AsyncSession, user_id: uuid.UUID, image_bytes: bytes) -> dict:
     """
-    API Contract 6.3. Fallback chain (unchanged contract, V3 fix only
-    changes what happens on a successful Gemini call):
+    API Contract 6.3 (no barcode). Fallback chain (V3 fix: use a
+    successful Gemini call's full structured output, never discard it):
       1. Gemini request.
       2. Gemini returns valid, usable JSON -> USE IT (all fields).
       3. Gemini network error/timeout/missing key/invalid or unusable
          JSON -> deterministic `fallback_local_analysis`.
       4. Fallback itself fails -> AIServiceUnavailableError.
+
+    V11 (PR #9 review round 4, finding 2): now applies the full label
+    language/safety policy via the shared `_finalize_standalone_label_analysis`
+    -- see that function's and the section docstring above for the
+    resulting (additive-only, no OpenAPI change) response-shape note.
     """
     from PIL import Image
     from io import BytesIO
@@ -632,59 +1675,18 @@ async def analyze_label_image(db: AsyncSession, user_id: uuid.UUID, image_bytes:
         raise ImageUnreadableError("The uploaded file is not a readable image.") from exc
 
     all_db_ingredients = await ingredient_repository.get_all(db)
-
-    data: AnalyzedProductData | None = None
-    ingredients: list[Any] | None = None
-
-    try:
-        raw_response = await gemini_service.analyze_image(image_bytes)
-    except GeminiUnavailableError as exc:
-        logger.info("gemini_image_fallback_triggered", reason=str(exc))
-    else:
-        parsed = parse_gemini_image_json_result(raw_response, all_db_ingredients)
-        if parsed is not None:
-            data, ingredients = parsed
-        else:
-            logger.info("gemini_image_json_invalid_falling_back")
-
-    if data is None:
-        try:
-            data, ingredients = fallback_local_analysis(
-                "Scanned Label Product",
-                "Ingredients could not be extracted from the image; AI response was unavailable or invalid.",
-                all_db_ingredients,
-            )
-        except Exception as fallback_exc:  # noqa: BLE001
-            raise AIServiceUnavailableError(
-                "Both the AI service and the local fallback analysis failed."
-            ) from fallback_exc
-
-    barcode = f"img_{int(time.time() * 1000)}"
-    product = _to_product_model(barcode, data, ingredients)
-    product = await product_repository.upsert(db, product)
-
-    profile = await _get_profile_namespace(db, user_id)
-    score, warnings = _score_and_warnings(product, ingredients, profile)
-    product.health_score = score
-    await db.flush()
-
-    await scan_history_repository.insert(
-        db,
-        ScanHistory(
-            user_id=user_id,
-            barcode=product.barcode,
-            product_name=product.product_name,
-            brand=product.brand,
-            health_score=score,
-            scan_type=ScanType.OCR_LABEL,
-        ),
+    data, ingredients, validity, ingredients_trustworthy = await _run_label_image_pipeline(
+        image_bytes, all_db_ingredients
     )
-    await db.commit()
 
-    return {
-        "product": product,
-        "ingredients": ingredients,
-        "health_score": score,
-        "warnings": warnings,
-        "is_from_database_cache": False,
-    }
+    return await _finalize_standalone_label_analysis(
+        db,
+        user_id,
+        data,
+        ingredients,
+        validity,
+        ingredients_trustworthy,
+        barcode_prefix="img",
+        scan_type=ScanType.OCR_LABEL,
+        provenance_provider="label_ocr",
+    )

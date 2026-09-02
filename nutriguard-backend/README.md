@@ -12,6 +12,224 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V12 (bug fixes, PR #9 review round 5):** V11's field-safety fixes and
+cumulative-completeness model were correct, but three further gaps
+surfaced in review:
+
+1. **Removed the `always_verified` escape hatch.** `/scan/ocr-text`
+   (no barcode) used to force `is_verified=true`/a computed Health
+   Score regardless of nutrition trustworthiness. Heuristic/fallback
+   nutrition must never set `has_verified_nutrition` -- it now never
+   does, for this endpoint or any other. Literal user-submitted OCR
+   text still establishes `has_verified_ingredients=true` (it is
+   genuine evidence); nutrition stays unverified until a genuinely
+   trustworthy source (a barcode provider, or a label-image scan)
+   supplies it. **Practical effect**: a standalone `/scan/ocr-text`
+   call, whose nutrition can never be genuinely verified through this
+   endpoint alone, now CONSISTENTLY returns the same partial/
+   `labelScanRequired` response `/scan/label-image` already uses for an
+   incomplete result, instead of a `200` with a fabricated score -- see
+   item 6 in section 6 and section 11.9.
+2. **Fail-safe (not fail-open) verification defaults.**
+   `is_verified`/`has_verified_nutrition`/`has_verified_ingredients`
+   used to default to `true`, on the theory that "every row not
+   explicitly external is locally verified" -- reviewed and found
+   unsafe: a future write path that forgot to pass one of these
+   explicitly would silently create verified, Health-Score-eligible
+   evidence. All three now default `false`, everywhere (the ORM model,
+   `_to_product_model`'s own keyword defaults, and -- via an amendment
+   to the still-unmerged `a1b2c3d4e5f6` migration -- the database
+   `server_default`s themselves, `cf5522508f9a`'s pre-existing two
+   columns included). Every real write path already passed all three
+   explicitly, so this is a pure safety-net change: a hypothetical
+   future insert that omits one now fails toward "unverified", never
+   "verified". See section 11.11.
+3. **Partial analysis for an incomplete result.** A `404`/
+   `labelScanRequired` response used to discard whichever evidence
+   group WAS genuinely verified -- e.g. an ingredients-only label photo
+   (the Ingredient Label tab's everyday output) got nothing back but a
+   bare retry signal, even though its normalized ingredient analysis
+   was real and useful. `_label_scan_required_details` now additively
+   includes `analysisComplete`/`healthScoreAvailable`/`healthScore`
+   (explicitly `null`, never `0`)/`nutritionScanRequired`/
+   `ingredientsScanRequired`, plus the actual normalized `ingredients`
+   array whenever that group is genuinely verified -- across
+   `/scan/barcode`, the barcode-linked label/OCR endpoints, and the
+   standalone ones. No OpenAPI schema change (confirmed byte-identical
+   against a pinned-dependency regeneration) -- `error.details` was
+   already untyped. See section 11.12.
+
+See sections 11.9/11.11/11.12 for the full detail on each.
+
+**V11 (feature + bug fixes, PR #9 review round 4):** The barcode +
+label enrichment feature (V8-V10) didn't yet satisfy its own central
+requirement: combining a barcode's discovered evidence with a label
+scan's evidence into ONE product, when neither alone was complete. Two
+substantial changes, both covered by new tests (see 11.13):
+
+1. **Cumulative completeness across independent evidence groups.**
+   `has_verified_nutrition` had been asked to mean two things at once:
+   "nutrition is genuinely known" AND "the whole product is complete".
+   A barcode discovery with real nutrition but no `ingredients_text` (a
+   real, common Open Food Facts pattern) could never be completed by a
+   later ingredients-only label photo, because the merge logic only
+   ever looked at the CURRENT request's nutrition fields. Added a new
+   `Product.has_verified_ingredients` column (migration `a1b2c3d4e5f6`,
+   parent `cf5522508f9a`) so nutrition and ingredients are tracked,
+   merged, and locked-once-complete INDEPENDENTLY -- from a trusted
+   barcode provider, a label-image scan, or a mix of both, in any
+   order, across any number of requests. `is_verified` (the single
+   Health Score gate) is now exactly `has_verified_nutrition AND
+   has_verified_ingredients`, applied uniformly to `analyze_barcode`'s
+   own discovery path too (previously that path hardcoded
+   `is_verified=false` for every external discovery regardless of
+   completeness -- a genuinely complete discovery is now correctly
+   protected, exactly like a genuinely complete label-scan enrichment
+   already was). See section 11.8.
+2. **Standalone `/scan/label-image`/`/scan/ocr-text` (no barcode) now
+   apply the same language/safety policy.** They previously bypassed
+   `resolve_label_text` entirely and always returned `200` with
+   `is_verified=true`/`has_verified_nutrition=true`, even when Gemini
+   explicitly nulled an unreadable nutrition value (i.e. a Health Score
+   computed from placeholder zeros, presented as confident). Both now
+   share the exact same pipeline the barcode-linked path uses --
+   `/scan/label-image` now correctly returns the EXISTING structured
+   `labelScanRequired` response (no new field, no OpenAPI change) when
+   its evidence is genuinely incomplete; `/scan/ocr-text` at the time
+   kept its own long-standing "always return a best-effort heuristic
+   analysis" contract (its nutrition figures are never genuinely
+   extracted by design, independent of this change) but applied the
+   same English/Bulgarian preference and translation to its text.
+   **Superseded by V12** (see below): that contract turned out to be
+   unsafe and was removed. See section 11.9 for the current design and
+   the Android-facing response note.
+
+See section 11.8/11.9 for the full detail on each.
+
+**V10 (bug fixes, PR #9 review round 3):** Three further correctness/
+safety gaps found in a third review of the barcode + label enrichment
+feature, fixed before merge:
+1. `nutrition_fields_present`/`label_field_validity` correctly rejected
+   unsafe nutrition values (NaN/Infinity/negative/out-of-range/boolean/
+   placeholder), but the REJECTED value itself still flowed through
+   `_as_float` into `AnalyzedProductData` and then into the `Product`
+   row -- only `has_verified_nutrition` stayed `false`, while the
+   garbage number sat in the column regardless. `parse_gemini_image_json_result`
+   now uses `_safe_nutrition_value`, which returns the safe neutral
+   placeholder `0.0` for anything that isn't genuinely trustworthy --
+   a rejected value can no longer reach a `Product` column in ANY form.
+   The merge path (`_apply_label_enrichment`) now also gates each
+   nutrition/NOVA field's overwrite INDIVIDUALLY on that field's own
+   validity (`gemini_image_parser.LabelFieldValidity`), so a field this
+   attempt couldn't trust leaves an existing safe value untouched
+   instead of blanking it to the neutral placeholder.
+2. Translation-invariant checks (E-numbers, numbers/percentages/units)
+   used one-way set subtraction (`source - translated`), which only
+   ever caught a REMOVED or CHANGED token -- an ADDED/invented token
+   (e.g. a fabricated extra E-number or figure the source never had)
+   passed silently, and a REPEATED token collapsing to one occurrence
+   (sets dedupe) was invisible too. Now uses `collections.Counter`
+   multiset equality, which catches all four: added, removed, changed,
+   and duplicate-count loss. Also fixed a real regex bug where `12%`
+   silently backtracked to a bare `12` (a trailing `\b` never matches
+   right after a non-word character like `%`), and confirmed comma/dot
+   decimals (`12,5`/`12.5`) normalize deterministically to the same
+   token.
+3. `gemini_image_parser.py` hardcoded `allergens_detected="None"`
+   unconditionally -- representing "the model said nothing about
+   allergens" as a confirmed, factual "no allergens" claim. The image
+   prompt now requests an `allergens` array; an explicit, non-empty
+   list of named allergens is persisted (normalized, deduplicated), and
+   anything else (missing, null, an empty array, a malformed type)
+   persists as `""` (unknown), never `"None"`. `novaGroup` is now
+   validated strictly as a genuine JSON integer 1-4 (rejecting
+   booleans/strings/floats/negative/zero/out-of-range values); an
+   invalid value uses the same `0` "unclassified" sentinel
+   `barcode_discovery.py` already established, which `health_score.py`'s
+   own zero-deduction branch already treats safely.
+
+See section 11.2 and 11.3 for the full detail on each.
+
+**V9 (bug fixes, PR #9 review):** Eight correctness/safety issues found
+in review of the V8 barcode + label enrichment feature, fixed before
+merge:
+1. Gemini image dietary flags (`isGlutenFree`/`isLactoseFree`/`isVegan`/
+   `isVegetarian`/`isHalal`/`isKosher`) defaulted to `true` for a
+   missing/null/malformed value — same "unknown must never read as a
+   positive certification" bug the barcode-discovery bridge already
+   fixed for external providers (V6). Now defaults to `false`.
+2. `nutrition_fields_present` accepted anything `float()` didn't raise
+   on — a JSON boolean, `NaN`/`Infinity`, a negative number, an
+   out-of-range number, or a numeric string all passed. Now rejects all
+   of those and requires a genuine, finite, non-negative, in-range JSON
+   number; the Gemini image prompt was also updated to require `null`
+   (never a guessed/defaulted number) for a nutrition value that isn't
+   actually legible on the label.
+3. `_persist_enriched_product`/`_finalize_barcode_enrichment` committed
+   up to four times per request (product, then provenance, then score+
+   history) despite being described as transactional — a mid-sequence
+   failure could leave a product row with no provenance, or other
+   partial state. Restructured to exactly one commit per outcome (see
+   11.6); also surfaced and fixed a real SQLite/pysqlite test-harness
+   quirk where a SAVEPOINT could silently survive a `rollback()` (see
+   11.6's note on `tests/integration/test_label_barcode_enrichment.py`'s
+   `strict_db_session` fixture).
+4. Bulgarian alphabet handling incorrectly excluded `ь` (a valid modern
+   Bulgarian letter) as "non-Bulgarian", and a single ambiguous Latin
+   token (`"in"`/`"or"`/`"per"`, coincidentally real words in other
+   languages too) could tip a classification to English on its own. See
+   11.3 for the corrected two-tier (strong/weak) evidence model.
+5. Translation validation trusted Gemini's own self-reported
+   `detectedLanguage`/`confidence` and didn't verify the translation
+   actually corresponds to the source. Now independently verifies
+   (never merely assumes) that the result is actually English, every
+   source E-number survived unchanged, and every numeric value/
+   percentage/unit survived unchanged — and the response schema now
+   forbids unexpected extra fields.
+6. Canonical ingredient normalization (the Bulgarian-alias-aware
+   re-tokenization pass) only ran when `canonical_text` textually
+   differed from the raw OCR text, which silently skipped pure-
+   Bulgarian labels (whose canonical text is normally identical to the
+   original) — Bulgarian ingredients never got a chance to dedupe
+   against an equivalent English mention. Now runs for any real
+   language content (English, Bulgarian, mixed, or translated).
+7. OCR provenance was recorded with a hardcoded `confidence=1.0`, and
+   an incomplete enrichment still stamped `last_verified_at` as if it
+   had just been verified. Fixed: OCR provenance now uses the schema's
+   own conservative `0.0` default (there is no real per-request
+   confidence signal for OCR extraction, unlike translation, which
+   already had one); `last_verified_at` is only ever set when
+   `has_verified_nutrition` is true.
+8. `openapi.json` had been hand-patched rather than generated from the
+   repository's pinned dependencies. Regenerated and verified against a
+   throwaway container running the exact pinned `requirements.txt` on
+   Python 3.12 (matching CI) — byte-for-byte identical to the prior
+   hand patch, confirming it was accurate, but now sourced correctly.
+
+See section 11 (11.2–11.7) for the full detail on each.
+
+**V8 (feature): Barcode + label enrichment and multilingual label
+normalization.** When barcode discovery (V4/V5) cannot produce a
+complete product and returns `labelScanRequired`, the client can now
+resubmit a label image (or OCR text) together with the *original*
+barcode, via a new optional `barcode` field on `POST
+/scan/label-image` and `POST /scan/ocr-text`. The backend combines
+both sources into one canonical, barcode-keyed product instead of a
+synthetic `img_.../ocr_...` one, persists it through the same
+product/history pipeline, and returns the unchanged
+`FullProductAnalysisOut` schema — no second response shape. A later
+plain barcode scan then resolves entirely from the local database, no
+provider discovery or further label request needed. Label text is
+normalized against an English/Bulgarian-first language policy: English
+and Bulgarian sections are preferred and, when both are present,
+merged with equivalent ingredients deduplicated; other-language-only
+text is translated to canonical English via the existing Gemini
+integration (no new provider/API key), with a controlled, structured
+error when translation is unreliable rather than fabricated data. Both
+new fields are optional and additive — no existing client behavior
+changes when `barcode` is omitted. See section 11 for the full design;
+no Alembic migration was needed (see 11.5).
+
 **V6 (bug fixes, PR #7 review):** Six correctness issues in the V4/V5
 barcode discovery feature, fixed before merge:
 1. Unknown dietary flags (vegan/vegetarian/gluten-free/lactose-free/
@@ -156,14 +374,18 @@ source .venv/bin/activate
 pytest -q
 ```
 
-The full suite (**159 tests**) runs against an in-memory SQLite database
-via `aiosqlite` — no Docker or Postgres required, and it runs in a few
-seconds. This is intentional: SQLite is good enough to validate all
-business logic and API behavior, while the actual deployment always
-targets Postgres (see `alembic/versions/` for the Postgres-generated
-migrations, authored and applied against a real local PostgreSQL 16
-instance during development, not just SQLite — see section 10.7 for how
-the barcode-discovery migration specifically was verified).
+The full suite (**321 tests**: 320 run by default + 1 opt-in) runs
+against an in-memory SQLite database via `aiosqlite` — no Docker or
+Postgres required, and it runs in a few seconds. This is intentional:
+SQLite is good enough to validate all business logic and API behavior,
+while the actual deployment always targets Postgres (see
+`alembic/versions/` for the Postgres-generated migrations, authored and
+applied against a real local PostgreSQL 16 instance during development,
+not just SQLite — see section 10.7 for how the barcode-discovery
+migration specifically was verified, and section 11.6 for the one
+opt-in test, `tests/postgres/test_concurrent_enrichment_postgres.py`,
+which needs a real disposable Postgres instance and is skipped by
+default).
 
 Every barcode-discovery test mocks its HTTP layer (`httpx.MockTransport`
 for provider-adapter tests, in-memory fake `BarcodeProductProvider`
@@ -187,6 +409,9 @@ Coverage:
 - `tests/unit/test_barcode_discovery_migration.py` — the barcode-discovery Alembic migration has a single head, a valid parent revision, and defines both `upgrade`/`downgrade`.
 - `tests/integration/test_barcode_discovery_flow.py` — full `POST /scan/barcode` discovery flow: local-hit short-circuit, Open Food Facts success, Open Food Facts miss → UPCitemdb fallback (correctly incomplete, V6), provider timeout/rate-limit/malformed-response isolation, all-providers-unavailable structured 404, invalid-barcode rejection with zero network calls, repeated-discovery dedup, verified-local-data protection, conflicting-source preservation, equivalent-barcode-representation dedup, and provenance-conflict race-safety.
 - `tests/unit/test_food_analysis_discovery_bridge.py` — unknown dietary flags default to `false` (never `true`); materially incomplete nutrition/ingredients are flagged `has_verified_nutrition=False` in every combination (missing nutrition, missing ingredients, missing both); complete data is scored normally.
+- `tests/unit/test_language_detection.py` — semantic English/Bulgarian/other/unknown classification (not merely script-based): German/French/Russian/Ukrainian text correctly rejected as not-English/not-Bulgarian despite matching script; purely numeric/E-number text is "unknown", not a false positive.
+- `tests/unit/test_label_language.py` — `resolve_label_text`'s full language policy: English/Bulgarian preferred over another-language duplicate section, mixed EN+BG retained, other-language-only text translated (mocked Gemini), low-confidence/invalid/malformed translation responses all raise the controlled `TranslationUnreliableError`, E-numbers/percentages/quantities/units untouched by the pipeline.
+- `tests/integration/test_label_barcode_enrichment.py` — full `POST /scan/label-image` (+ `/scan/ocr-text`) barcode-enrichment flow: no-barcode/placeholder-barcode backward compatibility, unknown-barcode product creation, incomplete-discovery enrichment in place, a subsequent plain barcode scan resolving locally with discovery never invoked, UPC-A/EAN-13 alias dedup, repeated-enrichment idempotency, verified-data protection, incomplete-nutrition `labelScanRequired`, invalid-barcode validation errors, end-to-end mixed-language dedup and translation, translation-failure persists nothing, and no raw image bytes ever stored.
 
 ## 4. Implemented endpoints
 
@@ -197,8 +422,8 @@ All 11 endpoints from the API Contract, plus the two auth endpoints it specifies
 | POST | `/api/v1/auth/device` | 3.2 |
 | POST | `/api/v1/auth/refresh` | 3.2 |
 | POST | `/api/v1/scan/barcode` | 6.1 |
-| POST | `/api/v1/scan/ocr-text` | 6.2 |
-| POST | `/api/v1/scan/label-image` | 6.3 |
+| POST | `/api/v1/scan/ocr-text` | 6.2 (+ optional `barcode`, see section 11) |
+| POST | `/api/v1/scan/label-image` | 6.3 (+ optional `barcode`, see section 11) |
 | GET | `/api/v1/products/{barcode}` | 6.4 |
 | GET | `/api/v1/products` | 6.5 |
 | GET | `/api/v1/ingredients` | 6.6 |
@@ -485,6 +710,42 @@ than silently resolved:
      canonical `gtin13` — aliases are for *finding* a pre-existing row,
      never for *choosing* where a new one is written. Covered by
      `test_legacy_upc_a_row_is_found_by_a_later_equivalent_ean13_scan`.
+
+10. **`POST /scan/ocr-text` (no barcode) no longer always returns `200`
+    (V12, PR #9 review round 5, finding 1).** Previously this endpoint
+    forced `is_verified=true` unconditionally (`always_verified=True`
+    in `_finalize_standalone_label_analysis`), on the theory that
+    literal user-submitted OCR text is inherently trusted local-
+    pipeline content. Review found that unsafe specifically for
+    NUTRITION: this endpoint's nutrition figures are ALWAYS the
+    deterministic keyword-heuristic guess (item 2 above), never
+    genuinely extracted, regardless of the raw text's own quality or
+    Gemini's success -- treating them as verified fabricated a
+    confident-looking Health Score from numbers that were always a
+    guess. Ingredients are unaffected (the raw text is the caller's own
+    genuine content, so `has_verified_ingredients` still becomes
+    `true`), but since nutrition can now never be genuinely verified
+    through this endpoint alone, **every** standalone `/scan/ocr-text`
+    call consistently returns the same `404 PRODUCT_NOT_FOUND` /
+    `labelScanRequired` response `/scan/label-image` already uses for
+    an incomplete result (with its verified ingredient evidence
+    attached, see section 11.12), instead of the `200` it always
+    returned before. This is a real, intentional behavior change an
+    Android client must handle -- not merely an edge case, since it now
+    applies to every call to this endpoint when used standalone (no
+    `barcode` field). A barcode resubmitted through
+    `analyze_ocr_text_with_barcode` is unaffected in spirit: an
+    EXISTING row's already-verified nutrition (from a trusted barcode
+    provider, or a later `/scan/label-image` call) is preserved and
+    still completes the product normally -- see section 11.9. The
+    OpenAPI schema is unchanged (confirmed byte-identical against a
+    pinned-dependency regeneration): `FullProductAnalysisOut` gained no
+    fields, and `error.details` was already untyped `Any`. Covered by
+    `tests/integration/test_label_barcode_enrichment.py`'s
+    `test_standalone_ocr_text_returns_partial_ingredients_without_health_score`
+    and `test_standalone_ocr_text_gemini_success_still_does_not_verify_nutrition`,
+    and `tests/integration/test_scan_flow.py`'s
+    `test_scan_ocr_text_returns_partial_analysis_without_health_score`.
 
 No other ambiguities were found that required deviating from the
 contract; where the contract was silent on an implementation detail
@@ -773,7 +1034,749 @@ attempts — `tests/unit/test_barcode_discovery_migration.py` instead
 checks the migration's structural integrity (single head, valid parent
 revision, both `upgrade`/`downgrade` present) on every `pytest` run.
 
-## 11. Project layout
+## 11. Barcode + label enrichment and multilingual label normalization
+
+### 11.1 API contract additions
+
+Both additive, optional, backward compatible (an existing client that
+never sends the new field behaves byte-for-byte as before):
+
+- `POST /api/v1/scan/label-image` — new optional multipart form field
+  `barcode`. Omitted, blank, or a literal placeholder (`"null"`,
+  `"N/A"`, whitespace) behaves exactly like today: `analyze_label_image`
+  runs unchanged, minting a synthetic `img_...` id.
+- `POST /api/v1/scan/ocr-text` — new optional JSON field `barcode` on
+  `OcrTextScanRequest`, same semantics.
+- Both return the existing `FullProductAnalysisOut` — never a second,
+  Android-incompatible response shape. An invalid supplied barcode
+  (fails `barcode_validation.validate_and_normalize`) returns the
+  standard `422 VALIDATION_ERROR` envelope, the same one `/scan/barcode`
+  already uses for an empty barcode.
+
+### 11.2 Merge/upsert design
+
+`app/services/food_analysis.py`'s `analyze_label_image_with_barcode` /
+`analyze_ocr_text_with_barcode` (sharing `_finalize_barcode_enrichment`)
+implement:
+
+- The supplied barcode is validated/canonicalized and resolved through
+  every alias (`barcode_validation.alias_keys` +
+  `product_repository.get_by_barcode_or_aliases`) — the same lookup
+  `/scan/barcode` uses, so a UPC-A scan finds a row already stored
+  under its EAN-13-zero-padded equivalent (or vice versa) and never
+  creates a duplicate.
+- No existing row → a new one is created under the canonical GTIN-13
+  key (`product_repository.insert_new`, SAVEPOINT-based, race-safe —
+  the same mechanism V5/V6 barcode discovery already relies on).
+- An existing row that is already fully trusted (`is_verified` — V11:
+  BOTH `has_verified_nutrition` AND `has_verified_ingredients`, see
+  11.8) is never modified — the label analysis still runs (so its
+  provenance is recorded) but can't overwrite it.
+- Otherwise, fields are merged, not replaced wholesale: identity
+  (name/brand/category/image/allergens) is kept when already meaningful
+  (not a placeholder string — see `barcode_text_safety.is_placeholder`
+  — and not a known discovery placeholder like `"Discovered Product"`/
+  `"Unknown Brand"`) and filled from the label analysis only when
+  missing.
+- Nutrition/NOVA fields are merged at PER-FIELD granularity, not as one
+  all-or-nothing blob (`gemini_image_parser.LabelFieldValidity`,
+  applied by `_apply_label_enrichment`): an existing row's sugar/
+  sodium/saturated-fat/NOVA value is only ever replaced by a fresh
+  attempt's value when THAT SPECIFIC field was individually
+  trustworthy this time — a field the new attempt couldn't trust
+  leaves the existing value untouched rather than blanking it to a
+  placeholder. Whatever numeric value actually gets written is always
+  safe regardless: a rejected value (see below) is normalized to the
+  neutral placeholder `0.0`/`0` at parse time
+  (`gemini_image_parser._safe_nutrition_value`/`_safe_nova_group`), so
+  it can never reach a `Product` column even on the very first fill-in.
+- `has_verified_nutrition` only flips to `true` when the label analysis
+  itself produced genuinely known nutrition — all three of
+  sugar/sodium/saturated-fat present as a genuine, finite, non-negative,
+  physically-defensible-range JSON number in the model's structured
+  output (`gemini_image_parser.nutrition_fields_present`) — never a
+  boolean, `NaN`/`Infinity`, a negative or out-of-range value, a numeric
+  string, or a heuristic fallback guess; the same "all three required"
+  gate `barcode_discovery.discover_product` already uses for external
+  providers. `has_verified_ingredients` flips to `true` independently
+  (V11, see 11.8) — the two are no longer coupled, so nutrition alone
+  can complete without ingredients, and vice versa, in either order,
+  across any number of requests. The Gemini image prompt itself
+  requires `null` (never a guessed number) for a nutrition value that
+  isn't actually legible on the label. A row that doesn't clear BOTH
+  gates (`is_verified`) stays `labelScanRequired` (`404
+  PRODUCT_NOT_FOUND`, the same structured payload `/scan/barcode`
+  returns for an incomplete discovery), never a confident-looking score
+  from placeholder data.
+- `novaGroup` is validated strictly as a genuine JSON integer 1-4
+  (rejects booleans, strings, floats, negative values, `0`, and
+  anything above `4`); an invalid value uses the same `0`
+  "unclassified" sentinel `barcode_discovery.py` already established
+  for its own incomplete discoveries, which `health_score.py`'s own
+  zero-deduction `else` branch already treats identically to any other
+  non-2/3/4 value — never a fabricated processing-level claim, never a
+  score skewed either direction.
+- `allergens_detected` only persists an explicit, non-empty, named
+  allergen list from the model (normalized: trimmed, deduplicated
+  case-insensitively, comma-joined); anything else — missing, `null`,
+  an empty array, or a malformed type — persists as `""` (unknown),
+  never the string `"None"` as a fabricated confirmed-absence claim.
+  Neither `allergens_detected` nor `novaGroup` are consumed by the
+  Personalized Warning Engine (it acts on the boolean dietary flags and
+  the ingredient risk levels respectively) — an unknown/invalid value
+  in either field cannot fabricate or suppress a warning.
+- `is_verified` is kept equal to `has_verified_nutrition AND
+  has_verified_ingredients` (V11): an incomplete row stays open to a
+  *later* enrichment attempt for the same barcode — completing either
+  group, in either order — and only a row genuinely complete in BOTH
+  is protected from being overwritten again. `last_verified_at` is only
+  ever stamped when `is_verified` ends up `true` — an enrichment
+  attempt that leaves a row still missing either group must not carry
+  a timestamp implying it was just fully re-verified. See 11.8 for the
+  full cumulative-completeness design.
+- `/scan/ocr-text`'s barcode path always treats nutrition as NOT
+  genuinely known: that endpoint preserves the pre-existing, documented
+  `gemini_result_parser.py` quirk where nutrition figures come from the
+  deterministic fallback recomputed against raw text, never from a
+  model's structured numbers — i.e. never genuinely-extracted real
+  label data, by long-standing design. A barcode resubmitted through
+  `/scan/ocr-text` alone only reaches `has_verified_nutrition=true` if
+  the existing row already had it — but its (always genuinely
+  user-submitted) text DOES count as trustworthy ingredients evidence,
+  see 11.8's `ingredients_trustworthy`.
+- Everything is persisted through the same `Product`/`Ingredient`
+  matching/scan-history pipeline every other analysis path uses — no
+  parallel write path, no raw image bytes ever touch storage (only
+  `PIL.Image.verify()` reads them, in memory, then they're discarded).
+
+### 11.3 Language policy
+
+`app/services/language_detection.py` (`detect_language`) and
+`app/services/label_language.py` (`resolve_label_text`) implement:
+
+- **Semantic, not script-based, detection.** Script (Latin/Cyrillic) is
+  only a first filter; English/Bulgarian classification additionally
+  requires food-label vocabulary evidence, tiered by ambiguity: a small
+  set of STRONG words (`"ingredients"`, `"contains"`, `"захар"`,
+  `"съставки"`, ...) distinctive enough to trust on their own, and a
+  larger set of WEAK words (common function words like `"water"`/
+  `"вода"`) that require **at least two distinct hits together** before
+  they're trusted — a single ambiguous token (`"in"`/`"or"`/`"per"`,
+  coincidentally real words in German/French/Italian too) can never tip
+  the classification by itself. For Cyrillic text, the classification
+  additionally requires the *absence* of letters exclusive to other
+  Cyrillic-alphabet languages (Russian/Ukrainian/Belarusian/Serbian —
+  е.g. `ы`/`э`/`ё`/`і`/`ї`/`є`); modern Bulgarian's own `ь` (e.g.
+  `"шофьор"`, chauffeur) is correctly NOT treated as excluding evidence.
+  Net effect: a German/French/Italian/Spanish/Romanian label is never
+  misread as English, and a Russian/Ukrainian label is never misread as
+  Bulgarian, merely because the script (or one coincidental word)
+  matches.
+- **Section splitting + preference.** Raw label text is split on
+  language-section headers (`Ingredients:`/`Съставки:`/`Zutaten:`/...),
+  line breaks, and `/`/`|` dividers, and each section is classified
+  independently — real multi-market packaging usually separates
+  languages this way. Any English and/or Bulgarian sections found are
+  used verbatim (English first); other-language sections are ignored
+  once English/Bulgarian content exists.
+- **Mixed EN+BG dedup.** When both are present, both are retained in
+  the stored/displayed text, and equivalent ingredients are
+  deduplicated once tokenized: `label_language.bulgarian_ingredient_alias`
+  maps common Bulgarian ingredient-list tokens (e.g. `"захар"`) to
+  their English canonical form *for matching purposes only* (never
+  altering the stored text), so an English and a Bulgarian mention of
+  the same ingredient collapse into one matched/synthetic ingredient
+  instead of two.
+- **Other-language-only → translation.** With no usable English/
+  Bulgarian section, the best other-language text is translated to
+  canonical English via the existing `GeminiService` (no new provider
+  or API key) with a dedicated, injection-hardened prompt (the OCR text
+  is explicitly framed as data, never instructions) requiring
+  structured JSON (`detectedLanguage`/`confidence`/`translatedText`,
+  **extra fields forbidden**), validated with a strict Pydantic model
+  before use. Gemini's own `detectedLanguage`/`confidence` self-report
+  is never trusted alone — every translation is additionally verified
+  **deterministically**, independent of anything the model claims about
+  itself: the result must independently detect as English (via the same
+  `language_detection.detect_language`, not Gemini's claim), and the
+  **multiset** (`collections.Counter`, not a one-way set difference) of
+  E-numbers — and separately, of numeric values/percentages/units — in
+  the source and in the result must match EXACTLY. Multiset equality
+  (not one-way subtraction) is what catches all four failure modes: a
+  token REMOVED, one CHANGED, one silently ADDED/invented (a one-way
+  "is the source a subset of the translation" check would miss this
+  entirely), and a DUPLICATE occurrence lost or gained (plain set
+  equality would miss this too, since sets dedupe). Percentages are
+  extracted as a single `"12%"` token (a regex fix: a naive trailing
+  word-boundary assertion backtracks and silently drops the `%`), and
+  comma/dot decimals (`12,5`/`12.5`) normalize to the identical token
+  deterministically. A response that fails to parse, fails schema
+  validation (including an unexpected extra field), reports non-finite/
+  out-of-range confidence, is a placeholder, reports confidence below
+  `label_language._MIN_TRANSLATION_CONFIDENCE` (0.55), or fails any of
+  those deterministic invariant checks raises
+  `TranslationUnreliableError` (`422 LABEL_TRANSLATION_UNRELIABLE`) —
+  nothing is persisted for that request. This also means a
+  prompt-injection attempt embedded in the OCR source text doesn't need
+  to be specifically detected as such: if it causes the model to
+  produce content that doesn't actually correspond to the source (a
+  changed/added/dropped E-number or number, non-English output), that
+  mismatch alone is what gets it rejected.
+- **Original text preserved.** The original OCR/label text is always
+  kept (see 11.4, `label_ocr` provenance row's `raw_ingredient_text`)
+  even when a translated or EN+BG-merged canonical text is what's
+  actually stored on `Product.raw_ingredient_text` and analyzed.
+  Translation success alone never marks anything "verified" — that
+  still requires the nutrition-completeness gate in 11.2.
+
+### 11.4 Provenance
+
+Recorded through the **existing** `product_sources` table/repository
+(`product_source_repository.record_discovery`, reused as-is) — no new
+table: a `label_ocr` (or `ocr_text`) row records the original OCR text,
+detected language, and whether translation was used
+(`raw_metadata_json`); when translation ran, a second `label_translation`
+row records the source language, the Gemini model, and the confidence
+score (`ProductSource.confidence`). Both use the column set every other
+provider provenance row already uses.
+
+The OCR/extraction pipeline itself never reports its own confidence
+(unlike the separate translation call, which does — self-reported, but
+never trusted alone, see 11.3) — so the `label_ocr`/`ocr_text`
+provenance row's `confidence` uses the schema's own conservative `0.0`
+default (the same "no signal" sentinel `product_source_repository`
+already uses elsewhere), never a fabricated `1.0` "full confidence"
+claim.
+
+### 11.5 Why no migration was needed (for the V8 feature itself)
+
+`Product.source` / `source_confidence` / `is_verified` /
+`has_verified_nutrition` / `discovered_at` / `last_verified_at`
+(added by `cf5522508f9a` for barcode discovery) were sufficient to
+represent the ORIGINAL (V8) merge/verification state, and
+`ProductSource.language` / `.confidence` / `.raw_metadata_json`
+(already present on that table) are sufficient to represent the
+language/translation provenance in 11.4 — nothing the V8 feature itself
+needed was unrepresentable in the schema as it stood then. Section 11.8
+below (V11) explains why a migration eventually WAS needed once
+nutrition and ingredients had to be tracked as two independent
+completeness signals, not one.
+
+### 11.6 Transaction boundaries and concurrency
+
+`_finalize_barcode_enrichment` makes exactly ONE `db.commit()` call on
+every path, not several:
+
+- **Incomplete enrichment** (nutrition still not verified after the
+  merge): one commit persists the product change and its provenance
+  *together*, then `ProductNotFoundError` (`labelScanRequired`) is
+  raised — never a product row committed without its provenance.
+- **Successful (verified) enrichment**: the product merge/insert,
+  provenance write(s), Health Score, and scan-history insert are all
+  flushed in-memory first and committed together in one final
+  `db.commit()` — a failure at any point before it (a provenance write
+  error, a scan-history write error, anything) rolls back the *entire*
+  attempt via `app.database.session.get_db`'s
+  `except Exception: await session.rollback()`, including the product
+  merge/insert from earlier in the same call. Proven directly by
+  `tests/integration/test_label_barcode_enrichment.py`'s
+  `test_provenance_write_failure_rolls_back_the_whole_enrichment` and
+  `test_scan_history_write_failure_rolls_back_product_and_provenance_too`.
+
+**Concurrency guarantee — stated precisely, not overclaimed:**
+
+- The brand-new-row INSERT race is **genuinely safe**: it reuses
+  `product_repository.insert_new`'s SAVEPOINT-based primary-key-conflict
+  handling, and this is verified against **real, separate PostgreSQL
+  connections** (not the SQLite test suite's single shared connection —
+  see the note below) in
+  `tests/postgres/test_concurrent_enrichment_postgres.py`: two
+  concurrent enrichments of the same brand-new barcode always converge
+  on exactly one row, never a duplicate, never a crash. This test is
+  opt-in (`NUTRIGUARD_TEST_POSTGRES_URL`) against a disposable Postgres
+  instance — see the file's own docstring for how to run it; it is not
+  part of the default `pytest -q` run, the same convention this project
+  already uses for the barcode-discovery migration (section 10.7).
+- The EXISTING-row merge path (`_apply_label_enrichment`) is **only
+  best effort**: `Product` has no optimistic-concurrency version
+  column, so two truly concurrent enrichments of the same
+  already-existing (incomplete) row can race, and the later `COMMIT`
+  wins ("last write wins"), not a merge of both attempts. This does not
+  corrupt data or duplicate rows (SQLAlchemy's identity map plus the
+  primary-key `UPDATE` keeps it to one row either way), but it is not
+  linearizable. Closing that gap would need a version/`xmin`-based
+  optimistic lock on `Product`, deliberately left out of this PR's
+  scope as a real schema change.
+- The SQLite-backed default test suite's single shared connection
+  (`tests/conftest.py`'s `db_engine`) cannot faithfully exercise either
+  guarantee directly — see `product_repository.insert_new`'s own
+  docstring. Its rollback tests instead use a **dedicated, isolated**
+  SQLite engine/session (`test_label_barcode_enrichment.py`'s
+  `strict_db_session` fixture) with the standard SQLAlchemy
+  pysqlite/aiosqlite workaround applied (disabling the DBAPI's own
+  legacy implicit-transaction tracking, which otherwise can silently
+  make a SAVEPOINT survive a `session.rollback()` — a SQLite-driver-only
+  quirk, never a problem against real PostgreSQL). This fix is
+  deliberately scoped to that one fixture, not applied to the shared
+  `db_engine` every other test uses, to avoid surfacing unrelated
+  pre-existing assumptions elsewhere in the suite that are out of scope
+  for this PR.
+
+### 11.8 Cumulative completeness across independent evidence groups (V11)
+
+The central requirement this feature exists for -- combine barcode
+discovery and a label scan into one product -- did not actually work
+when only ONE side had complete evidence for only ONE of the two
+things a Health Score needs (nutrition, ingredients). Fixed by tracking
+them as genuinely independent evidence groups everywhere a product's
+completeness is decided, not just in the label-enrichment merge path:
+
+- **Data model**: `Product` gained `has_verified_ingredients`
+  (migration `a1b2c3d4e5f6`, parent `cf5522508f9a` — the pre-existing
+  single head; the chain still has exactly one head afterward). Verified
+  upgrade → downgrade → upgrade against a disposable PostgreSQL 16
+  instance, including a real backfill check (see below). `is_verified`
+  is now, everywhere, exactly `has_verified_nutrition AND
+  has_verified_ingredients` — never set independently.
+- **Backfill** (conservative, per the review requirement): every row
+  that existed before this migration was written under the OLD model,
+  in which the app's own code always kept `is_verified ==
+  has_verified_nutrition` for the label-enrichment path, and
+  `has_verified_nutrition` already encoded FULL completeness
+  (`nutrition_known AND ingredients_known`) for the barcode-discovery
+  path. So `has_verified_ingredients = has_verified_nutrition` for
+  every pre-existing row exactly reproduces what the OLD model already
+  implied about it, without inspecting any text content — no risk of
+  "upgrading" an incomplete row based on a non-empty placeholder
+  string. Verified against real PostgreSQL: a row seeded as
+  `is_verified=true, has_verified_nutrition=true` backfills
+  `has_verified_ingredients=true`; a row seeded as
+  `has_verified_nutrition=false` backfills `has_verified_ingredients=false`
+  and stays incomplete until a real future enrichment attempt earns it.
+- **`food_analysis._to_analyzed_data_from_discovery`** (the barcode-
+  discovery bridge) now returns `nutrition_known`/`ingredients_known`
+  as two separate booleans (previously one combined `is_complete`
+  flag), and `_persist_discovered_product` stores each on its own
+  column. `analyze_barcode`'s Health Score gate is now `if not
+  product.is_verified` (previously `if not
+  product.has_verified_nutrition`) — a discovery that's complete in
+  exactly one dimension correctly still returns `labelScanRequired`.
+  One behavior note: `is_verified` for a barcode-discovered row was
+  previously ALWAYS `false` regardless of completeness (it meant
+  "locally-sourced", not "complete"); a genuinely complete discovery
+  now correctly becomes `is_verified=true` and is protected from being
+  overwritten by a later, lower-value re-discovery — the same
+  protection a genuinely complete label-scan enrichment already had.
+- **`food_analysis._apply_label_enrichment`** (the label-enrichment
+  merge) now has TWO independent blocks, each gated on its own
+  `has_verified_*` flag and locked once complete:
+  - **Ingredients group**: `raw_ingredient_text`/`ingredient_ids`, NOVA
+    group, dietary flags, and allergens — all physically read off the
+    ingredient list, so they're gated and committed together
+    (`ingredients_trustworthy`, see below).
+  - **Nutrition group**: sugar/sodium/saturated-fat, still gated
+    per-field by `LabelFieldValidity` (review round 3, finding 1).
+
+  Both blocks can fire in the SAME request (the common case — one
+  photo supplies both) or only one can (a photo of just the nutrition
+  panel, or just the ingredients list); whichever group a request
+  didn't complete stays exactly as it was, ready for a LATER request to
+  complete independently, in any order, any number of requests apart.
+- **`ingredients_trustworthy`**: whether THIS request's ingredient
+  evidence is trustworthy enough to even consider — `True` only when
+  Gemini's structured image extraction succeeded (its rawIngredientText
+  is real label content); `False` whenever the deterministic
+  keyword-heuristic fallback ran for a label IMAGE (its "raw text" is a
+  hardcoded placeholder/error string, not the actual label). For
+  `/scan/ocr-text`'s barcode path, always `True` — the raw text there
+  is always the caller's own genuine submitted content (validated ≥ 3
+  characters by the router), unlike the image fallback's placeholder,
+  regardless of whether Gemini or the deterministic fallback tokenized
+  it.
+- **Efficiency/robustness fix**: when the ingredients group is ALREADY
+  verified and locked for a barcode, this request's ingredient text is
+  never going to be applied at all — so `resolve_label_text` now runs
+  in lenient mode (`strict=False`, see 11.9) for that request, and the
+  canonical-ingredient rebuild step is skipped entirely. Demanding a
+  successful STRICT translation for text that will be discarded
+  regardless was both wasted work and a real spurious-failure mode
+  (e.g. a nutrition-only photo whose incidental OCR leftovers don't
+  confidently classify as English must never block completing the
+  NUTRITION group with an unrelated translation error).
+
+### 11.9 Standalone label analysis reuses the same pipeline (V11, amended V12)
+
+`analyze_label_image`/`analyze_ocr_text` (no barcode) previously had
+their own separate copy of the Gemini-then-fallback chain and never
+called `resolve_label_text` at all — always returning `200` with
+`is_verified=true`/`has_verified_nutrition=true` regardless of what was
+actually extracted, including when Gemini explicitly returned `null`
+for an unreadable nutrition value (a Health Score computed from
+placeholder zeros, presented as confident). Both endpoints now share
+the exact same building blocks the barcode-linked path uses
+(`_run_label_image_pipeline`, `resolve_label_text`, the canonical
+ingredient rebuild, `LabelFieldValidity`/`ingredients_trustworthy`) via
+one new shared tail function, `_finalize_standalone_label_analysis` —
+review round 4, finding 3 ("avoid duplicated pipelines"): this
+duplication is exactly how the two paths drifted apart in the first
+place.
+
+- **`/scan/label-image` (no barcode)**: now gates its response on
+  `is_verified` (both evidence groups), exactly like the barcode-linked
+  path. **API response change Android must handle**: this endpoint can
+  now return the EXISTING structured `404 PRODUCT_NOT_FOUND` /
+  `labelScanRequired` envelope — byte-for-byte the same shape
+  `/scan/barcode` already returns for this situation, with the same
+  `discoveredIdentity` sub-object (so the client can still show a
+  product name even without a score) — instead of a `200` carrying a
+  confident-looking Health Score computed from placeholder-zero
+  nutrition. **No new field, no OpenAPI schema change** — confirmed
+  byte-for-byte identical against a pinned-dependency regeneration (see
+  11.13). This can only happen when the label genuinely couldn't be
+  read reliably (Gemini unavailable/invalid response, or an explicit
+  `null` nutrition field); a normal, successful scan is completely
+  unaffected and returns exactly what it always has.
+- **`/scan/ocr-text` (no barcode)**: applies the SAME language policy
+  (English/Bulgarian preference, translation, ingredient dedup) to its
+  raw text. **UPDATED in V12 (PR #9 review round 5, finding 1)**: this
+  endpoint used to be deliberately NOT gated the same way as
+  `/scan/label-image` (an `always_verified=True` escape hatch in
+  `_finalize_standalone_label_analysis`, preserving what V11 called its
+  "local-pipeline content is trusted for display and scoring" contract)
+  — reviewed and found unsafe: this endpoint's nutrition figures are
+  ALWAYS the deterministic keyword-heuristic guess (the
+  `gemini_result_parser.py` quirk: nutrition always comes from the
+  fallback recomputed against the raw text, never from Gemini's
+  structured numbers), never genuinely extracted, so treating them as
+  verified always fabricated a confident-looking score from numbers
+  that were always a guess. The escape hatch is REMOVED; this endpoint
+  is now gated the same way `/scan/label-image` is. Because its
+  nutrition can never be genuinely verified through this endpoint
+  alone, this means a standalone `/scan/ocr-text` call now
+  CONSISTENTLY returns the `404`/`labelScanRequired` response (with its
+  verified INGREDIENTS evidence attached as useful partial data — the
+  raw text is the caller's own genuine content, so
+  `has_verified_ingredients` still becomes `true` — see section 11.12)
+  rather than occasionally, the way `/scan/label-image` does. See item
+  10 in section 6 for the full Android-facing contract-change writeup.
+  A product created via `/scan/ocr-text` is therefore typically NOT
+  `is_verified=true` and NOT immediately resolvable via a later `POST
+  /scan/barcode` lookup of the same synthetic id — that lookup now
+  correctly returns the same partial response too, consistent
+  everywhere a still-incomplete row is read.
+- Neither endpoint's translation ever hard-fails the request: both call
+  `resolve_label_text(..., strict=False)` — a translation failure
+  (infrastructure or a failed invariant check) falls back to the
+  original text rather than rejecting a standalone, ad-hoc scan that
+  has no barcode-linked canonical row to protect and no continuation
+  request a client would ever retry (contrast the barcode-linked path,
+  which keeps its original strict behavior, unchanged).
+- The original OCR/label text is preserved via `_record_label_provenance`
+  — the same existing `product_sources` table the barcode-linked path
+  already uses; no new table, no schema change for this either. No raw
+  image bytes are ever stored for either endpoint (only
+  `PIL.Image.verify()` reads them, in memory). Both guarantees hold on
+  the INCOMPLETE (`404` partial) path too, not only the success path —
+  `_record_label_provenance` and the image-verify-only handling both
+  run before the completeness check, in every `_finalize_*` function.
+
+### 11.11 Fail-safe verification defaults (V12)
+
+`Product.is_verified`/`has_verified_nutrition`/`has_verified_ingredients`
+defaulted to `true` (fail-OPEN) since `cf5522508f9a` first introduced
+`is_verified`/`has_verified_nutrition`, on the theory that "every row
+not explicitly written by an external discovery is a genuinely verified
+local one". Reviewed (round 5, finding 2) and found unsafe: it meant
+ANY future write path — a new call site, a refactor, a bug — that
+simply forgot to pass one of these three arguments would silently
+create FULLY VERIFIED, Health-Score-eligible evidence, rather than
+failing safe. Every current write path already passes all three
+explicitly (`_to_product_model`'s callers, `_apply_discovered_fields`,
+`_apply_label_enrichment`) — the default was never actually exercised
+by this app's own code, so flipping it is a pure safety-net change with
+zero behavior change for any real code path, confirmed by the full
+pinned suite still passing unmodified (aside from the tests described
+below) and by the real-Postgres verification.
+
+Three layers, each independently defaulting to `false` now:
+
+1. **The ORM model** (`app/models/product.py`): `default=False,
+   server_default=false()` for all three columns.
+2. **`food_analysis._to_product_model`'s own keyword defaults**: this
+   helper explicitly sets these three fields on every `Product(...)` it
+   builds, so the ORM column default is never actually consulted for
+   any row IT creates — but the helper had its OWN separate
+   `is_verified: bool = True` (etc.) parameter defaults, a second,
+   independent fail-open gap at the Python call-site level. Flipped to
+   `False` too, for the identical reason.
+3. **The database `server_default`** — amended into the still-unmerged
+   `a1b2c3d4e5f6` migration (never merged, so amending it in place
+   rather than adding a new migration keeps the chain minimal):
+   - `has_verified_ingredients` is now added with
+     `server_default=sa.text('false')` (was `'true'`) — this is both
+     the value needed to satisfy `NOT NULL` on the `ADD COLUMN` for
+     pre-existing rows AND this column's correct, final, fail-safe
+     steady-state default, so no separate "temporary then final
+     default" step is needed.
+   - The migration additionally `ALTER COLUMN ... SET DEFAULT false`
+     for `is_verified` and `has_verified_nutrition` — the two columns
+     `cf5522508f9a` added with `server_default=true`. This only changes
+     what a FUTURE bare `INSERT` omitting the column receives; it does
+     not touch any already-written row's value (the conservative
+     backfill, unchanged from V11, still runs first and is unaffected).
+     `cf5522508f9a` itself is deliberately left untouched — it already
+     shipped/was reviewed in an earlier round; amending the still-open
+     `a1b2c3d4e5f6` is the minimal correct fix.
+   - `downgrade()` restores the EXACT pre-`a1b2c3d4e5f6` schema: both
+     columns' defaults are `ALTER`ed back to `true` (matching
+     `cf5522508f9a`'s original values) before `has_verified_ingredients`
+     is dropped.
+
+**Verified against a real, disposable PostgreSQL 16 container**:
+upgrade to `cf5522508f9a` (confirming both pre-existing columns'
+defaults were `true`), seeded a fully-verified legacy row, an
+incomplete legacy row, and a row with a non-empty PLACEHOLDER
+`raw_ingredient_text` (`"null"`) whose flags were already `false` —
+then `upgrade head` and confirmed: both new defaults are `false`; the
+backfill reproduced each row's completeness exactly as V11 already
+verified (the placeholder-text row's `has_verified_ingredients` stayed
+`false`, never "upgraded" based on the non-empty text); and a bare
+`INSERT` omitting all three verification columns entirely produced a
+fully UNVERIFIED row. Then `downgrade` to `cf5522508f9a` and confirmed
+both defaults were restored to `true` exactly, the new column was
+dropped, and every row's data was preserved throughout — then
+`upgrade head` again, confirming idempotent re-application. The opt-in
+concurrent-INSERT-race test
+(`tests/postgres/test_concurrent_enrichment_postgres.py`, see 11.6) was
+re-run against this final schema and still passes.
+
+`tests/unit/test_nutrition_ingredients_split_migration.py` gained a
+structural test
+(`test_migration_flips_the_two_pre_existing_verification_columns_to_fail_safe_defaults`)
+asserting both the `upgrade()`-side `ALTER COLUMN ... SET DEFAULT
+false` calls and the `downgrade()`-side reversal back to `true` are
+present in the migration source, without executing DDL (see that
+file's own docstring for why — same convention as
+`test_barcode_discovery_migration.py`).
+
+### 11.12 Partial analysis for an incomplete result (V12)
+
+Review round 5, finding 3: an ingredients-only label photo is the
+NORMAL output of the Android "Ingredient Label" tab whenever only the
+ingredients list (not the nutrition panel) was in frame — but the
+`404`/`labelScanRequired` response for it discarded the genuinely
+useful, already-verified ingredient analysis, giving the client nothing
+but a bare "scan again" signal. `_label_scan_required_details` (used by
+`analyze_barcode`, `_finalize_barcode_enrichment`, and
+`_finalize_standalone_label_analysis` — every place this response is
+raised) now additively includes:
+
+```jsonc
+{
+  "labelScanRequired": true,
+  "reason": "...",
+  "discoveredIdentity": { "barcode": "...", "productName": "...", "brand": "...", "imageUrl": "..." },
+  "suggestedAction": "...",
+  // Additive (V12) -- a client that only inspects `labelScanRequired`
+  // (the pre-existing contract) is completely unaffected.
+  "analysisComplete": false,
+  "healthScoreAvailable": false,
+  "healthScore": null,           // explicitly null, NEVER 0 -- 0 would read as a real (very poor) score
+  "nutritionScanRequired": true, // true iff has_verified_nutrition is false on this row
+  "ingredientsScanRequired": false, // true iff has_verified_ingredients is false on this row
+  // Present ONLY when has_verified_ingredients is true for this row --
+  // omitted (not an empty list) when there is no genuinely trustworthy
+  // partial evidence to return at all (e.g. a full Gemini+fallback
+  // failure, where even the "ingredients" would be tokens from a
+  // hardcoded placeholder/error string, never real label content).
+  "ingredients": [ /* same shape as the success response's own `ingredients` array */ ]
+}
+```
+
+Design notes:
+
+- **Per-group, not assumed-direction**: `nutritionScanRequired`/
+  `ingredientsScanRequired` are computed independently from
+  `product.has_verified_nutrition`/`has_verified_ingredients` directly
+  — a barcode discovery can be missing either group (or both), not only
+  nutrition, so the response never assumes which one.
+- **Never fabricates**: `ingredients` is only ever attached when the
+  CALLER has already established `has_verified_ingredients` is `true`
+  for this exact row — this function does not re-derive or guess
+  trustworthiness itself, it only surfaces evidence already judged
+  trustworthy elsewhere (`_ingredients_group_is_complete`).
+- **Same shape, not a new DTO**: each entry is built by a small,
+  hand-written `_ingredient_out_dict` helper that mirrors
+  `app.schemas.ingredient.IngredientOut`'s exact camelCase field names
+  — NOT by importing that Pydantic schema into the service layer
+  (services stay schema-free, see section 2 of `CLAUDE.md`) and NOT a
+  truncated summary. An Android client can render this list with the
+  exact same model/adapter it already uses for the success response's
+  `ingredients` array.
+- **`analyze_barcode`** additionally now fetches and attaches the
+  persisted product's actual ingredients (via
+  `fetch_ingredients_for_product`) whenever `has_verified_ingredients`
+  is true for a `labelScanRequired` it raises — e.g. a barcode
+  discovery that supplied real `ingredients_text` but no `nutriments`
+  now hands that back too, not just its identity.
+- **No OpenAPI schema change**: `error.details` was already untyped
+  `Any` (see `app.core.exceptions.AppError`/`app.main._error_envelope`)
+  — none of these routes' error responses are declared via
+  `response_model`/`responses=`, so extending this dict moves nothing
+  in the generated schema. Confirmed byte-for-byte identical against a
+  pinned-dependency regeneration (see 11.13).
+- **No fake scan-history entries**: `scan_history_repository.insert`
+  is only ever called AFTER the completeness gate in every
+  `_finalize_*` function — an incomplete/partial result never leaves
+  behind a scan-history row carrying a placeholder score.
+
+### 11.13 Tests
+
+`tests/unit/test_language_detection.py`, `tests/unit/test_label_language.py`,
+and `tests/integration/test_label_barcode_enrichment.py` cover: backward
+compatibility (no barcode, and a placeholder barcode value); unknown
+barcode + label scan creating one canonical product; an incomplete
+discovered product being enriched in place (meaningful identity
+preserved, placeholders filled); a subsequent plain barcode scan
+resolving from the local database with discovery never invoked;
+UPC-A/EAN-13 alias enrichment never duplicating; repeated enrichment
+being idempotent; verified data never being overwritten by lower-
+confidence OCR; incomplete nutrition staying `labelScanRequired`;
+invalid-barcode structured errors; English preferred over another-
+language duplicate; Bulgarian preferred over another-language
+duplicate; mixed English/Bulgarian deduplication (including a
+pure-Bulgarian label, which previously skipped the rebuild step — V9
+finding 6); other-language-only translation to canonical English;
+translation failure/low confidence returning a controlled error with
+nothing persisted; E-numbers/percentages/quantities/units surviving
+translation; no raw image bytes ever being persisted; a provenance
+write failure or a scan-history write failure each rolling back the
+*entire* attempt, product row included (V9 finding 3); an incomplete
+enrichment never stamping a misleading `last_verified_at` while a
+verified one does (V9 finding 7); NaN/Infinity/negative/out-of-range/
+boolean/placeholder nutrition values asserted safe at the DATABASE
+level (not merely `has_verified_nutrition`), including that an
+individually-rejected field never overwrites an existing safe value
+from an earlier attempt (V10 finding 1); invalid/boolean NOVA group
+values persisting as the safe `0` sentinel without skewing the Health
+Score, and a real NOVA 4 classification still taking its full
+deduction (V10 finding 3); and explicit allergens persisting while an
+unknown/absent answer never persists as `"None"`, including that a
+previously-known allergen list survives a later unknown answer (V10
+finding 3).
+
+`tests/postgres/test_concurrent_enrichment_postgres.py` (opt-in, see
+11.6) proves the concurrent-INSERT guarantee against real, separate
+PostgreSQL connections.
+
+`tests/unit/test_ocr_normalizer.py` and `tests/unit/test_gemini_image_parser.py`
+gained regression tests for two supporting fixes this feature surfaced:
+non-Latin synthetic-ingredient names no longer collide on the same id
+(`ocr_normalizer.create_synthetic_ingredient`), and
+`gemini_image_parser.nutrition_fields_present` correctly rejects
+booleans/NaN/Infinity/negative/out-of-range/non-numeric values, not
+merely whatever `float()` doesn't raise on (V9 finding 2) — alongside
+dedicated dietary-flag safe-default tests (missing/null/malformed/true/
+false, V9 finding 1). `test_language_detection.py` and
+`test_label_language.py` gained false-positive fixtures for German,
+French, Italian, Spanish, Romanian, Russian, and Ukrainian text, a
+Bulgarian-with-`ь` fixture, a single-ambiguous-token fixture, and
+adversarial translation tests (changed/omitted E-numbers, altered
+percentages/units, non-English output despite a high self-reported
+confidence, extra JSON fields, `NaN` confidence, and prompt-injection
+phrasing embedded in OCR input) — V9 findings 4–5. `test_label_language.py`
+additionally gained multiset-equality regression tests: an invented
+extra E-number/number rejected (not just a removed one), a lost
+duplicate occurrence rejected, valid reordering with an identical
+multiset accepted, a comma/dot decimal pair recognized as the same
+value, and the `12%` percentage-token regex-backtracking fix — V10
+finding 2. `test_gemini_image_parser.py` gained `label_field_validity`
+per-field-independence tests, "rejected value never persisted, even
+alongside an individually-valid field" tests, and NOVA-group/allergens
+parser tests (valid 1-4, invalid boolean/string/float/negative/zero/
+above-4 all reduced to the safe sentinel; missing/null/empty-array/
+malformed-type allergens all reduced to `""`, an explicit list
+persisted deduplicated) — V10 findings 1 and 3.
+
+**V11 (PR #9 review round 4) new coverage**, all in
+`tests/integration/test_label_barcode_enrichment.py` unless noted:
+barcode-sourced verified nutrition completed by a LATER ingredients-
+only label photo, and the reverse (ingredients-first, nutrition-later);
+two separate label-image scans whose complementary evidence (one
+supplies only ingredients, the other only nutrition) together complete
+a product neither scan alone would have; untrusted/rejected later
+evidence (a failed Gemini call) never erasing an already-verified
+group nor fabricating the still-missing one; neither evidence group
+alone ever producing a Health Score; a subsequent plain barcode lookup
+returning the now-completed product without triggering discovery;
+UPC-A/EAN-13 alias enrichment still converging cumulative evidence onto
+one row; repeated calls staying idempotent once complete — finding 1.
+Standalone `/scan/label-image`: English/Bulgarian preference and
+other-language translation applied the same as the barcode-linked
+path; a `null` nutrition field correctly returning `labelScanRequired`
+instead of a fabricated score; the original (pre-translation) OCR text
+preserved via provenance; no raw image bytes persisted. Standalone
+`/scan/ocr-text`: the same English/Bulgarian preference applied to its
+text, while confirming it still always succeeded (never gated) and a
+product it created remained resolvable via a later barcode lookup —
+finding 2. **Both of these `/scan/ocr-text` tests were REWRITTEN in
+V12** (the always-succeeds/never-gated contract they pinned was
+removed — see below). `tests/unit/test_food_analysis_discovery_bridge.py` updated
+for `_to_analyzed_data_from_discovery`'s new two-boolean return (
+`nutrition_known`/`ingredients_known` independently, not one combined
+`is_complete`), including that either alone still marks its own field
+correctly while the combined gate stays `False`.
+`tests/unit/test_nutrition_ingredients_split_migration.py` covers the
+new migration's structural properties (parent revision, single head,
+upgrade/downgrade present, expected DDL/backfill) the same way
+`test_barcode_discovery_migration.py` covers `cf5522508f9a`; the real
+PostgreSQL upgrade → downgrade → upgrade cycle (including a backfill
+check against rows seeded at the OLD schema) was run manually against
+a disposable container — see the PR/final report for the transcript.
+
+**V12 (PR #9 review round 5) new coverage:**
+
+- **Finding 1 (removed `always_verified`)**:
+  `test_standalone_ocr_text_returns_partial_ingredients_without_health_score`
+  and `test_standalone_ocr_text_gemini_success_still_does_not_verify_nutrition`
+  (`test_label_barcode_enrichment.py`) plus
+  `test_scan_ocr_text_returns_partial_analysis_without_health_score`
+  (`test_scan_flow.py`) pin standalone `/scan/ocr-text`'s new baseline
+  contract: `404`/`labelScanRequired` with verified ingredients
+  attached but `nutritionScanRequired: true`, even when Gemini's own
+  JSON call succeeds. `test_ocr_text_with_barcode_then_label_image_completes_the_product`
+  covers the "later trustworthy nutrition evidence completes the same
+  barcode-linked product" case explicitly. The three
+  `test_barcode_contract_change.py` tests that used to seed a "known
+  product" via a single `/scan/ocr-text` call were updated to combine
+  `/scan/ocr-text` (ingredients) + `/scan/label-image` (nutrition) for
+  the same barcode instead — a `_seed_known_product` helper documents
+  why, and reproduces the exact same hand-derived Health Score
+  (`fallback_local_analysis`'s deterministic keyword heuristic) the
+  original single-call version pinned. `test_scan_flow.py` and
+  `test_barcode_discovery_flow.py` gained a similar `_seed_verified_product`
+  helper (via `/scan/label-image`) for the same reason, updating six
+  further pre-existing tests whose "known product" fixture no longer
+  exists as a `200` under the new contract.
+- **Finding 2 (fail-safe defaults)**: see 11.11's own test-coverage
+  paragraph above (migration structural test, plus the real-Postgres
+  bare-INSERT verification).
+- **Finding 3 (partial analysis)**:
+  `test_standalone_label_image_null_nutrition_field_is_not_fabricated_verified`
+  extended with the new `analysisComplete`/`healthScoreAvailable`/
+  `healthScore`/`nutritionScanRequired`/`ingredientsScanRequired`/
+  `ingredients` assertions (the "ingredients-only photo" case);
+  `test_standalone_label_image_incomplete_response_still_preserves_provenance_and_no_image_bytes`
+  extends the existing success-path provenance/no-image-bytes
+  guarantees to the incomplete path;
+  `test_neither_standalone_incomplete_response_creates_a_scan_history_entry`
+  proves neither incomplete standalone path leaves a scan-history row
+  behind; `test_barcode_nutrition_plus_partial_ingredients_completes_normally`
+  proves the "already-verified nutrition + this scan's genuinely
+  verified ingredients" case returns the normal full `200`, never the
+  partial shape, once both groups are true.
+
+## 12. Project layout
 
 ```
 app/

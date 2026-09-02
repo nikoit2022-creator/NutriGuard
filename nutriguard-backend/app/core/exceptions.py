@@ -63,6 +63,21 @@ class AIServiceUnavailableError(AppError):
     status_code = 503
 
 
+class TranslationUnreliableError(AppError):
+    """
+    Raised when label/OCR text in a language other than English or
+    Bulgarian could not be translated reliably enough to persist --
+    the AI translation call failed, its response was not valid
+    structured JSON, or its own reported confidence was below the
+    minimum threshold (see `app.services.label_language`). Signals the
+    client to capture a clearer label rather than receiving fabricated
+    or low-quality translated data.
+    """
+
+    code = "LABEL_TRANSLATION_UNRELIABLE"
+    status_code = 422
+
+
 class RateLimitExceededError(AppError):
     code = "RATE_LIMIT_EXCEEDED"
     status_code = 429
