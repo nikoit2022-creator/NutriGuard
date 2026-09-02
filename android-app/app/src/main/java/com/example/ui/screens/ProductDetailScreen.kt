@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,7 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -27,7 +28,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,18 +40,34 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.IngredientEntity
+import com.example.data.model.RiskLevel
+import com.example.data.remote.dto.cleanOrNull
 import com.example.ui.components.DietaryBadgesRow
 import com.example.ui.components.HealthScoreGauge
-import com.example.ui.components.IngredientChip
 import com.example.ui.components.IngredientDetailBottomSheet
 import com.example.ui.components.PersonalizedWarningCard
 import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.NutriGuardRadius
+import com.example.ui.theme.NutriGuardScannerTheme
 import com.example.ui.theme.NutriGuardSpacing
+import com.example.ui.theme.RiskGreen
+import com.example.ui.theme.RiskOrange
+import com.example.ui.theme.RiskRed
+import com.example.ui.theme.RiskYellow
+import com.example.ui.theme.ScannerHeroMiddle
+import com.example.ui.theme.ScannerHeroStart
+import com.example.ui.theme.ScannerPageBackground
+import com.example.ui.theme.ScannerSlateMuted
+import com.example.ui.theme.ScannerSlatePrimary
+import com.example.ui.theme.ScannerSlateSecondary
+import com.example.ui.theme.ScannerSoftBorder
+import com.example.ui.theme.ScannerViolet
 import com.example.ui.viewmodel.AnalysisUiState
 import com.example.ui.viewmodel.MainViewModel
 
@@ -62,6 +79,7 @@ fun ProductDetailScreen(
     val uiState by viewModel.analysisState.collectAsState()
     var selectedIngredientForDetail by remember { mutableStateOf<IngredientEntity?>(null) }
 
+    NutriGuardScannerTheme {
     when (val state = uiState) {
         is AnalysisUiState.Loading -> {
             Box(
@@ -128,45 +146,124 @@ fun ProductDetailScreen(
         is AnalysisUiState.Success -> {
             val analysis = state.analysis
             val product = analysis.product
+            val highConcernCount = analysis.ingredients.count { it.riskLevel == RiskLevel.HIGH_CONCERN }
+            val potentialConcernCount = analysis.ingredients.count { it.riskLevel == RiskLevel.POTENTIAL_CONCERN }
+            val moderateCount = analysis.ingredients.count { it.riskLevel == RiskLevel.MODERATE }
+            val safeCount = analysis.ingredients.count { it.riskLevel == RiskLevel.SAFE }
 
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
+                    .background(ScannerPageBackground)
                     .padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(NutriGuardSpacing.lg)
             ) {
-                // Top Header Bar
+                // Product header adapted from the approved scanned-product submenu.
                 item {
                     Spacer(modifier = Modifier.height(NutriGuardSpacing.sm))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        IconButton(
-                            onClick = onBack,
-                            modifier = Modifier
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.surfaceVariant)
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Back",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(NutriGuardRadius.hero))
+                            .background(
+                                Brush.linearGradient(
+                                    colors = listOf(ScannerHeroStart, ScannerHeroMiddle)
+                                )
                             )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
+                            .border(
+                                1.dp,
+                                Color.White.copy(alpha = 0.78f),
+                                RoundedCornerShape(NutriGuardRadius.hero)
+                            )
+                    ) {
+                        Column(modifier = Modifier.padding(18.dp)) {
+                            Row(
+                                modifier = Modifier.clickable(onClick = onBack),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "Back",
+                                    tint = ScannerViolet,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "Back",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = ScannerViolet
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(18.dp))
+                            Text(
+                                text = product.brand.uppercase(),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Medium,
+                                color = ScannerViolet,
+                                letterSpacing = 1.2.sp
+                            )
                             Text(
                                 text = product.productName,
-                                style = MaterialTheme.typography.titleLarge,
+                                style = MaterialTheme.typography.headlineSmall,
                                 fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface
+                                color = ScannerSlatePrimary
                             )
                             Text(
-                                text = "${product.brand} • ${product.category}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                text = product.barcode,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = ScannerSlateMuted
                             )
+
+                            Spacer(modifier = Modifier.height(14.dp))
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if (highConcernCount > 0) {
+                                    item { RiskSummaryPill("$highConcernCount high concern", RiskRed) }
+                                }
+                                if (potentialConcernCount > 0) {
+                                    item { RiskSummaryPill("$potentialConcernCount potential", RiskOrange) }
+                                }
+                                if (moderateCount > 0) {
+                                    item { RiskSummaryPill("$moderateCount moderate", RiskYellow) }
+                                }
+                                if (safeCount > 0) {
+                                    item { RiskSummaryPill("$safeCount low concern", RiskGreen) }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Ingredient list is intentionally first, matching the approved submenu.
+                item {
+                    Text(
+                        text = "INGREDIENTS • ${analysis.ingredients.size}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Medium,
+                        color = ScannerSlateMuted,
+                        letterSpacing = 1.2.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(18.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, ScannerSoftBorder)
+                    ) {
+                        Column {
+                            analysis.ingredients.forEachIndexed { index, ingredient ->
+                                ProductIngredientRow(
+                                    ingredient = ingredient,
+                                    onClick = { selectedIngredientForDetail = ingredient }
+                                )
+                                if (index < analysis.ingredients.lastIndex) {
+                                    HorizontalDivider(
+                                        color = ScannerSoftBorder,
+                                        modifier = Modifier.padding(start = 42.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -189,7 +286,7 @@ fun ProductDetailScreen(
                             text = "Dietary Suitability",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface
+                            color = ScannerSlatePrimary
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         DietaryBadgesRow(product = product)
@@ -201,34 +298,6 @@ fun ProductDetailScreen(
                     item {
                         PersonalizedWarningCard(warnings = analysis.warnings)
                     }
-                }
-
-                // Ingredient List Breakdown
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Ingredients (${analysis.ingredients.size})",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = "Tap to view scientific profile",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                items(analysis.ingredients) { ingredient ->
-                    IngredientChip(
-                        ingredient = ingredient,
-                        onClick = { selectedIngredientForDetail = ingredient }
-                    )
                 }
 
                 // Raw OCR Text Inspection (Collapsible / Subtle Card)
@@ -305,6 +374,130 @@ fun ProductDetailScreen(
             ) {
                 Text("No analysis available.")
             }
+        }
+    }
+    }
+}
+
+@Composable
+private fun RiskSummaryPill(label: String, color: Color) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(NutriGuardRadius.pill))
+            .background(Color.White.copy(alpha = 0.72f))
+            .border(
+                1.dp,
+                color.copy(alpha = 0.20f),
+                RoundedCornerShape(NutriGuardRadius.pill)
+            )
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .clip(CircleShape)
+                .background(color)
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Medium,
+            color = color
+        )
+    }
+}
+
+@Composable
+private fun ProductIngredientRow(
+    ingredient: IngredientEntity,
+    onClick: () -> Unit
+) {
+    val riskColor = when (ingredient.riskLevel) {
+        RiskLevel.SAFE -> RiskGreen
+        RiskLevel.MODERATE -> RiskYellow
+        RiskLevel.POTENTIAL_CONCERN -> RiskOrange
+        RiskLevel.HIGH_CONCERN -> RiskRed
+    }
+    val riskLabel = when (ingredient.riskLevel) {
+        RiskLevel.SAFE -> "LOW CONCERN"
+        RiskLevel.MODERATE -> "MODERATE"
+        RiskLevel.POTENTIAL_CONCERN -> "POTENTIAL"
+        RiskLevel.HIGH_CONCERN -> "HIGH CONCERN"
+    }
+    val secondaryName = ingredient.scientificName.cleanOrNull()
+        ?: ingredient.eNumber.cleanOrNull()
+        ?: ingredient.category.cleanOrNull()
+    val explanation = ingredient.description.cleanOrNull()
+        ?: ingredient.purposeInFood.cleanOrNull()
+        ?: "Open the scientific profile for more information."
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(top = 6.dp)
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(riskColor)
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = ingredient.commonName,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = ScannerSlatePrimary
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(NutriGuardRadius.pill))
+                        .background(riskColor.copy(alpha = 0.08f))
+                        .border(
+                            1.dp,
+                            riskColor.copy(alpha = 0.30f),
+                            RoundedCornerShape(NutriGuardRadius.pill)
+                        )
+                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                ) {
+                    Text(
+                        text = riskLabel,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = riskColor
+                    )
+                }
+            }
+
+            secondaryName?.let {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = ScannerSlateMuted
+                )
+            }
+
+            Spacer(modifier = Modifier.height(5.dp))
+            Text(
+                text = explanation,
+                style = MaterialTheme.typography.bodySmall,
+                color = ScannerSlateSecondary,
+                lineHeight = 18.sp
+            )
         }
     }
 }
