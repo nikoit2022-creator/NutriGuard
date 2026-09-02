@@ -38,9 +38,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.UserHealthProfile
-import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.NutriGuardRadius
+import com.example.ui.theme.NutriGuardScannerTheme
 import com.example.ui.theme.NutriGuardSpacing
+import com.example.ui.theme.ScannerHeroStart
+import com.example.ui.theme.ScannerPageBackground
+import com.example.ui.theme.ScannerViolet
 import com.example.ui.viewmodel.MainViewModel
 
 @Composable
@@ -48,6 +51,21 @@ fun HealthProfileScreen(
     viewModel: MainViewModel,
     onNavigateToLibrary: () -> Unit = {},
     onNavigateToAdmin: () -> Unit = {}
+) {
+    NutriGuardScannerTheme {
+        HealthProfileContent(
+            viewModel = viewModel,
+            onNavigateToLibrary = onNavigateToLibrary,
+            onNavigateToAdmin = onNavigateToAdmin
+        )
+    }
+}
+
+@Composable
+private fun HealthProfileContent(
+    viewModel: MainViewModel,
+    onNavigateToLibrary: () -> Unit,
+    onNavigateToAdmin: () -> Unit
 ) {
     val profileState by viewModel.userProfile.collectAsState()
     val profile = profileState ?: UserHealthProfile()
@@ -63,6 +81,7 @@ fun HealthProfileScreen(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
+            .background(ScannerPageBackground)
             .padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(NutriGuardSpacing.lg)
     ) {
@@ -93,14 +112,14 @@ fun HealthProfileScreen(
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(NutriGuardRadius.pill))
-                        .background(EmeraldPrimary.copy(alpha = 0.12f))
+                        .background(ScannerHeroStart)
                         .padding(horizontal = 12.dp, vertical = 5.dp)
                 ) {
                     Text(
                         text = "$activeCount active filter${if (activeCount > 1) "s" else ""} applied to scans",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = EmeraldPrimary
+                        color = ScannerViolet
                     )
                 }
             }
@@ -278,13 +297,13 @@ fun HealthProfileScreen(
                             modifier = Modifier
                                 .size(40.dp)
                                 .clip(CircleShape)
-                                .background(EmeraldPrimary.copy(alpha = 0.12f)),
+                                .background(ScannerHeroStart),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Science,
                                 contentDescription = null,
-                                tint = EmeraldPrimary,
+                                tint = ScannerViolet,
                                 modifier = Modifier.size(20.dp)
                             )
                         }
@@ -399,7 +418,10 @@ private fun ProfileToggleRow(
             onCheckedChange = onCheckedChange,
             colors = SwitchDefaults.colors(
                 checkedThumbColor = MaterialTheme.colorScheme.surface,
-                checkedTrackColor = EmeraldPrimary
+                checkedTrackColor = ScannerViolet,
+                uncheckedThumbColor = MaterialTheme.colorScheme.surface,
+                uncheckedTrackColor = MaterialTheme.colorScheme.outlineVariant,
+                uncheckedBorderColor = MaterialTheme.colorScheme.outline
             )
         )
     }
