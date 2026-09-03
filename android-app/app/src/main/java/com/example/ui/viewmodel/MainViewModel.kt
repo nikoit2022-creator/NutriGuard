@@ -389,6 +389,26 @@ class MainViewModel(
         }
     }
 
+    /**
+     * Enriches the product currently open in Product Details with a
+     * newly photographed ingredient list or nutrition table. Unlike a
+     * standalone label scan, this entry point explicitly establishes
+     * [barcode] as the pending identity before delegating to the same
+     * label-image pipeline, so the backend receives both sources and
+     * upserts one product instead of creating an `img_...` record.
+     *
+     * The identity is established only after the camera produced a
+     * readable bitmap; cancelling the camera therefore cannot leave a
+     * stale pending barcode behind.
+     */
+    fun analyzeLabelImageForBarcode(bitmap: Bitmap, barcode: String) {
+        if (_barcodeLookupState.value is BarcodeLookupUiState.Searching) return
+        val normalizedBarcode = barcode.trim()
+        if (normalizedBarcode.isEmpty()) return
+        _pendingBarcode.value = normalizedBarcode
+        analyzeLabelImage(bitmap)
+    }
+
     fun updateProfile(profile: UserHealthProfile) {
         viewModelScope.launch {
             repository.saveUserProfile(profile)

@@ -322,6 +322,24 @@ class MainViewModelBarcodeTest {
     }
 
     @Test
+    fun `product details label capture explicitly enriches the same barcode product`() = runTest(testDispatcher) {
+        val fake = FakeProductAnalysisSource()
+        fake.imageResult = Result.success(sampleFullProductAnalysis(barcode = "8606107983981"))
+        val viewModel = MainViewModel(fake)
+
+        viewModel.analyzeLabelImageForBarcode(fakeBitmap(), " 8606107983981 ")
+
+        assertTrue(viewModel.barcodeLookupState.value is BarcodeLookupUiState.Searching)
+        assertEquals("8606107983981", viewModel.pendingBarcode.value)
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(1, fake.analyzeImageLabelCallCount)
+        assertEquals("8606107983981", fake.lastImageLabelBarcodeArgument)
+        assertNull(viewModel.pendingBarcode.value)
+        assertTrue(viewModel.analysisState.value is AnalysisUiState.Success)
+    }
+
+    @Test
     fun `analyzeLabelImage submits no barcode for a standalone (no pending) capture`() = runTest(testDispatcher) {
         val fake = FakeProductAnalysisSource()
         fake.imageResult = Result.success(sampleFullProductAnalysis())

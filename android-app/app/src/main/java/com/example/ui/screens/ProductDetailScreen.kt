@@ -1,5 +1,9 @@
 package com.example.ui.screens
 
+import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,6 +24,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.Button
@@ -32,6 +37,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,6 +48,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -69,15 +76,83 @@ import com.example.ui.theme.ScannerSlateSecondary
 import com.example.ui.theme.ScannerSoftBorder
 import com.example.ui.theme.ScannerViolet
 import com.example.ui.viewmodel.AnalysisUiState
+import com.example.ui.viewmodel.BarcodeLookupUiState
 import com.example.ui.viewmodel.MainViewModel
+import java.io.File
 
 @Composable
 fun ProductDetailScreen(
     viewModel: MainViewModel,
     onBack: () -> Unit
 ) {
+    val context = LocalContext.current
     val uiState by viewModel.analysisState.collectAsState()
+    val barcodeLookupState by viewModel.barcodeLookupState.collectAsState()
+    val pendingBarcode by viewModel.pendingBarcode.collectAsState()
     var selectedIngredientForDetail by remember { mutableStateOf<IngredientEntity?>(null) }
+    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingCameraFile by remember { mutableStateOf<File?>(null) }
+    var pendingEnrichmentBarcode by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            pendingCameraFile?.delete()
+            pendingCameraFile = null
+            pendingCameraUri = null
+            pendingEnrichmentBarcode = null
+        }
+    }
+
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { captured ->
+        val uri = pendingCameraUri
+        val file = pendingCameraFile
+        val barcode = pendingEnrichmentBarcode
+        pendingCameraUri = null
+        pendingCameraFile = null
+        pendingEnrichmentBarcode = null
+
+        if (captured && uri != null && barcode != null) {
+            try {
+                val bitmap = decodeCapturedBitmap(context, uri)
+                if (bitmap != null) {
+                    viewModel.analyzeLabelImageForBarcode(bitmap, barcode)
+                } else {
+                    Toast.makeText(context, "Unable to read the captured image.", Toast.LENGTH_SHORT).show()
+                }
+            } catch (_: Exception) {
+                Toast.makeText(context, "Unable to process the captured image.", Toast.LENGTH_SHORT).show()
+            } finally {
+                file?.delete()
+            }
+        } else {
+            file?.delete()
+        }
+    }
+
+    val startProductEnrichmentCapture: (String) -> Unit = { barcode ->
+        var createdFile: File? = null
+        try {
+            val photoFile = File.createTempFile("product_enrichment_", ".jpg", context.cacheDir)
+            createdFile = photoFile
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                photoFile
+            )
+            pendingCameraFile = photoFile
+            pendingCameraUri = uri
+            pendingEnrichmentBarcode = barcode
+            cameraLauncher.launch(uri)
+        } catch (_: Exception) {
+            createdFile?.delete()
+            pendingCameraFile = null
+            pendingCameraUri = null
+            pendingEnrichmentBarcode = null
+            Toast.makeText(context, "Unable to open the camera.", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     NutriGuardScannerTheme {
     when (val state = uiState) {
@@ -234,6 +309,59 @@ fun ProductDetailScreen(
                     }
                 }
 
+                if (isEnrichableProductBarcode(product.barcode)) {
+                    item {
+                        val isUploading = barcodeLookupState is BarcodeLookupUiState.Searching
+                        Column {
+                            Button(
+                                onClick = { startProductEnrichmentCapture(product.barcode) },
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !isUploading,
+                                shape = RoundedCornerShape(NutriGuardRadius.medium),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = ScannerViolet,
+                                    contentColor = Color.White,
+                                    disabledContainerColor = ScannerViolet.copy(alpha = 0.45f),
+                                    disabledContentColor = Color.White.copy(alpha = 0.85f)
+                                )
+                            ) {
+                                if (isUploading) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        color = Color.White,
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.CameraAlt,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (isUploading) "Adding label information..." else "Scan ingredients and table",
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+
+                            Text(
+                                text = productEnrichmentStatusText(
+                                    state = barcodeLookupState,
+                                    isForThisProduct = pendingBarcode == product.barcode
+                                ),
+                                modifier = Modifier.padding(top = 6.dp, start = 4.dp, end = 4.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (barcodeLookupState is BarcodeLookupUiState.Failed && pendingBarcode == product.barcode) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    ScannerSlateSecondary
+                                }
+                            )
+                        }
+                    }
+                }
+
                 // Ingredient list is intentionally first, matching the approved submenu.
                 item {
                     Text(
@@ -377,6 +505,31 @@ fun ProductDetailScreen(
         }
     }
     }
+}
+
+internal fun isEnrichableProductBarcode(barcode: String): Boolean {
+    val normalized = barcode.trim()
+    return normalized.all(Char::isDigit) && normalized.length in setOf(8, 12, 13, 14)
+}
+
+internal fun productEnrichmentStatusText(
+    state: BarcodeLookupUiState,
+    isForThisProduct: Boolean
+): String = when {
+    state is BarcodeLookupUiState.Searching && isForThisProduct ->
+        "The label is being combined with this barcode product."
+    state is BarcodeLookupUiState.LabelScanRequired && isForThisProduct -> when {
+        state.nutritionScanRequired == true && state.ingredientsScanRequired == true ->
+            "Saved to this product. Scan another side showing both the ingredient list and nutrition table."
+        state.nutritionScanRequired == true ->
+            "Ingredients were saved to this product. Scan the nutrition table to complete it."
+        state.ingredientsScanRequired == true ->
+            "Nutrition was saved to this product. Scan the ingredient list to complete it."
+        else ->
+            "The recognized information was saved to this product. You can scan another label section."
+    }
+    state is BarcodeLookupUiState.Failed && isForThisProduct -> state.message
+    else -> "Photograph the ingredient list or nutrition table. You can repeat this for another side of the package."
 }
 
 @Composable
