@@ -822,10 +822,15 @@ async def analyze_ocr_text(db: AsyncSession, user_id: uuid.UUID, raw_text: str) 
 # Merge rules (mirrors the barcode-discovery trust model in
 # `_persist_discovered_product` above, applied one layer down to
 # per-field merging rather than whole-row replacement):
-#   - A row that is already fully trusted (`is_verified` AND
-#     `has_verified_nutrition`) is NEVER modified by this path -- the
-#     label analysis is still run (so its provenance is recorded, see
-#     `_record_label_provenance`) but never allowed to overwrite it.
+#   - A row that is already fully trusted (`is_verified` -- BOTH
+#     `has_verified_nutrition` AND `has_verified_ingredients`) is only
+#     modified by a NEW attempt that itself supplies a complete group
+#     (see `_apply_label_enrichment`'s own docstring below for the
+#     current per-group refresh rules); an incomplete/invalid attempt
+#     never touches it. The label analysis is always run (so its
+#     provenance is recorded, see `_record_label_provenance`) but only a
+#     complete group is ever allowed to overwrite the corresponding
+#     already-verified group.
 #   - Otherwise, identity fields (name/brand/category/image) are kept
 #     from the existing row when already meaningful (not empty, not a
 #     known discovery placeholder like "Discovered Product"/"Unknown
@@ -1054,26 +1059,33 @@ async def _persist_enriched_product(
     all land atomically together or not at all (review round 3 finding 3).
 
     Concurrency guarantee -- stated precisely, not overclaimed (review
-    round 3 finding 3): the brand-new-row case reuses `product_repository.
-    insert_new`'s SAVEPOINT-based primary-key-conflict handling, which
-    IS genuinely safe under real concurrent transactions (verified
-    against real, separate PostgreSQL connections -- see
+    round 3 finding 3, updated for the `for_update` row lock below): the
+    brand-new-row case reuses `product_repository.insert_new`'s
+    SAVEPOINT-based primary-key-conflict handling, which IS genuinely
+    safe under real concurrent transactions (verified against real,
+    separate PostgreSQL connections -- see
     `tests/postgres/test_concurrent_enrichment_postgres.py`): two
-    concurrent enrichments of the same brand-new barcode always
-    converge on exactly one row, never a duplicate, never a crash. The
-    EXISTING-row merge path (`_apply_label_enrichment` above) is only
-    BEST EFFORT: it reads `existing`, mutates it in memory, and flushes
-    -- with no optimistic-concurrency version column on `Product`, two
-    truly concurrent enrichments of the same already-existing
-    (incomplete) row can race, and the later COMMIT wins ("last write
-    wins"), not a merge of both attempts. This does not corrupt data or
-    duplicate rows -- SQLAlchemy's identity map plus the primary-key
-    UPDATE keeps it to one row either way -- but it is not linearizable.
-    Closing that gap would need a version/`xmin`-based optimistic lock
-    on `Product`, which is a real schema change deliberately left out of
-    this PR's scope; see the Postgres test file for the concurrent-INSERT
-    guarantee that IS proven, and this docstring as the honest statement
-    of what is not.
+    concurrent enrichments of the same brand-new barcode always converge
+    on exactly one row, never a duplicate, never a crash. The
+    EXISTING-row merge path (`_apply_label_enrichment` above) is
+    protected the same way on PostgreSQL: `_finalize_barcode_enrichment`
+    fetches `existing` via `product_repository.
+    get_by_barcode_or_aliases(..., for_update=True)`, a `SELECT ... FOR
+    UPDATE` that holds a real row lock for the rest of the attempt. A
+    second concurrent attempt against the same row blocks on that lock
+    until the first commits, then reads the first's already-persisted
+    result before applying its own -- so two attempts that each
+    complete a DIFFERENT evidence group (one ingredients, one nutrition)
+    both survive, never "last write wins" silently discarding one
+    (verified against real, separate PostgreSQL connections -- see
+    `test_concurrent_enrichment_of_the_same_existing_row_preserves_both_groups`
+    in the same Postgres test file). This is a real row lock, not an
+    application-level merge: it serializes concurrent attempts against
+    the same existing row rather than running them in parallel, and (like
+    any `FOR UPDATE`) is only as strong as the database session actually
+    holding it -- SQLite (the default `pytest -q` suite) accepts
+    `with_for_update()` without enforcing it, so this guarantee is
+    PostgreSQL-only, exactly like the brand-new-row guarantee above.
     """
     if existing is None:
         candidate = _new_product_from_label(
