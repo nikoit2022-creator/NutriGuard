@@ -66,6 +66,7 @@ def _full_gemini_payload(**overrides) -> dict:
         "sugarGrams": 12.0,
         "sodiumMg": 40.0,
         "saturatedFatGrams": 0.0,
+        "nutritionBasis": "PER_100_ML",
         "hasArtificialSweeteners": False,
         "hasPreservatives": True,
         "isGlutenFree": True,
@@ -278,17 +279,17 @@ async def test_repeated_enrichment_of_same_barcode_is_idempotent(app_client, mon
 
     resp2 = await _upload(app_client, headers, barcode=UNKNOWN_BARCODE_4)
     assert resp2.status_code == 200
-    assert resp2.json()["isFromDatabaseCache"] is True
+    assert resp2.json()["isFromDatabaseCache"] is False
     assert resp2.json()["product"]["productName"] == resp1.json()["product"]["productName"]
 
     assert await _product_count(db_session, UNKNOWN_BARCODE_4) == 1
 
 
-# --- 7. Verified data is never overwritten by lower-confidence OCR --------
+# --- 7. A complete first-party label scan refreshes verified evidence -----
 
 
 @pytest.mark.asyncio
-async def test_verified_local_data_is_not_overwritten_by_ocr(app_client, monkeypatch, db_session):
+async def test_verified_product_is_refreshed_by_complete_user_label_scan(app_client, monkeypatch, db_session):
     verified = Product(
         barcode=UNKNOWN_BARCODE_5,
         product_name="Trusted Verified Product",
@@ -318,8 +319,9 @@ async def test_verified_local_data_is_not_overwritten_by_ocr(app_client, monkeyp
     body = resp.json()
     assert body["product"]["productName"] == "Trusted Verified Product"
     assert body["product"]["brand"] == "TrustedBrand"
-    assert body["product"]["sugarGrams"] == 5.5
-    assert body["isFromDatabaseCache"] is True
+    assert body["product"]["sugarGrams"] == 99.0
+    assert body["product"]["nutritionBasis"] == "PER_100_ML"
+    assert body["isFromDatabaseCache"] is False
 
     assert await _product_count(db_session, UNKNOWN_BARCODE_5) == 1
 
@@ -1136,11 +1138,11 @@ async def test_barcode_ingredients_plus_later_nutrition_only_photo_completes_pro
     db_session.add(from_discovery)
     await db_session.commit()
 
-    # This attempt's raw text is irrelevant -- ingredients are already
-    # verified and locked, so it must never be applied.
+    # A complete first-party label scan refreshes the ingredient group;
+    # the nutrition values from the same scan complete the other group.
     _mock_full_gemini(
         monkeypatch,
-        rawIngredientText="Completely Different Text, Should Be Ignored",
+        rawIngredientText="",
         ingredients=[],
         sugarGrams=8.0,
         sodiumMg=60.0,
@@ -1151,7 +1153,7 @@ async def test_barcode_ingredients_plus_later_nutrition_only_photo_completes_pro
     resp = await _upload(app_client, headers, barcode=barcode)
     assert resp.status_code == 200
     body = resp.json()
-    assert body["product"]["rawIngredientText"] == "Water, Sugar, Salt"  # ORIGINAL, untouched
+    assert body["product"]["rawIngredientText"] == "Water, Sugar, Salt"
     assert body["product"]["sugarGrams"] == 8.0
 
     db_session.expire_all()
@@ -1192,7 +1194,7 @@ async def test_two_separate_label_scans_with_complementary_evidence_complete_pro
 
     _mock_full_gemini(
         monkeypatch,
-        rawIngredientText="This text must be ignored entirely",
+        rawIngredientText="",
         ingredients=[],
         sugarGrams=9.0,
         sodiumMg=90.0,
@@ -1355,7 +1357,7 @@ async def test_subsequent_barcode_lookup_returns_the_completed_product(app_clien
     assert lookup_resp.status_code == 200
     body = lookup_resp.json()
     assert body["isFromDatabaseCache"] is True
-    assert body["product"]["sugarGrams"] == 5.0
+    assert body["product"]["sugarGrams"] == 12.0
     assert "Water" in body["product"]["rawIngredientText"]
 
 
@@ -1396,7 +1398,7 @@ async def test_upc_a_ean13_alias_still_enriches_same_row_for_cumulative_complete
     assert resp.status_code == 200
     body = resp.json()
     assert body["product"]["barcode"] == upc_a_barcode  # enriched the ORIGINAL row
-    assert body["product"]["sugarGrams"] == 6.0
+    assert body["product"]["sugarGrams"] == 12.0
 
     assert await _product_count(db_session, upc_a_barcode) == 1
     assert await _product_count(db_session, ean13_equivalent) == 0
@@ -1414,12 +1416,12 @@ async def test_repeated_cumulative_enrichment_calls_remain_idempotent(app_client
 
     resp2 = await _upload(app_client, headers, barcode=barcode)
     assert resp2.status_code == 200
-    assert resp2.json()["isFromDatabaseCache"] is True
+    assert resp2.json()["isFromDatabaseCache"] is False
     assert resp2.json()["product"]["sugarGrams"] == resp1.json()["product"]["sugarGrams"]
 
     resp3 = await _upload(app_client, headers, barcode=barcode)
     assert resp3.status_code == 200
-    assert resp3.json()["isFromDatabaseCache"] is True
+    assert resp3.json()["isFromDatabaseCache"] is False
 
     assert await _product_count(db_session, barcode) == 1
 
@@ -1659,8 +1661,10 @@ async def test_barcode_nutrition_plus_partial_ingredients_completes_normally(
     stored = await db_session.get(Product, barcode)
     assert stored.is_verified is True
     assert stored.has_verified_ingredients is True
-    # Nutrition was already verified and must be UNCHANGED by this call.
-    assert float(stored.sugar_grams) == 4.0
+    # A complete, basis-qualified first-party label panel refreshes older
+    # provider nutrition while preserving the single canonical row.
+    assert float(stored.sugar_grams) == 12.0
+    assert stored.nutrition_basis == "PER_100_ML"
 
 
 @pytest.mark.asyncio
@@ -1778,7 +1782,14 @@ async def test_ocr_text_with_barcode_then_label_image_completes_the_product(app_
     assert ocr_resp.json()["error"]["details"]["ingredientsScanRequired"] is False
     assert ocr_resp.json()["error"]["details"]["nutritionScanRequired"] is True
 
-    _mock_full_gemini(monkeypatch, sugarGrams=1.0, sodiumMg=1.0, saturatedFatGrams=1.0)
+    _mock_full_gemini(
+        monkeypatch,
+        rawIngredientText="",
+        ingredients=[],
+        sugarGrams=1.0,
+        sodiumMg=1.0,
+        saturatedFatGrams=1.0,
+    )
     resp = await _upload(app_client, headers, barcode=barcode)
     assert resp.status_code == 200
     assert resp.json()["product"]["barcode"] == barcode

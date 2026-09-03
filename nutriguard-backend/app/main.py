@@ -58,6 +58,7 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def request_context_middleware(request: Request, call_next):
         request_id = str(uuid.uuid4())
+        request.state.request_id = request_id
         start = time.perf_counter()
         structlog.contextvars.bind_contextvars(request_id=request_id, path=request.url.path)
         try:

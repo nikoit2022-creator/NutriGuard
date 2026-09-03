@@ -116,6 +116,33 @@ _NUTRITION_FIELD_BOUNDS: dict[str, float] = {
     "saturatedFatGrams": _MAX_SATURATED_FAT_GRAMS_PER_100G,
 }
 
+_SUPPORTED_NUTRITION_BASES = {"PER_100_G", "PER_100_ML"}
+_ALL_NUTRITION_BASES = _SUPPORTED_NUTRITION_BASES | {"PER_SERVING", "UNKNOWN"}
+
+
+def _nutrition_basis(payload: dict) -> str:
+    value = payload.get("nutritionBasis")
+    if not isinstance(value, str):
+        return "UNKNOWN"
+    normalized = value.strip().upper()
+    return normalized if normalized in _ALL_NUTRITION_BASES else "UNKNOWN"
+
+
+def _optional_positive_number(payload: dict, key: str) -> float | None:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    numeric = float(value)
+    return numeric if math.isfinite(numeric) and numeric > 0 else None
+
+
+def _optional_unit(payload: dict) -> str | None:
+    value = payload.get("servingUnit")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized if normalized in {"g", "ml"} else None
+
 
 def _is_trustworthy_nutrition_number(value: Any, *, max_value: float) -> bool:
     """
@@ -180,10 +207,20 @@ class LabelFieldValidity:
     sodium_valid: bool = False
     saturated_fat_valid: bool = False
     nova_valid: bool = False
+    # True by default for backwards-compatible direct construction in
+    # internal callers/tests that already represent legacy per-100g
+    # evidence. label_field_validity() always sets this explicitly from
+    # the model response and rejects a missing/unknown basis.
+    nutrition_basis_valid: bool = True
 
     @property
     def all_valid(self) -> bool:
-        return self.sugar_valid and self.sodium_valid and self.saturated_fat_valid
+        return (
+            self.sugar_valid
+            and self.sodium_valid
+            and self.saturated_fat_valid
+            and self.nutrition_basis_valid
+        )
 
 
 def _safe_nutrition_value(payload: dict, key: str, max_value: float) -> float:
@@ -252,6 +289,7 @@ def label_field_validity(json_string: str) -> LabelFieldValidity:
             payload.get("saturatedFatGrams"), max_value=_MAX_SATURATED_FAT_GRAMS_PER_100G
         ),
         nova_valid=_is_valid_nova_group(payload.get("novaGroup")),
+        nutrition_basis_valid=_nutrition_basis(payload) in _SUPPORTED_NUTRITION_BASES,
     )
 
 
@@ -333,7 +371,13 @@ def parse_gemini_image_json_result(
     raw_text = payload.get("rawIngredientText")
     if not isinstance(product_name, str) or not product_name.strip():
         return None
-    if not isinstance(raw_text, str) or not raw_text.strip():
+    if not isinstance(raw_text, str):
+        return None
+    # A nutrition-panel-only photo is useful even when it contains no
+    # ingredient list. It is accepted only when all three values and their
+    # per-100 basis are independently valid; otherwise an empty label result
+    # remains unusable.
+    if not raw_text.strip() and not label_field_validity(json_string).all_valid:
         return None
 
     gemini_ingredients = payload.get("ingredients")
@@ -383,5 +427,8 @@ def parse_gemini_image_json_result(
         # "None" as a fabricated confirmed-absence claim -- see
         # `_extract_allergens_text`.
         allergens_detected=_extract_allergens_text(payload),
+        nutrition_basis=_nutrition_basis(payload),
+        serving_size=_optional_positive_number(payload, "servingSize"),
+        serving_unit=_optional_unit(payload),
     )
     return data, ingredients

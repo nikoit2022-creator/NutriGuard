@@ -39,7 +39,9 @@ async def upsert(db: AsyncSession, product: Product) -> Product:
     return merged
 
 
-async def get_by_barcode_or_aliases(db: AsyncSession, raw: str, alias_keys: list[str]) -> Product | None:
+async def get_by_barcode_or_aliases(
+    db: AsyncSession, raw: str, alias_keys: list[str], *, for_update: bool = False
+) -> Product | None:
     """
     Barcode-scan lookup used by `food_analysis.analyze_barcode`: tries
     the exact string the client sent first (matches a legacy/pre-
@@ -59,13 +61,20 @@ async def get_by_barcode_or_aliases(db: AsyncSession, raw: str, alias_keys: list
     a row from before that convention (or written by another path)
     might not be, and must still be found rather than duplicated.
     """
-    product = await get_by_barcode(db, raw)
+    async def _get(key: str) -> Product | None:
+        stmt = select(Product).where(Product.barcode == key).limit(1)
+        if for_update:
+            stmt = stmt.with_for_update()
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    product = await _get(raw)
     if product is not None:
         return product
     for key in alias_keys:
         if key == raw:
             continue
-        product = await get_by_barcode(db, key)
+        product = await _get(key)
         if product is not None:
             return product
     return None

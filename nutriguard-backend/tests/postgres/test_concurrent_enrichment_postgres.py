@@ -87,6 +87,7 @@ async def test_concurrent_enrichment_of_the_same_new_barcode_converges_on_one_ro
         "sugarGrams": 5.0,
         "sodiumMg": 50.0,
         "saturatedFatGrams": 1.0,
+        "nutritionBasis": "PER_100_G",
         "hasArtificialSweeteners": False,
         "hasPreservatives": False,
         "isGlutenFree": True,

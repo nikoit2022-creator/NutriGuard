@@ -42,6 +42,7 @@ async def _seed_verified_product(
         "sugarGrams": sugar_grams,
         "sodiumMg": sodium_mg,
         "saturatedFatGrams": saturated_fat_grams,
+        "nutritionBasis": "PER_100_G",
     }
 
     async def fake_analyze_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:

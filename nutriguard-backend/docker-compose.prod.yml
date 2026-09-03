@@ -18,8 +18,12 @@ services:
     restart: always
 
   backend:
-    volumes: []
+    volumes:
+      - scan_diagnostics:/var/log/nutriguard
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
     restart: always
     environment:
       ENVIRONMENT: production
+
+volumes:
+  scan_diagnostics:

@@ -35,6 +35,14 @@ class Product(Base):
     saturated_fat_grams: Mapped[float] = mapped_column(
         "saturated_fat_grams", Numeric(6, 2), nullable=False, default=0
     )
+    # Basis printed on the nutrition panel. UNKNOWN deliberately blocks
+    # verification/scoring for new label scans; PER_SERVING is preserved
+    # but is never converted without a reliable serving quantity.
+    nutrition_basis: Mapped[str] = mapped_column(
+        "nutrition_basis", String(16), nullable=False, default="UNKNOWN", server_default="UNKNOWN"
+    )
+    serving_size: Mapped[float | None] = mapped_column("serving_size", Numeric(8, 2), nullable=True)
+    serving_unit: Mapped[str | None] = mapped_column("serving_unit", String(16), nullable=True)
     has_artificial_sweeteners: Mapped[bool] = mapped_column(
         "has_artificial_sweeteners", Boolean, default=False
     )

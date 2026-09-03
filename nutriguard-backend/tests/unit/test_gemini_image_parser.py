@@ -14,6 +14,7 @@ def test_valid_json_uses_gemini_nutrition_and_flags_directly():
         "sugarGrams": 0.0,
         "sodiumMg": 15.0,
         "saturatedFatGrams": 0.0,
+        "nutritionBasis": "PER_100_ML",
         "hasArtificialSweeteners": True,
         "hasPreservatives": False,
         "isGlutenFree": True,
@@ -39,6 +40,7 @@ def test_valid_json_uses_gemini_nutrition_and_flags_directly():
     assert data.sugar_grams == 0.0
     assert data.sodium_mg == 15.0
     assert data.saturated_fat_grams == 0.0
+    assert data.nutrition_basis == "PER_100_ML"
     assert data.has_artificial_sweeteners is True
     assert data.has_preservatives is False
     assert data.nova_group == 4
@@ -221,7 +223,12 @@ def test_malformed_numeric_field_falls_back_to_default_without_raising():
 # types (strings, placeholders) must all be rejected; a genuinely
 # explicit `0` must still be accepted.
 
-_COMPLETE_VALID_NUTRITION = {"sugarGrams": 12.5, "sodiumMg": 200.0, "saturatedFatGrams": 1.5}
+_COMPLETE_VALID_NUTRITION = {
+    "sugarGrams": 12.5,
+    "sodiumMg": 200.0,
+    "saturatedFatGrams": 1.5,
+    "nutritionBasis": "PER_100_G",
+}
 
 
 def _with_field(base: dict, key: str, value) -> str:
@@ -235,8 +242,23 @@ def test_nutrition_fields_present_true_for_valid_complete_nutrition():
 
 
 def test_nutrition_fields_present_true_for_zero_but_explicit_values():
-    payload = {"sugarGrams": 0.0, "sodiumMg": 0, "saturatedFatGrams": 0.0}
+    payload = {
+        "sugarGrams": 0.0,
+        "sodiumMg": 0,
+        "saturatedFatGrams": 0.0,
+        "nutritionBasis": "PER_100_G",
+    }
     assert nutrition_fields_present(json.dumps(payload)) is True
+
+
+def test_nutrition_basis_accepts_per_100g_and_per_100ml_only_for_scoring():
+    for basis in ("PER_100_G", "PER_100_ML"):
+        payload = {**_COMPLETE_VALID_NUTRITION, "nutritionBasis": basis}
+        assert nutrition_fields_present(json.dumps(payload)) is True
+
+    for basis in ("PER_SERVING", "UNKNOWN", None, "per package"):
+        payload = {**_COMPLETE_VALID_NUTRITION, "nutritionBasis": basis}
+        assert nutrition_fields_present(json.dumps(payload)) is False
 
 
 def test_nutrition_fields_present_false_when_any_missing():

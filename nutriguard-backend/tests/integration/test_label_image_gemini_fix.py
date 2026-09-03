@@ -40,6 +40,7 @@ async def test_valid_gemini_json_is_used_end_to_end(app_client, monkeypatch):
         "sugarGrams": 0.0,
         "sodiumMg": 200.0,
         "saturatedFatGrams": 0.0,
+        "nutritionBasis": "PER_100_ML",
         "hasArtificialSweeteners": True,
         "hasPreservatives": True,
         "isGlutenFree": True,
@@ -107,6 +108,7 @@ async def test_unusable_gemini_ingredient_objects_fall_back_to_raw_text(app_clie
         "sugarGrams": 0.0,
         "sodiumMg": 1.0,
         "saturatedFatGrams": 0.0,
+        "nutritionBasis": "PER_100_G",
         "novaGroup": 1,
     }
 

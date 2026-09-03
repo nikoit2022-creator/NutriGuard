@@ -118,6 +118,7 @@ async def test_local_database_hit_makes_no_external_request(app_client, monkeypa
                 "sugarGrams": 2.0,
                 "sodiumMg": 450.0,
                 "saturatedFatGrams": 0.5,
+                "nutritionBasis": "PER_100_G",
             }
         )
 

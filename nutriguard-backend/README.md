@@ -1776,6 +1776,37 @@ a disposable container — see the PR/final report for the transcript.
   verified ingredients" case returns the normal full `200`, never the
   partial shape, once both groups are true.
 
+## 11.12 Canonical label evidence, nutrition basis, and test diagnostics
+
+- A supplied barcode remains the product's canonical identity. UPC-A and
+  EAN-13 aliases still resolve to one row. A complete first-party label scan
+  may refresh an already verified provider group; incomplete or invalid
+  evidence never erases a verified group. Ingredient lists are replaced as a
+  group rather than blindly unioned, while nutrition and ingredients can still
+  be completed by separate photos.
+- Synthetic ingredient IDs remain internal. When a product is read back, the
+  backend reconstructs the display name from `raw_ingredient_text`; legacy
+  hash-only IDs fall back to `Ingredient detected on label`, never a visible
+  `Synth_<hash>` label.
+- Products now record `nutritionBasis` (`PER_100_G`, `PER_100_ML`,
+  `PER_SERVING`, or `UNKNOWN`) plus optional `servingSize`/`servingUnit`.
+  Label nutrition is Health-Score eligible only with all three trusted values
+  and an explicit `PER_100_G` or `PER_100_ML` basis. Per-serving/unknown data
+  is preserved but never guessed or converted. Migration `b2c3d4e5f6a7`
+  backfills already-verified legacy rows as `PER_100_G` under the former API
+  contract.
+- Temporary scan diagnostics are opt-in with
+  `SCAN_DIAGNOSTICS_ENABLED=true`. One compact JSON line is written per label
+  image scan to a persistent Docker volume. Rotation defaults to 1 MiB plus
+  one backup. The journal never contains image bytes, full OCR text, model
+  responses, credentials, user IDs, or health-profile data.
+
+Verification for this change: `python -m pytest -q` -> 326 passed, 1 skipped.
+The tracked OpenAPI snapshot matches a runtime regeneration exactly, and
+`alembic upgrade head --sql` completes with a single head at `b2c3d4e5f6a7`.
+The opt-in real-PostgreSQL concurrency/migration test remains the one skipped
+test and must be rerun on the deployment VM before rollout.
+
 ## 12. Project layout
 
 ```

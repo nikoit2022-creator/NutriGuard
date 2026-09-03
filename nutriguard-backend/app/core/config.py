@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     # --- Uploads ---
     MAX_IMAGE_SIZE_BYTES: int = 8 * 1024 * 1024  # 8 MB, matches client JPEG q80 compression
 
+    # --- Temporary, bounded scan diagnostics ---
+    SCAN_DIAGNOSTICS_ENABLED: bool = False
+    SCAN_DIAGNOSTICS_PATH: str = "/var/log/nutriguard/scan-diagnostics.jsonl"
+    SCAN_DIAGNOSTICS_MAX_BYTES: int = 1024 * 1024
+    SCAN_DIAGNOSTICS_BACKUP_COUNT: int = 1
+
     # --- Rate limiting (requests per window, per identity) ---
     RATE_LIMIT_SCAN_PER_HOUR: int = 30
     RATE_LIMIT_READ_PER_HOUR: int = 300

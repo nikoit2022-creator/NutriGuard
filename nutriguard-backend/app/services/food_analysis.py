@@ -112,7 +112,12 @@ from app.services.gemini_image_parser import parse_gemini_image_json_result
 from app.services.gemini_result_parser import parse_gemini_json_result
 from app.services import label_language
 from app.services.label_language import LabelTextResult, resolve_label_text
-from app.services.ocr_normalizer import create_synthetic_ingredient, match_against_database, normalize_and_extract_tokens
+from app.services.ocr_normalizer import (
+    create_synthetic_ingredient,
+    match_against_database,
+    normalize_and_extract_tokens,
+    reconstruct_synthetic_ingredient,
+)
 from app.services.warning_engine import HealthWarning
 
 logger = structlog.get_logger(__name__)
@@ -179,6 +184,9 @@ def _to_product_model(
         sugar_grams=data.sugar_grams,
         sodium_mg=data.sodium_mg,
         saturated_fat_grams=data.saturated_fat_grams,
+        nutrition_basis=data.nutrition_basis,
+        serving_size=data.serving_size,
+        serving_unit=data.serving_unit,
         has_artificial_sweeteners=data.has_artificial_sweeteners,
         has_preservatives=data.has_preservatives,
         is_gluten_free=data.is_gluten_free,
@@ -222,6 +230,9 @@ def _apply_discovered_fields(
     existing.sugar_grams = data.sugar_grams
     existing.sodium_mg = data.sodium_mg
     existing.saturated_fat_grams = data.saturated_fat_grams
+    existing.nutrition_basis = data.nutrition_basis
+    existing.serving_size = data.serving_size
+    existing.serving_unit = data.serving_unit
     existing.has_artificial_sweeteners = data.has_artificial_sweeteners
     existing.has_preservatives = data.has_preservatives
     existing.is_gluten_free = data.is_gluten_free
@@ -327,6 +338,7 @@ def _to_analyzed_data_from_discovery(
         is_halal=flags.get("is_halal", False),
         is_kosher=flags.get("is_kosher", False),
         allergens_detected=allergens_text,
+        nutrition_basis="PER_100_G" if nutrition_known else "UNKNOWN",
     )
     return data, ingredient_list, nutrition_known, ingredients_known
 
@@ -579,9 +591,8 @@ async def fetch_ingredients_for_product(db: AsyncSession, product: Product) -> l
     Mirrors FoodAnalysisRepository.fetchIngredientsForProduct: resolves
     each comma-separated id against the scientific database, and
     reconstructs a synthetic ingredient on the fly for any id that isn't
-    found there (matching the client's lossy-but-intentional behavior of
-    calling `OcrNormalizer.createSyntheticIngredient(id)` with the raw id
-    string when no DB row exists).
+    found there. Reconstruction uses the persisted raw label text so an
+    internal `synth_*` key is never exposed as the human-facing name.
     """
     if not product.ingredient_ids:
         return []
@@ -598,7 +609,7 @@ async def fetch_ingredients_for_product(db: AsyncSession, product: Product) -> l
         if ingredient_id in by_id:
             resolved.append(by_id[ingredient_id])
         else:
-            resolved.append(create_synthetic_ingredient(ingredient_id))
+            resolved.append(reconstruct_synthetic_ingredient(ingredient_id, product.raw_ingredient_text))
     return resolved
 
 
@@ -880,10 +891,9 @@ def _apply_label_enrichment(
     source_label: str,
 ) -> None:
     """
-    Mutates `existing` IN PLACE, filling only what it is missing --
-    see the merge rules in the section docstring above. Never called
-    for a row that is already `is_verified` (see
-    `_persist_enriched_product`). Does NOT commit -- the caller
+    Mutates `existing` IN PLACE. Complete first-party label evidence may
+    refresh the corresponding group; incomplete evidence only fills missing
+    fields and never erases a verified group. Does NOT commit -- the caller
     controls the single outer-transaction commit point (review round 3
     finding 3; see `_finalize_barcode_enrichment`).
 
@@ -928,7 +938,15 @@ def _apply_label_enrichment(
 
     newly_completed_group = False
 
-    if not existing.has_verified_ingredients:
+    ingredients_complete_this_scan = _ingredients_group_is_complete(data, ingredients_trustworthy)
+    nutrition_complete_this_scan = _nutrition_group_is_complete(validity)
+
+    # A user-requested label scan is newer first-party evidence. A complete
+    # group replaces that group even when a provider previously marked the
+    # product complete; an incomplete/invalid group never erases verified
+    # evidence. Ingredient lists are replaced (not unioned) so removed or
+    # corrected label items do not linger forever.
+    if ingredients_complete_this_scan or not existing.has_verified_ingredients:
         existing.raw_ingredient_text = data.raw_ingredient_text
         existing.ingredient_ids = _ingredient_ids_string(ingredients)
         if validity.nova_valid:
@@ -946,14 +964,14 @@ def _apply_label_enrichment(
         # `gemini_image_parser._extract_allergens_text`) must never
         # erase an allergen list a previous attempt already established
         # (review round 3 finding 3).
-        if not _is_meaningful_identity(existing.allergens_detected):
+        if _is_meaningful_identity(data.allergens_detected):
             existing.allergens_detected = data.allergens_detected
 
-        if _ingredients_group_is_complete(data, ingredients_trustworthy):
+        if ingredients_complete_this_scan:
             existing.has_verified_ingredients = True
             newly_completed_group = True
 
-    if not existing.has_verified_nutrition:
+    if nutrition_complete_this_scan or not existing.has_verified_nutrition:
         if validity.sugar_valid:
             existing.sugar_grams = data.sugar_grams
         if validity.sodium_valid:
@@ -961,7 +979,10 @@ def _apply_label_enrichment(
         if validity.saturated_fat_valid:
             existing.saturated_fat_grams = data.saturated_fat_grams
 
-        if _nutrition_group_is_complete(validity):
+        if nutrition_complete_this_scan:
+            existing.nutrition_basis = data.nutrition_basis
+            existing.serving_size = data.serving_size
+            existing.serving_unit = data.serving_unit
             existing.has_verified_nutrition = True
             newly_completed_group = True
 
@@ -1023,10 +1044,9 @@ async def _persist_enriched_product(
 ) -> tuple[Product, bool]:
     """
     Insert-or-merge for one barcode + label analysis. Returns
-    `(product, used_label_analysis)` -- `used_label_analysis` is False
-    only when an already fully-trusted row (`is_verified` -- BOTH
-    evidence groups, see V11 above) made the fresh label analysis
-    unnecessary.
+    `(product, used_label_analysis)`. A caller explicitly submitted fresh
+    label evidence, so the second value is True whenever persistence succeeds;
+    complete groups may refresh an already-verified provider product.
 
     Deliberately does NOT commit: the caller
     (`_finalize_barcode_enrichment`) owns the single outer-transaction
@@ -1066,9 +1086,6 @@ async def _persist_enriched_product(
         existing = await product_repository.get_by_barcode(db, canonical_barcode)
         if existing is None:
             raise AIServiceUnavailableError("Could not persist the enriched product.")
-
-    if existing.is_verified:
-        return existing, False
 
     _apply_label_enrichment(existing, data, ingredients, validity, ingredients_trustworthy, source_label)
     await db.flush()
@@ -1201,7 +1218,7 @@ async def _run_label_image_pipeline(
         if parsed is not None:
             data, ingredients = parsed
             validity = gemini_image_parser.label_field_validity(raw_response)
-            ingredients_trustworthy = True
+            ingredients_trustworthy = bool(data.raw_ingredient_text.strip())
         else:
             logger.info("gemini_image_json_invalid_falling_back")
 
@@ -1267,23 +1284,16 @@ async def _finalize_barcode_enrichment(
     """
     canonical_barcode = barcode_info.gtin13
     alias_keys = barcode_validation.alias_keys(barcode_info)
-    existing = await product_repository.get_by_barcode_or_aliases(db, barcode_raw, alias_keys)
-
-    # V11 (PR #9 review round 4, finding 1): when the INGREDIENTS group
-    # is already verified and locked, this attempt's ingredient text is
-    # never going to be applied at all (see `_apply_label_enrichment`'s
-    # `if not existing.has_verified_ingredients` gate) -- so demanding a
-    # successful STRICT translation for text that will be discarded
-    # regardless is both wasted work and a spurious failure mode (e.g. a
-    # nutrition-only photo whose incidental OCR leftovers don't
-    # confidently classify as English must never block completing the
-    # NUTRITION group with a translation error). Lenient mode still
-    # applies the language policy and still contributes usable
-    # provenance text; it just never raises.
-    ingredients_already_locked = existing is not None and existing.has_verified_ingredients
-    label_result = await resolve_label_text(
-        data.raw_ingredient_text, strict=not ingredients_already_locked
+    existing = await product_repository.get_by_barcode_or_aliases(
+        db, barcode_raw, alias_keys, for_update=True
     )
+
+    # Empty raw ingredient text means this is a nutrition-panel-only photo:
+    # there is nothing to translate or replace. Real ingredient text always
+    # receives the strict EN/BG/translation policy, including when it refreshes
+    # a previously verified provider list.
+    has_label_ingredients = bool(data.raw_ingredient_text.strip())
+    label_result = await resolve_label_text(data.raw_ingredient_text, strict=has_label_ingredients)
 
     # Review finding 6: canonical ingredient normalization runs for ANY
     # real language content -- English, Bulgarian, or mixed EN/BG, and
@@ -1296,9 +1306,7 @@ async def _finalize_barcode_enrichment(
     # `label_language.bulgarian_ingredient_alias`) and could never
     # dedupe against an equivalent English mention. Only a genuinely
     # empty/"unknown" result (nothing tokenizable at all) is skipped.
-    # Skipped entirely when ingredients are already locked -- rebuilding
-    # an ingredient list that will never be applied is pure waste.
-    if not ingredients_already_locked and label_result.detected_language != "unknown" and label_result.canonical_text.strip():
+    if has_label_ingredients and label_result.detected_language != "unknown" and label_result.canonical_text.strip():
         tokens = normalize_and_extract_tokens(label_result.canonical_text)
         # Bulgarian ingredient-list tokens are aliased to their English
         # canonical form for MATCHING purposes only -- an English and a

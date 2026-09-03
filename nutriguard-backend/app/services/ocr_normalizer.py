@@ -7,7 +7,7 @@ section 7.3).
 """
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from app.models.enums import RiskLevel
@@ -174,3 +174,26 @@ def create_synthetic_ingredient(name: str) -> SyntheticIngredient:
         bad_for_hypertension=any(kw in lower for kw in ("sodium", "salt", "msg")),
         bad_for_high_cholesterol=any(kw in lower for kw in ("palm", "fat", "hydrogenated")),
     )
+
+
+def reconstruct_synthetic_ingredient(ingredient_id: str, raw_text: str) -> SyntheticIngredient:
+    """Recover a synthetic ingredient's human label from persisted OCR text.
+
+    Products historically stored only synthetic IDs. Rebuilding directly
+    from that ID exposed implementation strings such as ``Synth_5ecbec8146``
+    to users and permanently lost Cyrillic names. Recreate each raw token and
+    match its deterministic ID first; use a readable legacy fallback only
+    when the original token is genuinely unavailable.
+    """
+    for token in normalize_and_extract_tokens(raw_text or ""):
+        candidate = create_synthetic_ingredient(token)
+        if candidate.id == ingredient_id:
+            return candidate
+
+    slug = ingredient_id.removeprefix("synth_")
+    if slug and not re.fullmatch(r"[0-9a-f]{10}", slug):
+        readable = re.sub(r"_+", " ", slug).strip()
+        if readable:
+            return replace(create_synthetic_ingredient(readable), id=ingredient_id)
+
+    return replace(create_synthetic_ingredient("Ingredient detected on label"), id=ingredient_id)
