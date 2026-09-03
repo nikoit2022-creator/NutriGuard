@@ -23,6 +23,9 @@ class ProductOut(ORMModel):
     sugar_grams: float
     sodium_mg: float
     saturated_fat_grams: float
+    nutrition_basis: str = "UNKNOWN"
+    serving_size: float | None = None
+    serving_unit: str | None = None
     has_artificial_sweeteners: bool
     has_preservatives: bool
 

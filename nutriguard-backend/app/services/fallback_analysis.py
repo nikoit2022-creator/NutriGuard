@@ -41,6 +41,9 @@ class AnalyzedProductData:
     is_halal: bool
     is_kosher: bool
     allergens_detected: str
+    nutrition_basis: str = "UNKNOWN"
+    serving_size: float | None = None
+    serving_unit: str | None = None
 
 
 def fallback_local_analysis(

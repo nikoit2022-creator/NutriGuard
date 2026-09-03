@@ -13,6 +13,7 @@ class FakeProduct:
     sugar_grams: float = 0.0
     sodium_mg: float = 0.0
     saturated_fat_grams: float = 0.0
+    nutrition_basis: str = "PER_100_G"
     is_gluten_free: bool = True
     is_lactose_free: bool = True
     is_vegan: bool = True
@@ -59,6 +60,12 @@ def test_diabetes_sugar_high_above_15():
     warnings = generate_warnings(product, [], make_profile(has_diabetes=True))
     matches = find(warnings, "Diabetes")
     assert matches[0].severity == WarningSeverity.HIGH
+
+
+def test_nutrition_warning_uses_per_100ml_basis_for_beverage():
+    product = FakeProduct(sugar_grams=8.0, nutrition_basis="PER_100_ML")
+    warning = find(generate_warnings(product, [], make_profile(has_diabetes=True)), "Diabetes")[0]
+    assert "per 100 ml" in warning.description
 
 
 def test_diabetes_ingredient_flag():

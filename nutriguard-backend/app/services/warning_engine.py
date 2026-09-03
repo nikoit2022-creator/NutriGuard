@@ -35,8 +35,13 @@ class HealthWarning:
     severity: WarningSeverity
 
 
+def _nutrition_basis_label(product: Any) -> str:
+    return "100 ml" if getattr(product, "nutrition_basis", "PER_100_G") == "PER_100_ML" else "100 g"
+
+
 def generate_warnings(product: Any, ingredients: list[Any], profile: Any) -> list[HealthWarning]:
     warnings: list[HealthWarning] = []
+    basis_label = _nutrition_basis_label(product)
 
     # 1. Diabetes
     if profile.has_diabetes:
@@ -45,7 +50,7 @@ def generate_warnings(product: Any, ingredients: list[Any], profile: Any) -> lis
                 HealthWarning(
                     title="High Glycemic Sugar Alert",
                     description=(
-                        f"Contains {product.sugar_grams}g sugar per 100g. "
+                        f"Contains {product.sugar_grams}g sugar per {basis_label}. "
                         "Can cause rapid blood glucose spikes and insulin surge."
                     ),
                     condition="Diabetes",
@@ -75,7 +80,7 @@ def generate_warnings(product: Any, ingredients: list[Any], profile: Any) -> lis
                 HealthWarning(
                     title="Elevated Sodium Warning",
                     description=(
-                        f"Contains {product.sodium_mg}mg sodium per 100g. Excessive sodium retention "
+                        f"Contains {product.sodium_mg}mg sodium per {basis_label}. Excessive sodium retention "
                         "increases arterial blood pressure."
                     ),
                     condition="Hypertension",
@@ -179,7 +184,7 @@ def generate_warnings(product: Any, ingredients: list[Any], profile: Any) -> lis
                 HealthWarning(
                     title="High Saturated Fat Alert",
                     description=(
-                        f"Contains {product.saturated_fat_grams}g saturated fat per 100g. Raises serum LDL "
+                        f"Contains {product.saturated_fat_grams}g saturated fat per {basis_label}. Raises serum LDL "
                         "cholesterol and atherogenic lipo-proteins."
                     ),
                     condition="High Cholesterol",

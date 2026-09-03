@@ -1395,6 +1395,33 @@
             "type": "number",
             "title": "Saturatedfatgrams"
           },
+          "nutritionBasis": {
+            "type": "string",
+            "title": "Nutritionbasis",
+            "default": "UNKNOWN"
+          },
+          "servingSize": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Servingsize"
+          },
+          "servingUnit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Servingunit"
+          },
           "hasArtificialSweeteners": {
             "type": "boolean",
             "title": "Hasartificialsweeteners"

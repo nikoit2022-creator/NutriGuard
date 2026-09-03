@@ -34,9 +34,10 @@ def test_migration_has_the_current_single_head_as_its_parent():
     assert revision is not None
     assert revision.down_revision == "cf5522508f9a"
     assert script.get_revision(revision.down_revision) is not None
-    # And it is itself the (only) head -- i.e. nothing else branches off
-    # cf5522508f9a in parallel.
-    assert list(script.get_heads()) == [REVISION]
+    # The additive nutrition-basis migration must extend this revision,
+    # preserving a single linear head rather than branching from it.
+    assert list(script.get_heads()) == ["b2c3d4e5f6a7"]
+    assert script.get_revision("b2c3d4e5f6a7").down_revision == REVISION
 
 
 def test_migration_defines_upgrade_and_downgrade():

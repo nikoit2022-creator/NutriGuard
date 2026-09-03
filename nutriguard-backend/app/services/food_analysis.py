@@ -112,7 +112,12 @@ from app.services.gemini_image_parser import parse_gemini_image_json_result
 from app.services.gemini_result_parser import parse_gemini_json_result
 from app.services import label_language
 from app.services.label_language import LabelTextResult, resolve_label_text
-from app.services.ocr_normalizer import create_synthetic_ingredient, match_against_database, normalize_and_extract_tokens
+from app.services.ocr_normalizer import (
+    create_synthetic_ingredient,
+    match_against_database,
+    normalize_and_extract_tokens,
+    reconstruct_synthetic_ingredient,
+)
 from app.services.warning_engine import HealthWarning
 
 logger = structlog.get_logger(__name__)
@@ -179,6 +184,9 @@ def _to_product_model(
         sugar_grams=data.sugar_grams,
         sodium_mg=data.sodium_mg,
         saturated_fat_grams=data.saturated_fat_grams,
+        nutrition_basis=data.nutrition_basis,
+        serving_size=data.serving_size,
+        serving_unit=data.serving_unit,
         has_artificial_sweeteners=data.has_artificial_sweeteners,
         has_preservatives=data.has_preservatives,
         is_gluten_free=data.is_gluten_free,
@@ -222,6 +230,9 @@ def _apply_discovered_fields(
     existing.sugar_grams = data.sugar_grams
     existing.sodium_mg = data.sodium_mg
     existing.saturated_fat_grams = data.saturated_fat_grams
+    existing.nutrition_basis = data.nutrition_basis
+    existing.serving_size = data.serving_size
+    existing.serving_unit = data.serving_unit
     existing.has_artificial_sweeteners = data.has_artificial_sweeteners
     existing.has_preservatives = data.has_preservatives
     existing.is_gluten_free = data.is_gluten_free
@@ -327,6 +338,7 @@ def _to_analyzed_data_from_discovery(
         is_halal=flags.get("is_halal", False),
         is_kosher=flags.get("is_kosher", False),
         allergens_detected=allergens_text,
+        nutrition_basis="PER_100_G" if nutrition_known else "UNKNOWN",
     )
     return data, ingredient_list, nutrition_known, ingredients_known
 
@@ -579,9 +591,8 @@ async def fetch_ingredients_for_product(db: AsyncSession, product: Product) -> l
     Mirrors FoodAnalysisRepository.fetchIngredientsForProduct: resolves
     each comma-separated id against the scientific database, and
     reconstructs a synthetic ingredient on the fly for any id that isn't
-    found there (matching the client's lossy-but-intentional behavior of
-    calling `OcrNormalizer.createSyntheticIngredient(id)` with the raw id
-    string when no DB row exists).
+    found there. Reconstruction uses the persisted raw label text so an
+    internal `synth_*` key is never exposed as the human-facing name.
     """
     if not product.ingredient_ids:
         return []
@@ -598,7 +609,7 @@ async def fetch_ingredients_for_product(db: AsyncSession, product: Product) -> l
         if ingredient_id in by_id:
             resolved.append(by_id[ingredient_id])
         else:
-            resolved.append(create_synthetic_ingredient(ingredient_id))
+            resolved.append(reconstruct_synthetic_ingredient(ingredient_id, product.raw_ingredient_text))
     return resolved
 
 
@@ -811,10 +822,15 @@ async def analyze_ocr_text(db: AsyncSession, user_id: uuid.UUID, raw_text: str) 
 # Merge rules (mirrors the barcode-discovery trust model in
 # `_persist_discovered_product` above, applied one layer down to
 # per-field merging rather than whole-row replacement):
-#   - A row that is already fully trusted (`is_verified` AND
-#     `has_verified_nutrition`) is NEVER modified by this path -- the
-#     label analysis is still run (so its provenance is recorded, see
-#     `_record_label_provenance`) but never allowed to overwrite it.
+#   - A row that is already fully trusted (`is_verified` -- BOTH
+#     `has_verified_nutrition` AND `has_verified_ingredients`) is only
+#     modified by a NEW attempt that itself supplies a complete group
+#     (see `_apply_label_enrichment`'s own docstring below for the
+#     current per-group refresh rules); an incomplete/invalid attempt
+#     never touches it. The label analysis is always run (so its
+#     provenance is recorded, see `_record_label_provenance`) but only a
+#     complete group is ever allowed to overwrite the corresponding
+#     already-verified group.
 #   - Otherwise, identity fields (name/brand/category/image) are kept
 #     from the existing row when already meaningful (not empty, not a
 #     known discovery placeholder like "Discovered Product"/"Unknown
@@ -880,10 +896,9 @@ def _apply_label_enrichment(
     source_label: str,
 ) -> None:
     """
-    Mutates `existing` IN PLACE, filling only what it is missing --
-    see the merge rules in the section docstring above. Never called
-    for a row that is already `is_verified` (see
-    `_persist_enriched_product`). Does NOT commit -- the caller
+    Mutates `existing` IN PLACE. Complete first-party label evidence may
+    refresh the corresponding group; incomplete evidence only fills missing
+    fields and never erases a verified group. Does NOT commit -- the caller
     controls the single outer-transaction commit point (review round 3
     finding 3; see `_finalize_barcode_enrichment`).
 
@@ -928,7 +943,15 @@ def _apply_label_enrichment(
 
     newly_completed_group = False
 
-    if not existing.has_verified_ingredients:
+    ingredients_complete_this_scan = _ingredients_group_is_complete(data, ingredients_trustworthy)
+    nutrition_complete_this_scan = _nutrition_group_is_complete(validity)
+
+    # A user-requested label scan is newer first-party evidence. A complete
+    # group replaces that group even when a provider previously marked the
+    # product complete; an incomplete/invalid group never erases verified
+    # evidence. Ingredient lists are replaced (not unioned) so removed or
+    # corrected label items do not linger forever.
+    if ingredients_complete_this_scan or not existing.has_verified_ingredients:
         existing.raw_ingredient_text = data.raw_ingredient_text
         existing.ingredient_ids = _ingredient_ids_string(ingredients)
         if validity.nova_valid:
@@ -946,14 +969,14 @@ def _apply_label_enrichment(
         # `gemini_image_parser._extract_allergens_text`) must never
         # erase an allergen list a previous attempt already established
         # (review round 3 finding 3).
-        if not _is_meaningful_identity(existing.allergens_detected):
+        if _is_meaningful_identity(data.allergens_detected):
             existing.allergens_detected = data.allergens_detected
 
-        if _ingredients_group_is_complete(data, ingredients_trustworthy):
+        if ingredients_complete_this_scan:
             existing.has_verified_ingredients = True
             newly_completed_group = True
 
-    if not existing.has_verified_nutrition:
+    if nutrition_complete_this_scan or not existing.has_verified_nutrition:
         if validity.sugar_valid:
             existing.sugar_grams = data.sugar_grams
         if validity.sodium_valid:
@@ -961,7 +984,10 @@ def _apply_label_enrichment(
         if validity.saturated_fat_valid:
             existing.saturated_fat_grams = data.saturated_fat_grams
 
-        if _nutrition_group_is_complete(validity):
+        if nutrition_complete_this_scan:
+            existing.nutrition_basis = data.nutrition_basis
+            existing.serving_size = data.serving_size
+            existing.serving_unit = data.serving_unit
             existing.has_verified_nutrition = True
             newly_completed_group = True
 
@@ -1023,10 +1049,9 @@ async def _persist_enriched_product(
 ) -> tuple[Product, bool]:
     """
     Insert-or-merge for one barcode + label analysis. Returns
-    `(product, used_label_analysis)` -- `used_label_analysis` is False
-    only when an already fully-trusted row (`is_verified` -- BOTH
-    evidence groups, see V11 above) made the fresh label analysis
-    unnecessary.
+    `(product, used_label_analysis)`. A caller explicitly submitted fresh
+    label evidence, so the second value is True whenever persistence succeeds;
+    complete groups may refresh an already-verified provider product.
 
     Deliberately does NOT commit: the caller
     (`_finalize_barcode_enrichment`) owns the single outer-transaction
@@ -1034,26 +1059,33 @@ async def _persist_enriched_product(
     all land atomically together or not at all (review round 3 finding 3).
 
     Concurrency guarantee -- stated precisely, not overclaimed (review
-    round 3 finding 3): the brand-new-row case reuses `product_repository.
-    insert_new`'s SAVEPOINT-based primary-key-conflict handling, which
-    IS genuinely safe under real concurrent transactions (verified
-    against real, separate PostgreSQL connections -- see
+    round 3 finding 3, updated for the `for_update` row lock below): the
+    brand-new-row case reuses `product_repository.insert_new`'s
+    SAVEPOINT-based primary-key-conflict handling, which IS genuinely
+    safe under real concurrent transactions (verified against real,
+    separate PostgreSQL connections -- see
     `tests/postgres/test_concurrent_enrichment_postgres.py`): two
-    concurrent enrichments of the same brand-new barcode always
-    converge on exactly one row, never a duplicate, never a crash. The
-    EXISTING-row merge path (`_apply_label_enrichment` above) is only
-    BEST EFFORT: it reads `existing`, mutates it in memory, and flushes
-    -- with no optimistic-concurrency version column on `Product`, two
-    truly concurrent enrichments of the same already-existing
-    (incomplete) row can race, and the later COMMIT wins ("last write
-    wins"), not a merge of both attempts. This does not corrupt data or
-    duplicate rows -- SQLAlchemy's identity map plus the primary-key
-    UPDATE keeps it to one row either way -- but it is not linearizable.
-    Closing that gap would need a version/`xmin`-based optimistic lock
-    on `Product`, which is a real schema change deliberately left out of
-    this PR's scope; see the Postgres test file for the concurrent-INSERT
-    guarantee that IS proven, and this docstring as the honest statement
-    of what is not.
+    concurrent enrichments of the same brand-new barcode always converge
+    on exactly one row, never a duplicate, never a crash. The
+    EXISTING-row merge path (`_apply_label_enrichment` above) is
+    protected the same way on PostgreSQL: `_finalize_barcode_enrichment`
+    fetches `existing` via `product_repository.
+    get_by_barcode_or_aliases(..., for_update=True)`, a `SELECT ... FOR
+    UPDATE` that holds a real row lock for the rest of the attempt. A
+    second concurrent attempt against the same row blocks on that lock
+    until the first commits, then reads the first's already-persisted
+    result before applying its own -- so two attempts that each
+    complete a DIFFERENT evidence group (one ingredients, one nutrition)
+    both survive, never "last write wins" silently discarding one
+    (verified against real, separate PostgreSQL connections -- see
+    `test_concurrent_enrichment_of_the_same_existing_row_preserves_both_groups`
+    in the same Postgres test file). This is a real row lock, not an
+    application-level merge: it serializes concurrent attempts against
+    the same existing row rather than running them in parallel, and (like
+    any `FOR UPDATE`) is only as strong as the database session actually
+    holding it -- SQLite (the default `pytest -q` suite) accepts
+    `with_for_update()` without enforcing it, so this guarantee is
+    PostgreSQL-only, exactly like the brand-new-row guarantee above.
     """
     if existing is None:
         candidate = _new_product_from_label(
@@ -1066,9 +1098,6 @@ async def _persist_enriched_product(
         existing = await product_repository.get_by_barcode(db, canonical_barcode)
         if existing is None:
             raise AIServiceUnavailableError("Could not persist the enriched product.")
-
-    if existing.is_verified:
-        return existing, False
 
     _apply_label_enrichment(existing, data, ingredients, validity, ingredients_trustworthy, source_label)
     await db.flush()
@@ -1201,7 +1230,7 @@ async def _run_label_image_pipeline(
         if parsed is not None:
             data, ingredients = parsed
             validity = gemini_image_parser.label_field_validity(raw_response)
-            ingredients_trustworthy = True
+            ingredients_trustworthy = bool(data.raw_ingredient_text.strip())
         else:
             logger.info("gemini_image_json_invalid_falling_back")
 
@@ -1267,23 +1296,16 @@ async def _finalize_barcode_enrichment(
     """
     canonical_barcode = barcode_info.gtin13
     alias_keys = barcode_validation.alias_keys(barcode_info)
-    existing = await product_repository.get_by_barcode_or_aliases(db, barcode_raw, alias_keys)
-
-    # V11 (PR #9 review round 4, finding 1): when the INGREDIENTS group
-    # is already verified and locked, this attempt's ingredient text is
-    # never going to be applied at all (see `_apply_label_enrichment`'s
-    # `if not existing.has_verified_ingredients` gate) -- so demanding a
-    # successful STRICT translation for text that will be discarded
-    # regardless is both wasted work and a spurious failure mode (e.g. a
-    # nutrition-only photo whose incidental OCR leftovers don't
-    # confidently classify as English must never block completing the
-    # NUTRITION group with a translation error). Lenient mode still
-    # applies the language policy and still contributes usable
-    # provenance text; it just never raises.
-    ingredients_already_locked = existing is not None and existing.has_verified_ingredients
-    label_result = await resolve_label_text(
-        data.raw_ingredient_text, strict=not ingredients_already_locked
+    existing = await product_repository.get_by_barcode_or_aliases(
+        db, barcode_raw, alias_keys, for_update=True
     )
+
+    # Empty raw ingredient text means this is a nutrition-panel-only photo:
+    # there is nothing to translate or replace. Real ingredient text always
+    # receives the strict EN/BG/translation policy, including when it refreshes
+    # a previously verified provider list.
+    has_label_ingredients = bool(data.raw_ingredient_text.strip())
+    label_result = await resolve_label_text(data.raw_ingredient_text, strict=has_label_ingredients)
 
     # Review finding 6: canonical ingredient normalization runs for ANY
     # real language content -- English, Bulgarian, or mixed EN/BG, and
@@ -1296,9 +1318,7 @@ async def _finalize_barcode_enrichment(
     # `label_language.bulgarian_ingredient_alias`) and could never
     # dedupe against an equivalent English mention. Only a genuinely
     # empty/"unknown" result (nothing tokenizable at all) is skipped.
-    # Skipped entirely when ingredients are already locked -- rebuilding
-    # an ingredient list that will never be applied is pure waste.
-    if not ingredients_already_locked and label_result.detected_language != "unknown" and label_result.canonical_text.strip():
+    if has_label_ingredients and label_result.detected_language != "unknown" and label_result.canonical_text.strip():
         tokens = normalize_and_extract_tokens(label_result.canonical_text)
         # Bulgarian ingredient-list tokens are aliased to their English
         # canonical form for MATCHING purposes only -- an English and a

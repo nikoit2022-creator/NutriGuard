@@ -1,3 +1,4 @@
+import time
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
@@ -5,8 +6,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user_id
 from app.core.config import settings
-from app.core.exceptions import ImageTooLargeError, ValidationAppError
+from app.core.exceptions import AppError, ImageTooLargeError, ProductNotFoundError, ValidationAppError
 from app.core.rate_limit import SCAN_RATE, limiter
+from app.core.scan_diagnostics import record_scan_diagnostic
 from app.database.session import get_db
 from app.schemas.scan import BarcodeScanRequest, FullProductAnalysisOut, OcrTextScanRequest
 from app.services import food_analysis
@@ -100,10 +102,59 @@ async def scan_label_image(
         )
 
     cleaned_barcode = clean_optional(barcode)
-    if cleaned_barcode:
-        result = await food_analysis.analyze_label_image_with_barcode(
-            db, user_id, contents, cleaned_barcode
+    started = time.perf_counter()
+    diagnostic_base = {
+        "requestId": getattr(request.state, "request_id", None),
+        "scanType": "LABEL_IMAGE",
+        "barcode": cleaned_barcode,
+        "stage": "label_analysis",
+    }
+    try:
+        if cleaned_barcode:
+            result = await food_analysis.analyze_label_image_with_barcode(
+                db, user_id, contents, cleaned_barcode
+            )
+        else:
+            result = await food_analysis.analyze_label_image(db, user_id, contents)
+    except ProductNotFoundError as exc:
+        details = exc.details if isinstance(exc.details, dict) else {}
+        ingredients = details.get("ingredients")
+        record_scan_diagnostic(
+            **diagnostic_base,
+            outcome="partial" if details.get("labelScanRequired") else "failed",
+            errorCode=exc.code,
+            nutritionRecognized=not bool(details.get("nutritionScanRequired", True)),
+            ingredientsRecognized=not bool(details.get("ingredientsScanRequired", True)),
+            recognizedIngredientCount=len(ingredients) if isinstance(ingredients, list) else 0,
+            durationMs=round((time.perf_counter() - started) * 1000, 2),
         )
-    else:
-        result = await food_analysis.analyze_label_image(db, user_id, contents)
+        raise
+    except AppError as exc:
+        record_scan_diagnostic(
+            **diagnostic_base,
+            outcome="failed",
+            errorCode=exc.code,
+            durationMs=round((time.perf_counter() - started) * 1000, 2),
+        )
+        raise
+    except Exception:
+        record_scan_diagnostic(
+            **diagnostic_base,
+            outcome="failed",
+            errorCode="INTERNAL_ERROR",
+            durationMs=round((time.perf_counter() - started) * 1000, 2),
+        )
+        raise
+
+    product = result["product"]
+    record_scan_diagnostic(
+        **{**diagnostic_base, "barcode": product.barcode},
+        outcome="success",
+        nutritionRecognized=product.has_verified_nutrition,
+        ingredientsRecognized=product.has_verified_ingredients,
+        recognizedIngredientCount=len(result["ingredients"]),
+        nutritionBasis=product.nutrition_basis,
+        translationUsed=product.source == "label_scan_translated",
+        durationMs=round((time.perf_counter() - started) * 1000, 2),
+    )
     return _to_analysis_out(result)

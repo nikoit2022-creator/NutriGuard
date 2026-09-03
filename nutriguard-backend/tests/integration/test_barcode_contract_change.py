@@ -69,11 +69,12 @@ async def _seed_known_product(app_client, monkeypatch, headers, barcode: str) ->
         return json.dumps(
             {
                 "productName": "Preserved Snack",
-                "rawIngredientText": "irrelevant -- ingredients are already locked",
+                "rawIngredientText": "",
                 "ingredients": [],
                 "sugarGrams": 2.0,
                 "sodiumMg": 450.0,
                 "saturatedFatGrams": 0.5,
+                "nutritionBasis": "PER_100_G",
             }
         )
 

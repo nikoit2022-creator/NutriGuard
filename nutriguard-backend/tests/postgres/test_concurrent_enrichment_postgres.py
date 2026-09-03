@@ -32,10 +32,11 @@ that fixture cannot faithfully exercise a real race).
 This file proves exactly what `food_analysis._persist_enriched_product`
 claims and no more: the brand-new-row INSERT race (via
 `product_repository.insert_new`'s SAVEPOINT-based conflict handling) is
-genuinely safe under concurrent transactions. It deliberately does NOT
-claim the EXISTING-row merge path is linearizable -- see that
-function's docstring for the honest statement of what is only best
-effort there.
+genuinely safe under concurrent transactions, and the EXISTING-row merge
+path (via `product_repository.get_by_barcode_or_aliases(..., for_update=True)`'s
+row lock) never loses one concurrent attempt's independently-verified
+evidence group to the other's -- see `_finalize_barcode_enrichment`'s and
+`_persist_enriched_product`'s own docstrings for the precise guarantee.
 """
 import asyncio
 import io
@@ -87,6 +88,7 @@ async def test_concurrent_enrichment_of_the_same_new_barcode_converges_on_one_ro
         "sugarGrams": 5.0,
         "sodiumMg": 50.0,
         "saturatedFatGrams": 1.0,
+        "nutritionBasis": "PER_100_G",
         "hasArtificialSweeteners": False,
         "hasPreservatives": False,
         "isGlutenFree": True,
@@ -172,6 +174,169 @@ async def test_concurrent_enrichment_of_the_same_new_barcode_converges_on_one_ro
             )
         ).scalar_one()
         assert source_count == 1  # one (barcode, "label_ocr") row, refreshed in place, not duplicated
+    finally:
+        # Leave the disposable database clean for a re-run.
+        await verify_session.execute(
+            ProductSource.__table__.delete().where(ProductSource.barcode == barcode)
+        )
+        await verify_session.execute(Product.__table__.delete().where(Product.barcode == barcode))
+        await verify_session.execute(User.__table__.delete().where(User.id.in_([user_a_id, user_b_id])))
+        await verify_session.commit()
+        await verify_session.close()
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_enrichment_of_the_same_existing_row_preserves_both_groups(postgres_url, monkeypatch):
+    """
+    Two concurrent label-image scans of the SAME already-existing,
+    still-incomplete row -- one supplying a complete INGREDIENTS group,
+    the other a complete NUTRITION group -- must both survive: the
+    `for_update=True` row lock added to `get_by_barcode_or_aliases`
+    (see `_finalize_barcode_enrichment`) serializes the two attempts, so
+    whichever one commits second reads the first one's already-persisted
+    group rather than overwriting it. The FIRST attempt to commit still
+    correctly reports `labelScanRequired` (`ProductNotFoundError`) for
+    itself -- it only completed one group -- while the SECOND sees both
+    groups verified and returns normally. Neither call may silently lose
+    the other's evidence ("last write wins" on the whole row).
+    """
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    from app.core.exceptions import ProductNotFoundError
+    from app.integrations.gemini import gemini_service
+    from app.models.auth import User
+    from app.models.product import Product
+    from app.models.product_source import ProductSource
+    from app.services import food_analysis
+
+    engine = create_async_engine(postgres_url, future=True)
+    session_factory = async_sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
+
+    # A real, checksum-valid EAN-13 distinct from the other test in this file.
+    barcode = "1043321819608"
+
+    def _fake_jpeg_bytes(color: tuple[int, int, int]) -> bytes:
+        buf = io.BytesIO()
+        Image.new("RGB", (32, 32), color=color).save(buf, format="JPEG")
+        return buf.getvalue()
+
+    ingredients_photo = _fake_jpeg_bytes((10, 20, 30))
+    nutrition_photo = _fake_jpeg_bytes((200, 210, 220))
+
+    ingredients_payload = {
+        "productName": "Existing Row Test Product",
+        "brand": "Existing Row Test Brand",
+        # No trustworthy nutrition in this photo -- a nutrition panel
+        # photo taken separately supplies it (below).
+        "sugarGrams": None,
+        "sodiumMg": None,
+        "saturatedFatGrams": None,
+        "novaGroup": 2,
+        "rawIngredientText": "Water, Sugar, Salt",
+        "ingredients": [{"commonName": "Sugar"}, {"commonName": "Salt"}],
+    }
+    nutrition_payload = {
+        "productName": "Existing Row Test Product",
+        "brand": "Existing Row Test Brand",
+        "sugarGrams": 7.0,
+        "sodiumMg": 70.0,
+        "saturatedFatGrams": 2.0,
+        "nutritionBasis": "PER_100_G",
+        # No ingredient list in this photo -- a nutrition-panel-only shot.
+        "rawIngredientText": "",
+        "ingredients": [],
+    }
+
+    async def fake_analyze_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        if image_bytes == ingredients_photo:
+            return json.dumps(ingredients_payload)
+        assert image_bytes == nutrition_photo
+        return json.dumps(nutrition_payload)
+
+    monkeypatch.setattr(gemini_service, "analyze_image", fake_analyze_image)
+
+    setup_session = session_factory()
+    try:
+        user_a = User()
+        user_b = User()
+        setup_session.add_all([user_a, user_b])
+        await setup_session.commit()
+        user_a_id, user_b_id = user_a.id, user_b.id
+
+        # Clean slate, then seed a genuinely EXISTING but still fully
+        # incomplete row (neither evidence group verified yet) -- the
+        # scenario the new row lock protects.
+        await setup_session.execute(
+            ProductSource.__table__.delete().where(ProductSource.barcode == barcode)
+        )
+        await setup_session.execute(Product.__table__.delete().where(Product.barcode == barcode))
+        await setup_session.commit()
+        setup_session.add(
+            Product(
+                barcode=barcode,
+                product_name="Discovered Product",
+                brand="Unknown Brand",
+                category="",
+                health_score=0,
+                nova_group=1,
+                source="open_food_facts",
+                is_verified=False,
+                has_verified_nutrition=False,
+                has_verified_ingredients=False,
+            )
+        )
+        await setup_session.commit()
+    finally:
+        await setup_session.close()
+
+    session_a = session_factory()
+    session_b = session_factory()
+    try:
+        results = await asyncio.gather(
+            food_analysis.analyze_label_image_with_barcode(session_a, user_a_id, ingredients_photo, barcode),
+            food_analysis.analyze_label_image_with_barcode(session_b, user_b_id, nutrition_photo, barcode),
+            return_exceptions=True,
+        )
+    finally:
+        await session_a.close()
+        await session_b.close()
+
+    # Exactly one of the two attempts completes the LAST remaining group
+    # and succeeds; the other only completed its own group and correctly
+    # still reports labelScanRequired for itself. Neither may raise
+    # anything else (a crash, a lock timeout/deadlock, an unrelated
+    # AppError).
+    successes = [r for r in results if not isinstance(r, BaseException)]
+    not_found = [r for r in results if isinstance(r, ProductNotFoundError)]
+    other_errors = [r for r in results if isinstance(r, BaseException) and not isinstance(r, ProductNotFoundError)]
+    assert not other_errors, f"unexpected exception(s): {other_errors!r}"
+    assert len(successes) == 1, f"expected exactly one successful call, got {results!r}"
+    assert len(not_found) == 1, f"expected exactly one labelScanRequired call, got {results!r}"
+
+    verify_session = session_factory()
+    try:
+        count = (
+            await verify_session.execute(
+                select(func.count()).select_from(Product).where(Product.barcode == barcode)
+            )
+        ).scalar_one()
+        assert count == 1, f"expected exactly one Product row for {barcode}, found {count}"
+
+        product = (
+            await verify_session.execute(select(Product).where(Product.barcode == barcode))
+        ).scalar_one()
+        # BOTH groups survived -- neither concurrent attempt's committed
+        # evidence was overwritten/lost by the other's.
+        assert product.has_verified_ingredients is True
+        assert product.has_verified_nutrition is True
+        assert product.is_verified is True
+        assert "Water" in product.raw_ingredient_text
+        assert float(product.sugar_grams) == 7.0
+        assert float(product.sodium_mg) == 70.0
+        assert product.nutrition_basis == "PER_100_G"
     finally:
         # Leave the disposable database clean for a re-run.
         await verify_session.execute(

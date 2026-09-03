@@ -3,6 +3,7 @@ from app.services.ocr_normalizer import (
     create_synthetic_ingredient,
     match_against_database,
     normalize_and_extract_tokens,
+    reconstruct_synthetic_ingredient,
 )
 
 
@@ -98,3 +99,17 @@ def test_synthetic_ingredient_non_latin_name_gets_a_stable_non_colliding_id():
     assert water.id != sugar.id
     # Deterministic: the same name always yields the same id.
     assert create_synthetic_ingredient("Вода").id == water.id
+
+
+def test_reconstruct_synthetic_ingredient_recovers_cyrillic_human_name():
+    original = create_synthetic_ingredient("Вода")
+    restored = reconstruct_synthetic_ingredient(original.id, "Вода, Захар")
+    assert restored.id == original.id
+    assert restored.common_name == "Вода"
+    assert "synth" not in restored.common_name.lower()
+
+
+def test_reconstruct_synthetic_ingredient_never_displays_hash_id():
+    restored = reconstruct_synthetic_ingredient("synth_5ecbec8146", "")
+    assert restored.id == "synth_5ecbec8146"
+    assert restored.common_name == "Ingredient detected on label"
