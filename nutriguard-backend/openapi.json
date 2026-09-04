@@ -671,6 +671,16 @@
   },
   "components": {
     "schemas": {
+      "ApprovalStatus": {
+        "type": "string",
+        "enum": [
+          "APPROVED",
+          "NOT_APPROVED",
+          "NO_INFORMATION"
+        ],
+        "title": "ApprovalStatus",
+        "description": "Compact, structured regulatory-approval status for a single\nauthority (EFSA, FDA, ...), derived from that authority's free-text\nstatus field -- never fabricated from vague wording. See\n`app.services.ingredient_regulatory.derive_approval_status`."
+      },
       "BarcodeScanRequest": {
         "properties": {
           "barcode": {
@@ -1094,6 +1104,11 @@
           "riskLevel": {
             "$ref": "#/components/schemas/RiskLevel"
           },
+          "riskAssessmentAvailable": {
+            "type": "boolean",
+            "title": "Riskassessmentavailable",
+            "default": true
+          },
           "isGluten": {
             "type": "boolean",
             "title": "Isgluten"
@@ -1145,6 +1160,64 @@
           "badForHighCholesterol": {
             "type": "boolean",
             "title": "Badforhighcholesterol"
+          },
+          "riskRationale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Riskrationale",
+            "description": "Why `riskLevel` is what it is, reusing the ingredient's own\ncurated evidence-level text -- never a fabricated explanation.\n`None` whenever there is no real assessment to explain.",
+            "readOnly": true
+          },
+          "efsaApprovalStatus": {
+            "$ref": "#/components/schemas/ApprovalStatus",
+            "readOnly": true
+          },
+          "fdaApprovalStatus": {
+            "$ref": "#/components/schemas/ApprovalStatus",
+            "readOnly": true
+          },
+          "adiMinMgPerKgBwPerDay": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adiminmgperkgbwperday",
+            "readOnly": true
+          },
+          "adiMaxMgPerKgBwPerDay": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adimaxmgperkgbwperday",
+            "readOnly": true
+          },
+          "adiSource": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adisource",
+            "description": "The verified citation backing the numeric ADI range, only\never populated alongside an actual parsed number.",
+            "readOnly": true
           }
         },
         "type": "object",
@@ -1177,10 +1250,16 @@
           "badForGout",
           "badForPregnancy",
           "badForChildren",
-          "badForHighCholesterol"
+          "badForHighCholesterol",
+          "riskRationale",
+          "efsaApprovalStatus",
+          "fdaApprovalStatus",
+          "adiMinMgPerKgBwPerDay",
+          "adiMaxMgPerKgBwPerDay",
+          "adiSource"
         ],
         "title": "IngredientOut",
-        "description": "Mirrors com.example.data.model.IngredientEntity exactly (API Contract 5.4)."
+        "description": "Mirrors com.example.data.model.IngredientEntity exactly (API Contract 5.4),\nplus additive, backward-compatible data-quality fields (see the\n\"backend-ingredient-profile-data-quality\" task): the original\n`riskLevel`/`efsaStatus`/`fdaStatus`/`acceptableDailyIntake` text\nfields are preserved unchanged for existing clients; the new fields\nbelow let an updated client distinguish a genuine assessment from\nan absent one, without ever fabricating one."
       },
       "OcrTextScanRequest": {
         "properties": {

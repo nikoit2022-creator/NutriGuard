@@ -12,6 +12,26 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V14 (data-quality fix: honest scientific ingredient profiles):** An
+OCR-only ("synthetic") ingredient — a label token with no scientific-
+database match — used to be filled with fabricated generic
+scientific/regulatory placeholder text (e.g. "Normalized Food
+Component", "Extracted via OCR", "Standard ingredient.", "Standard
+Food Additive/Ingredient", "Recognized Ingredient") and an inferred
+`riskLevel` guessed from keywords in the OCR name, both of which looked
+like real curated data on the wire and could silently move the Health
+Score. OCR is provenance, not scientific evidence. See deviation item
+12 in section 6 for the full breakdown: every such field is now
+honestly empty instead of fabricated, `riskLevel` for a synthetic
+ingredient is always the neutral `SAFE` placeholder rather than a
+keyword guess, and `IngredientEntity` gains additive fields
+(`riskAssessmentAvailable`, `riskRationale`, `efsaApprovalStatus`,
+`fdaApprovalStatus`, `adiMinMgPerKgBwPerDay`, `adiMaxMgPerKgBwPerDay`,
+`adiSource`) so an updated client can tell a real assessment apart from
+an absent one — and the Health Score itself now excludes any
+ingredient with no real assessment from its risk-level deductions.
+Migration `d3e4f5a6b7c8`.
+
 **V13 (product change: ingredient-recognition success vs. health-score
 readiness):** `POST /scan/label-image`, `POST /scan/ocr-text`, and
 their barcode-linked variants used to treat FULL verification
@@ -842,6 +862,83 @@ than silently resolved:
     See section 11.14 for the full design writeup and
     `tests/integration/test_ingredient_recognition_success.py` for the
     end-to-end regression coverage.
+
+12. **An OCR-only ("synthetic") ingredient no longer reports fabricated
+    scientific/regulatory data, and `IngredientEntity` gains additive
+    data-quality fields (backend-ingredient-profile-data-quality
+    task).** `ocr_normalizer.create_synthetic_ingredient` used to fill
+    every scientific/regulatory field for an ingredient with no
+    scientific-database match with a generic placeholder string
+    ("Normalized Food Component", "Ingredient extracted via OCR label
+    scan.", "Standard ingredient.", "Extracted via OCR", "Subject to
+    standard local food safety regulations.", "Standard Food
+    Additive/Ingredient", "Recognized Ingredient", "Standard dietary
+    intake", "See individual sensitivity profile", "NutriGuard OCR &
+    Scientific Pipeline") and inferred `riskLevel`
+    (SAFE/POTENTIAL_CONCERN/HIGH_CONCERN) from keyword matches in the
+    OCR name alone. OCR is provenance, not scientific evidence: these
+    strings looked like real curated data on the wire but were never
+    verified, and the inferred risk level silently moved the Health
+    Score for ingredients nobody had actually assessed. This has been
+    changed:
+    - Every one of those fields (`description`, `purposeInFood`,
+      `healthConcerns`, `evidenceLevel`, `countriesRestrictedOrBanned`,
+      `efsaStatus`, `fdaStatus`, `acceptableDailyIntake`,
+      `sideEffects`, `references`, `scientificName` when no genuine
+      E-number is present) is now the honest empty string for a
+      synthetic ingredient — the same "no data" representation the
+      contract already used for these always-required-non-null string
+      fields, never `null` (which would break an existing non-null
+      Kotlin `String` field).
+    - `riskLevel` for a synthetic ingredient is always the neutral
+      `SAFE` placeholder, never inferred from a keyword in the OCR
+      name.
+    - **Additive fields on `IngredientEntity`** (old fields unchanged,
+      new fields only): `riskAssessmentAvailable: boolean` (`false` for
+      every synthetic ingredient, `true` for every real curated/seeded
+      row) and `riskRationale: string | null` tell an updated client
+      whether `riskLevel` is a real assessment at all, without
+      requiring it to guess from the text fields. The Health Score
+      calculation (`food_analysis._score_and_warnings`) now excludes
+      any ingredient with `riskAssessmentAvailable=false` from its
+      risk-level deductions entirely — an unconfirmed ingredient can no
+      longer move the score in either direction.
+    - **Structured, additive EFSA/FDA/ADI fields**, derived
+      conservatively and deterministically from the existing free-text
+      fields (`app/services/ingredient_regulatory.py`), never stored
+      redundantly so they can never drift out of sync with the text
+      they were derived from: `efsaApprovalStatus`/`fdaApprovalStatus`
+      (`APPROVED` / `NOT_APPROVED` / `NO_INFORMATION` — never inferred
+      as `APPROVED` from vague wording like "recognized" or
+      "regulated", only from an authority explicitly saying so), and
+      `adiMinMgPerKgBwPerDay`/`adiMaxMgPerKgBwPerDay`/`adiSource`
+      (parsed only from an unambiguous "`<value> mg/kg bw`" or
+      "`<min> - <max> mg/kg bw`" expression in `acceptableDailyIntake`
+      — a percentage-of-calories guideline or a vague qualifier like
+      "Not specified"/"No limit" is real data but not a number, and is
+      never guessed into one; `adiSource` is only ever populated
+      alongside an actual parsed number, reusing the ingredient's own
+      `references` citation).
+    - The four curated seed entries whose `countriesRestrictedOrBanned`
+      was the literal placeholder string `"None"` (`whole_oat_flour`,
+      `stevia_extract`, `e322_soy_lecithin`, `e415_xanthan_gum`) were
+      normalized to the empty string — `"None"`/`"None reported"` is
+      not a verified list of countries, it just looked like one.
+    - Migration `d3e4f5a6b7c8` adds `ingredients.risk_assessment_available`
+      (`NOT NULL DEFAULT true`) — correct for every existing row, since
+      only curated/seeded data is ever persisted to this table; a
+      synthetic ingredient is always reconstructed in memory, never
+      inserted here.
+    - `bad_for*`/`allergens` heuristics on a synthetic ingredient are
+      UNCHANGED (out of scope for this task — they feed the separate,
+      pre-existing Personalized Warning Engine, not a scientific
+      claim about the ingredient itself).
+    - All changes are additive/widening only — diffed against
+      `openapi.json`. Covered by `tests/unit/test_ocr_normalizer.py`,
+      `tests/unit/test_ingredient_regulatory.py`,
+      `tests/unit/test_ingredient_schema_data_quality.py`,
+      `tests/unit/test_food_analysis_risk_scoring.py`, and
+      `tests/integration/test_barcode_contract_change.py`.
 
 No other ambiguities were found that required deviating from the
 contract; where the contract was silent on an implementation detail

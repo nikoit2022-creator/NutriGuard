@@ -56,20 +56,81 @@ def test_unknown_tokens_go_to_unknown_list():
     assert result.matched_ingredients == []
 
 
-def test_synthetic_ingredient_high_risk_keywords():
+def test_synthetic_ingredient_never_infers_risk_from_keywords():
+    """Data-quality task: an OCR-only ingredient with no scientific-
+    database match must never become HIGH_CONCERN/POTENTIAL_CONCERN
+    just because its OCR name contains a scary/moderate keyword -- that
+    was fabricated risk, not a real assessment. `risk_level` is always
+    the neutral SAFE placeholder, and `risk_assessment_available` is
+    what actually signals "not really assessed"."""
+    high_risk_keyword_name = create_synthetic_ingredient("Sodium Nitrite")
+    moderate_keyword_name = create_synthetic_ingredient("Corn Syrup")
+    no_keyword_name = create_synthetic_ingredient("Water")
+
+    for syn in (high_risk_keyword_name, moderate_keyword_name, no_keyword_name):
+        assert syn.risk_level == RiskLevel.SAFE
+        assert syn.risk_assessment_available is False
+
+    assert high_risk_keyword_name.id.startswith("synth_")
+
+
+def test_synthetic_ingredient_has_no_fabricated_scientific_or_regulatory_data():
+    """None of the historical fictitious placeholder strings this task
+    removes may ever be produced again, and every field that would
+    require real curated/verified data is honestly empty, not a fake
+    generic claim. OCR is provenance, not scientific evidence."""
     syn = create_synthetic_ingredient("Sodium Nitrite")
-    assert syn.risk_level == RiskLevel.HIGH_CONCERN
-    assert syn.id.startswith("synth_")
+
+    forbidden_substrings = (
+        "Normalized Food Component",
+        "extracted via OCR",
+        "Food component / formulation ingredient",
+        "Standard ingredient",
+        "Standard Food Additive",
+        "Recognized Ingredient",
+        "standard local food safety regulations",
+        "Standard dietary intake",
+        "individual sensitivity profile",
+        "NutriGuard OCR & Scientific Pipeline",
+    )
+    serialized = " ".join(
+        str(value)
+        for value in (
+            syn.scientific_name,
+            syn.description,
+            syn.purpose_in_food,
+            syn.health_concerns,
+            syn.evidence_level,
+            syn.countries_restricted_or_banned,
+            syn.efsa_status,
+            syn.fda_status,
+            syn.acceptable_daily_intake,
+            syn.side_effects,
+            syn.references,
+        )
+    ).lower()
+    for forbidden in forbidden_substrings:
+        assert forbidden.lower() not in serialized, forbidden
+
+    assert syn.description == ""
+    assert syn.purpose_in_food == ""
+    assert syn.health_concerns == ""
+    assert syn.evidence_level == ""
+    assert syn.countries_restricted_or_banned == ""
+    assert syn.efsa_status == ""
+    assert syn.fda_status == ""
+    assert syn.acceptable_daily_intake == ""
+    assert syn.side_effects == ""
+    assert syn.references == ""
+    assert syn.who_iarc_classification is None
+    assert syn.scientific_name == ""  # no E-number in this name to report
 
 
-def test_synthetic_ingredient_moderate_risk_keywords():
-    syn = create_synthetic_ingredient("Corn Syrup")
-    assert syn.risk_level == RiskLevel.POTENTIAL_CONCERN
-
-
-def test_synthetic_ingredient_safe_default():
-    syn = create_synthetic_ingredient("Water")
-    assert syn.risk_level == RiskLevel.SAFE
+def test_synthetic_ingredient_scientific_name_reports_a_genuine_e_number():
+    """A real E-number literally present in the OCR text is genuine
+    provenance (not a scientific claim) and may still be reported."""
+    syn = create_synthetic_ingredient("some e621 flavor enhancer")
+    assert syn.scientific_name == "E621"
 
 
 def test_synthetic_ingredient_diabetes_flag_from_sugar_keyword():

@@ -39,6 +39,15 @@ class Ingredient(Base):
     risk_level: Mapped[RiskLevel] = mapped_column(
         Enum(RiskLevel, name="risk_level", native_enum=True), nullable=False
     )
+    # True for every curated/seeded row in this table -- an OCR-only
+    # "synthetic" ingredient (see app.services.ocr_normalizer) is never
+    # persisted here, it is reconstructed on the fly with this flag set
+    # to False, so a genuinely unassessed ingredient can never be
+    # confused with a real risk assessment on the wire (see
+    # `IngredientOut.risk_assessment_available` / `risk_rationale`).
+    risk_assessment_available: Mapped[bool] = mapped_column(
+        "risk_assessment_available", Boolean, nullable=False, default=True
+    )
 
     is_gluten: Mapped[bool] = mapped_column("is_gluten", Boolean, default=False)
     is_lactose: Mapped[bool] = mapped_column("is_lactose", Boolean, default=False)

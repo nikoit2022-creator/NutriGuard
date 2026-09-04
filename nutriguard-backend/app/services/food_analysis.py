@@ -140,6 +140,7 @@ from app.repositories import (
 )
 from app.services import barcode_discovery, gemini_image_parser, health_score, warning_engine
 from app.services import barcode_validation
+from app.services import ingredient_regulatory
 from app.services.barcode_text_safety import is_placeholder
 from app.services.barcode_validation import validate_and_normalize
 from app.services.fallback_analysis import AnalyzedProductData, fallback_local_analysis
@@ -397,13 +398,22 @@ def _ingredient_out_dict(ing: Any) -> dict:
     must already be plain, JSON-serializable data. Works identically for
     a real `Ingredient` ORM row and a `SyntheticIngredient` (see
     `ocr_normalizer.create_synthetic_ingredient`) -- both expose the
-    exact same attribute names. Field names/casing are kept in exact
-    sync with `IngredientOut` so a partial-analysis `ingredients` list
+    exact same attribute names. Field names/casing -- including the
+    additive `riskAssessmentAvailable`/`riskRationale`/
+    `efsaApprovalStatus`/`fdaApprovalStatus`/`adiMinMgPerKgBwPerDay`/
+    `adiMaxMgPerKgBwPerDay`/`adiSource` data-quality fields, derived via
+    `app.services.ingredient_regulatory` exactly like the schema's own
+    `@computed_field`s -- are kept in exact sync with `IngredientOut` so
+    a partial-analysis `ingredients` list
     (see `_label_scan_required_details`) can be rendered by the SAME
     Android model/adapter the normal success response's `ingredients`
     array already uses -- no new client-side type.
     """
     risk_level = ing.risk_level
+    risk_assessment_available = getattr(ing, "risk_assessment_available", True)
+    adi_min, adi_max = ingredient_regulatory.derive_adi_range_mg_per_kg_bw_per_day(
+        ing.acceptable_daily_intake
+    )
     return {
         "id": ing.id,
         "commonName": ing.common_name,
@@ -423,6 +433,13 @@ def _ingredient_out_dict(ing: Any) -> dict:
         "allergens": ing.allergens,
         "references": ing.references,
         "riskLevel": risk_level.value if hasattr(risk_level, "value") else risk_level,
+        "riskAssessmentAvailable": risk_assessment_available,
+        "riskRationale": (ing.evidence_level or None) if risk_assessment_available else None,
+        "efsaApprovalStatus": ingredient_regulatory.derive_approval_status(ing.efsa_status).value,
+        "fdaApprovalStatus": ingredient_regulatory.derive_approval_status(ing.fda_status).value,
+        "adiMinMgPerKgBwPerDay": adi_min,
+        "adiMaxMgPerKgBwPerDay": adi_max,
+        "adiSource": (ing.references or None) if adi_min is not None else None,
         "isGluten": ing.is_gluten,
         "isLactose": ing.is_lactose,
         "isVegan": ing.is_vegan,
@@ -673,7 +690,20 @@ async def _get_profile_namespace(db: AsyncSession, user_id: uuid.UUID) -> Simple
 
 
 def _score_and_warnings(product: Product, ingredients: list[Any], profile: SimpleNamespace):
-    risk_levels = [ing.risk_level for ing in ingredients]
+    # An ingredient with no real risk assessment (an OCR-only match with
+    # no scientific-database row -- see `ocr_normalizer.SyntheticIngredient`,
+    # `risk_assessment_available=False`) carries a neutral SAFE
+    # `risk_level` placeholder, never a real one -- it must never move
+    # the Health Score in either direction, so it is excluded here
+    # rather than counted as SAFE (which the loop below would otherwise
+    # do silently, since SAFE contributes no deduction anyway -- this
+    # exclusion is what actually matters once a future HIGH_CONCERN/
+    # POTENTIAL_CONCERN default is ever considered for unassessed rows).
+    risk_levels = [
+        ing.risk_level
+        for ing in ingredients
+        if getattr(ing, "risk_assessment_available", True)
+    ]
     breakdown = health_score.calculate(
         ingredient_risk_levels=risk_levels,
         sugar_grams=float(product.sugar_grams),

@@ -145,14 +145,20 @@ async def test_known_product_returns_real_stored_product(app_client, monkeypatch
 # product, with a hand-verified expected value (see PR description /
 # task response for the full derivation):
 #
-#   ingredients: [HIGH_CONCERN, POTENTIAL_CONCERN]   -> additives = 20 + 12 = 32
+#   ingredients: "Sodium Nitrite"/"Corn Syrup" match no scientific-
+#   database row in this test's ingredient table, so both are OCR-only
+#   "synthetic" ingredients (see app.services.ocr_normalizer) with
+#   risk_assessment_available=False -- an unconfirmed ingredient risk
+#   must never move the Health Score (data-quality task requirement 5),
+#   so additives_deduction excludes them entirely rather than treating
+#   their neutral SAFE placeholder as a real assessment -> additives = 0
 #   sugar_grams=2.0  (not > 2.0)                      -> sugar_deduction = 0
 #   sodium_mg=450.0  (> 300, not > 600)                -> sodium_deduction = 10
 #   saturated_fat=0.5 (not > 2.5)                       -> sat_fat_deduction = 0
 #   has_artificial_sweeteners=False                      -> sweetener_deduction = 0
 #   has_preservatives=True ("nitrit" keyword)             -> preservative_deduction = 10
 #   nova_group=4 (has_preservatives=True)                  -> nova_deduction = 20
-#   total = 100 - (32+0+10+0+0+10+20) = 100 - 72 = 28
+#   total = 100 - (0+0+10+0+0+10+20) = 100 - 40 = 60
 
 @pytest.mark.asyncio
 async def test_health_score_matches_hand_verified_formula_for_real_product(app_client, monkeypatch):
@@ -160,7 +166,7 @@ async def test_health_score_matches_hand_verified_formula_for_real_product(app_c
     barcode = "8197369935639"
 
     seeded = await _seed_known_product(app_client, monkeypatch, headers, barcode)
-    assert seeded["healthScore"] == 28
+    assert seeded["healthScore"] == 60
 
     barcode_resp = await app_client.post(
         "/api/v1/scan/barcode", json={"barcode": barcode}, headers=headers
@@ -168,11 +174,16 @@ async def test_health_score_matches_hand_verified_formula_for_real_product(app_c
     assert barcode_resp.status_code == 200
     # The score must be IDENTICAL when recomputed from the persisted
     # product+ingredients on a barcode lookup, not reset to a default.
-    assert barcode_resp.json()["healthScore"] == 28
+    assert barcode_resp.json()["healthScore"] == 60
 
-    risk_levels = {ing["riskLevel"] for ing in barcode_resp.json()["ingredients"]}
-    assert "HIGH_CONCERN" in risk_levels
-    assert "POTENTIAL_CONCERN" in risk_levels
+    ingredients_out = barcode_resp.json()["ingredients"]
+    risk_levels = {ing["riskLevel"] for ing in ingredients_out}
+    assert risk_levels == {"SAFE"}
+    # Neither ingredient was ever really assessed -- the neutral SAFE
+    # `riskLevel` above must not be mistaken for a real one, and every
+    # entry must say so explicitly via the additive data-quality field.
+    assert all(ing["riskAssessmentAvailable"] is False for ing in ingredients_out)
+    assert all(ing["riskRationale"] is None for ing in ingredients_out)
 
 
 # TEST 5 --------------------------------------------------------------------
