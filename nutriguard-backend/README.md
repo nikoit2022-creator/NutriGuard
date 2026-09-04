@@ -2234,7 +2234,10 @@ match:
 
 1. **Official identifier first** — an E-number literally present in
    the OCR text (`ingredient_repository.get_by_official_identifier`)
-   always wins.
+   always wins. This step also registers the CURRENTLY observed display
+   text as a new alias of the row it found (if it doesn't already have
+   one), so a later, blurrier scan of the same name that doesn't also
+   catch the E-number still resolves directly via step 2.
 2. **Known alias** — any previously-learned English/Bulgarian/spelling/
    OCR-variant name (`ingredient_alias_repository.get_by_normalized`,
    keyed on `app.services.ingredient_normalization.normalize_ingredient_name`).
@@ -2307,10 +2310,18 @@ overwrite curated or regulatory information", `SOURCE_PRIORITY`:
 CURATED_SEED > REGULATORY_LOOKUP > GEMINI > OCR_HEURISTIC, confidence
 as the same-rank tie-breaker) — fully tested
 (`tests/unit/test_ingredient_catalog_pure.py`), ready for the future
-integration described in 13.1. What DOES run live today:
+integration described in 13.1. Verification promotion within it is
+deliberately conservative: only a REGULATORY_LOOKUP (or CURATED_SEED)
+source may promote a row all the way to `VERIFIED` (and set
+`riskAssessmentAvailable`, which is what actually lets `riskLevel`
+influence the Health Score); a GEMINI-sourced merge — real content, not
+yet human/regulatory-confirmed — promotes only to `LIMITED_DATA`,
+never `VERIFIED`. What DOES run live today:
 `ingredient_catalog._fill_missing_identity_fields` fills (never
-overwrites) a currently-null `e_number`/`ins_number` on an existing
-UNVERIFIED row when a later observation of the same alias supplies one
+overwrites) a currently-null `e_number`/`ins_number` on an existing row
+— curated or not — whenever the E-number-hit resolution path (13.1
+step 1) finds one the stored row doesn't have yet, or when a later
+observation of the same alias supplies one
 the earlier observation's OCR text didn't contain.
 
 ### 13.4 Concurrency
@@ -2321,12 +2332,20 @@ established by `product_repository.insert_new`/
 `product_source_repository.record_discovery` — a primary-key or unique-
 alias conflict only undoes that one row's insert, never any other work
 already flushed earlier in the same transaction; the loser re-fetches
-and reuses the winner's row rather than erroring or duplicating. See
-`tests/postgres/test_ingredient_catalog_concurrency_postgres.py` (real,
-concurrent-session PostgreSQL coverage, same opt-in convention as the
-sibling barcode/product test — not run in this environment, no
-Docker/Postgres available here; run it against a disposable Postgres
-instance before deploying, exactly like that sibling file).
+and reuses the winner's row rather than erroring or duplicating. Two
+distinct real-Postgres-conflict shapes are covered, both proven
+against a genuine, disposable, concurrent-session PostgreSQL 16
+instance during the pre-PR verification pass (see
+`docs/CODEX_HANDOFF.md`):
+`tests/postgres/test_ingredient_catalog_concurrency_postgres.py::test_concurrent_resolution_of_the_same_new_ingredient_converges_on_one_row`
+(same normalized text/id colliding on the `ingredients.id` primary
+key) and `::test_concurrent_resolution_of_the_same_new_e_number_from_different_display_names_converges`
+(two DIFFERENT display names sharing the same genuine E-number,
+colliding on the UNIQUE `e_number` column instead — a distinct
+conflict shape the id/alias-only re-fetch fallback originally missed;
+`get_or_create_catalog_ingredient` now also re-checks by official
+identifier before concluding a conflict is unrecoverable — see the
+verification pass for the full root-cause writeup).
 
 ### 13.5 Product relationships
 

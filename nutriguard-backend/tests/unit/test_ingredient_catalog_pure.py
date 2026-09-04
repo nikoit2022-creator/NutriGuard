@@ -181,6 +181,40 @@ def test_same_source_higher_confidence_may_refresh():
     assert row.confidence == 0.95
 
 
+def test_regulatory_lookup_source_promotes_all_the_way_to_verified():
+    stub = _MergeableIngredient(source=IngredientSource.OCR_HEURISTIC, confidence=0.2)
+    merge_verified_fields(
+        stub,
+        fields={"description": "A regulatory-lookup-confirmed description."},
+        source=IngredientSource.REGULATORY_LOOKUP,
+        confidence=0.9,
+    )
+    assert stub.verification_status == IngredientVerificationStatus.VERIFIED
+    assert stub.risk_assessment_available is True
+
+
+def test_gemini_source_promotes_only_to_limited_data_never_verified():
+    """Incorrect-verification-promotion regression: an AI-generated
+    (GEMINI) claim is real content worth storing -- it outranks a bare
+    OCR guess -- but it is NOT a human/regulatory confirmation. It must
+    never promote a row to VERIFIED or flip `risk_assessment_available`,
+    which is what actually lets `riskLevel` start influencing the
+    Health Score (see food_analysis._score_and_warnings) -- letting an
+    AI-suggested risk assessment move the score is exactly what the
+    data-quality task (commit 1d8c3d9) exists to prevent."""
+    stub = _MergeableIngredient(source=IngredientSource.OCR_HEURISTIC, confidence=0.2)
+    changed = merge_verified_fields(
+        stub,
+        fields={"description": "An AI-suggested description."},
+        source=IngredientSource.GEMINI,
+        confidence=0.8,
+    )
+    assert changed is True
+    assert stub.description == "An AI-suggested description."
+    assert stub.verification_status == IngredientVerificationStatus.LIMITED_DATA
+    assert stub.risk_assessment_available is False
+
+
 def test_merge_ignores_fields_outside_the_mergeable_allowlist():
     row = _MergeableIngredient(source=IngredientSource.OCR_HEURISTIC, confidence=0.1)
     changed = merge_verified_fields(

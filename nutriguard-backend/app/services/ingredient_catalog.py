@@ -192,10 +192,23 @@ def merge_verified_fields(
     existing.source = source
     existing.confidence = confidence
     existing.retrieved_at = _utcnow()
-    if source != IngredientSource.OCR_HEURISTIC:
+    # Verification promotion is deliberately conservative: an AI-
+    # generated (GEMINI) claim is real data worth storing -- outranking
+    # a bare OCR guess -- but it is NOT a human/regulatory confirmation.
+    # Only a REGULATORY_LOOKUP (or CURATED_SEED) source may promote a
+    # row all the way to VERIFIED and set `risk_assessment_available`,
+    # which is what actually lets `riskLevel` start influencing the
+    # Health Score (see `food_analysis._score_and_warnings`) -- letting
+    # a GEMINI-sourced merge do that would silently let an AI-suggested
+    # risk assessment move the score, exactly what the data-quality task
+    # (commit 1d8c3d9) exists to prevent. A GEMINI-sourced merge instead
+    # promotes only to LIMITED_DATA -- real content, not yet confirmed.
+    if SOURCE_PRIORITY[source] >= SOURCE_PRIORITY[IngredientSource.REGULATORY_LOOKUP]:
         existing.verification_status = IngredientVerificationStatus.VERIFIED
         existing.last_verified_at = _utcnow()
         existing.risk_assessment_available = True
+    elif source == IngredientSource.GEMINI:
+        existing.verification_status = IngredientVerificationStatus.LIMITED_DATA
     return True
 
 
@@ -292,44 +305,72 @@ async def get_or_create_catalog_ingredient(db: AsyncSession, synthetic: Syntheti
     normalized-name resolution above.
     """
     normalized = normalize_ingredient_name(synthetic.common_name)
+    resolved: Ingredient | None = None
 
     if synthetic.e_number:
-        found = await ingredient_repository.get_by_official_identifier(db, e_number=synthetic.e_number)
-        if found is not None:
-            return found
+        resolved = await ingredient_repository.get_by_official_identifier(db, e_number=synthetic.e_number)
 
-    alias = await ingredient_alias_repository.get_by_normalized(db, normalized)
-    if alias is not None:
-        existing = await ingredient_repository.get_by_id(db, alias.ingredient_id)
-        if existing is not None:
-            _fill_missing_identity_fields(existing, synthetic)
-            return existing
+    if resolved is None:
+        alias = await ingredient_alias_repository.get_by_normalized(db, normalized)
+        if alias is not None:
+            resolved = await ingredient_repository.get_by_id(db, alias.ingredient_id)
+            if resolved is not None:
+                # This exact normalized text already has an alias --
+                # nothing new to register below, return immediately.
+                _fill_missing_identity_fields(resolved, synthetic)
+                return resolved
+
+    if resolved is not None:
+        # Resolved via E-number (step 1), but THIS specific display text
+        # has no alias of its own yet -- register it too, so a later
+        # scan of the same name that DOESN'T also catch the E-number
+        # (e.g. a blurrier crop) still resolves directly via alias
+        # instead of needing another E-number-only lookup.
+        _fill_missing_identity_fields(resolved, synthetic)
+        await ingredient_alias_repository.get_or_create(
+            db,
+            ingredient_id=resolved.id,
+            alias_text=synthetic.common_name,
+            alias_normalized=normalized,
+            language=None,
+            source=IngredientSource.OCR_HEURISTIC,
+        )
+        return resolved
 
     # Genuinely new -- race-safe get-or-create. Two concurrent scans of
-    # the same never-before-seen ingredient both compute the SAME
+    # the same never-before-seen ingredient normally compute the SAME
     # deterministic id (see `ocr_normalizer.create_synthetic_ingredient`)
     # and the same `normalized` text, so whichever one's INSERT commits
-    # first wins; the loser's `insert_new` returns `None` and it simply
-    # re-fetches and reuses the winner's row -- never a duplicate.
+    # first wins and the loser's `insert_new` returns `None` (a plain
+    # primary-key conflict on `id`) -- but two DIFFERENT display names
+    # sharing the same genuine E-number (e.g. "Vitamin C (E300)" vs.
+    # "Ascorbic Acid (E300)") produce DIFFERENT ids/normalized names and
+    # instead conflict on the UNIQUE `e_number` column -- `id` is not
+    # the only identity `insert_new` can lose a race on, so re-fetching
+    # by id/alias alone is not enough; also re-check every official
+    # identifier this row carries before concluding the conflict is
+    # unrecoverable.
     row = _build_minimal_row(synthetic, normalized)
     inserted = await ingredient_repository.insert_new(db, row)
     if inserted is None:
         inserted = await ingredient_repository.get_by_id(db, synthetic.id)
-        if inserted is None:
-            # Extremely narrow window: the id collided but the alias
-            # lookup above hadn't seen it yet either (SAVEPOINT hadn't
-            # committed at read time). Re-resolve one more time before
-            # giving up -- a repository bug, not a legitimate outcome,
-            # if this still comes back empty.
-            alias = await ingredient_alias_repository.get_by_normalized(db, normalized)
-            if alias is not None:
-                inserted = await ingredient_repository.get_by_id(db, alias.ingredient_id)
-        if inserted is None:
-            raise RuntimeError(
-                f"Ingredient insert for id={synthetic.id!r} conflicted but no row could be "
-                "re-fetched by id or alias -- this should be unreachable under the documented "
-                "SAVEPOINT get-or-create guarantee (see product_repository.insert_new)."
-            )
+    if inserted is None:
+        alias = await ingredient_alias_repository.get_by_normalized(db, normalized)
+        if alias is not None:
+            inserted = await ingredient_repository.get_by_id(db, alias.ingredient_id)
+    if inserted is None and (synthetic.e_number or row.ins_number or row.cas_number):
+        inserted = await ingredient_repository.get_by_official_identifier(
+            db, e_number=synthetic.e_number, ins_number=row.ins_number, cas_number=row.cas_number
+        )
+    if inserted is None:
+        raise RuntimeError(
+            f"Ingredient insert for id={synthetic.id!r} (e_number={synthetic.e_number!r}) "
+            "conflicted but no row could be re-fetched by id, alias, or official identifier "
+            "-- this should be unreachable under the documented SAVEPOINT get-or-create "
+            "guarantee (see product_repository.insert_new)."
+        )
+    else:
+        _fill_missing_identity_fields(inserted, synthetic)
 
     await ingredient_alias_repository.get_or_create(
         db,

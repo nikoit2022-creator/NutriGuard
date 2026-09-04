@@ -6,11 +6,240 @@ Date: 2026-09-04
 
 - Branch: `feat/backend-ingredient-profile-data-quality`, based on
   GitHub `origin/main` at `4b44b8f04e95bc1fa58fe27546f17dcab605d562`.
-  Second task on this same (still unmerged/unreviewed) branch — see
-  the "V14" entry below for the first task's own handoff summary,
-  preserved as-is.
-- Backend-only changes (`nutriguard-backend/` only); `android-app/**`
-  was not touched.
+  Third task on this same (still unmerged) branch — see "V15" and
+  "V14" below for the first two tasks' own handoff summaries, preserved
+  as-is.
+- Backend-only changes (`nutriguard-backend/` only); `android-app/**`,
+  `main`, the live database/Docker volumes, `.env`, and credentials
+  were not touched.
+
+### V16: final pre-PR verification (found and fixed 2 real bugs)
+
+Real, disposable infrastructure was used for this pass — NOT the
+already-running live dev stack (`nutriguard-backend-db-1` etc., left
+completely untouched): a separate `postgres:16-alpine` container
+(`nutriguard-pr-verify-pg`, its own Docker network, no persistent
+volume, removed at the end of the session) plus a throwaway image
+(`nutriguard-pr-verify:*`) built FROM THIS BRANCH's own `Dockerfile`
++ `requirements.txt` (Python 3.12-slim, the repo's actual pinned
+dependency set — the host shell's ambient Python 3.14 was NOT used for
+any of this pass's checks, precisely to eliminate the environment-drift
+question raised in the V15/V14 entries below).
+
+**1-2. Migration upgrade → downgrade → upgrade through `e4f5a6b7c8d9`,
+with pre-existing data surviving correctly.** Script: start at the
+immediately-prior revision (`d3e4f5a6b7c8`), insert a product +
+ingredient row using the OLD (pre-migration) column set via raw SQL,
+then upgrade → verify → downgrade → verify → upgrade again → verify.
+**Result: PASSED.** After the first upgrade, the pre-existing
+`Citric Acid`/`E330` row was correctly backfilled
+(`normalizedName="citric acid"`, `insNumber="330"` derived from the
+E-number, `verificationStatus=VERIFIED`, `source=CURATED_SEED`,
+`confidence=1.000`) with the product's `ingredientIds` link intact;
+after downgrade, the new columns/table were gone but both rows and
+their link survived unchanged; the re-upgrade deterministically
+reproduced the identical backfilled values. (An `asyncpg` "cached
+statement plan is invalid" error appeared on the first attempt — a
+verification-script artifact from reusing one engine's connection pool
+across DDL changes made by a separate `alembic` subprocess, fixed by
+disposing the pool after each migration step; not a product bug.)
+
+**3-4. Opt-in ingredient-catalog PostgreSQL concurrency tests, proving
+simultaneous creation of the same alias/E-number converges on one row.**
+Found and fixed **two real bugs** in the process (both now covered by
+regression tests, both verified fixed against real concurrent
+PostgreSQL sessions, 5 repeated runs each with 0 failures):
+
+- **Test-harness deadlock** (not a production bug, but the concurrency
+  test itself was unusable): the original test deferred both sessions'
+  `commit()` until after `asyncio.gather` returned. Under SQLite (this
+  suite's fast default DB) that's harmless; under real Postgres, the
+  second session's INSERT genuinely blocks waiting for the first
+  session's transaction to resolve (a `transactionid` lock wait,
+  confirmed via `pg_stat_activity`) — but that first session's commit
+  was scheduled to run only AFTER `gather` returned, which never
+  happens while the second call is still blocked. Neither coroutine
+  could make progress: a real hang, not a flaky race (reproduced
+  identically 3/3 times before the fix). Fixed by having each
+  concurrent "request" commit its own work internally before
+  returning — exactly how `food_analysis.py`'s real request-scoped
+  functions already behave (each with its own internal
+  `await db.commit()`), which is what the SIBLING file's existing,
+  working concurrency test actually gathers (full request functions,
+  not bare repository calls).
+- **Real production bug: `get_or_create_catalog_ingredient` couldn't
+  recover from an E-number conflict.** Two different display names
+  sharing the same genuine, never-before-seen E-number (e.g.
+  "Vitamin C (E300)" vs. "Ascorbic Acid (E300)") produce DIFFERENT
+  deterministic ids/normalized names, so a concurrent race between them
+  conflicts on the UNIQUE `e_number` column, not the `id` primary key.
+  The loser's recovery path only re-fetched by `id` and then by its OWN
+  alias — neither of which the WINNER's row is reachable through (it
+  has a different id and a different alias) — so it fell through to
+  the "this should be unreachable" `RuntimeError` instead of
+  converging. **Fixed**: the recovery path now also re-checks by every
+  official identifier the row carries (E-number, INS, CAS) before
+  concluding the conflict is unrecoverable. New regression test:
+  `test_concurrent_resolution_of_the_same_new_e_number_from_different_display_names_converges`.
+  See README section 13.4.
+
+**5. Complete backend test suite**: `python -m pytest -q` →
+**410 passed, 4 skipped, 0 failed** (up from 407/4 in the V15 entry —
+6 new tests from this pass's 2 fixes, minus 2 renamed/consolidated;
+net +3 test functions, +1 skip from the new E-number concurrency
+test), run BOTH on the host (Python 3.14) and inside the pinned
+`nutriguard-pr-verify` image (Python 3.12, the repo's actual pinned
+deps) — identical result both ways.
+
+**6. OpenAPI regenerated with the repository's pinned dependencies —
+EXACT MATCH, no manual reconciliation.** Running
+`app.openapi() == json.load(open("openapi.json"))` INSIDE the pinned
+`nutriguard-pr-verify` image (Python 3.12-slim, `fastapi==0.115.6`,
+`pydantic==2.10.4`, exactly as pinned in `requirements.txt`) returned
+`True` with **zero** differences — including the two hunks
+(`ImageLabelScanRequest.image`'s `format`/`contentMediaType`,
+`ValidationError`'s `input`/`ctx`) that the V15/V14 entries below
+documented as "pre-existing, unrelated environment drift" and
+hand-excluded from what they applied. This CONFIRMS that drift was
+purely an artifact of the earlier sessions' host Python (3.14, too new
+for the pinned `pydantic-core` wheel) rather than anything about the
+tracked `openapi.json` itself — with the actual pinned dependency set,
+there is no drift left to explain or exclude. No changes to
+`openapi.json` were needed in this pass.
+
+**7. Commit review** (`1d8c3d9`, `fdb025f`, plus this pass's own fixes)
+against each requested risk category:
+- *Fabricated scientific/regulatory claims*: none found —
+  `_build_minimal_row` only ever copies already-empty fields from
+  `SyntheticIngredient` (verified by re-reading every field assignment
+  in `ingredient_catalog.py`/`ocr_normalizer.py`).
+- *Incorrect verification promotion*: **found and fixed** —
+  `merge_verified_fields` was promoting a row all the way to `VERIFIED`
+  (and setting `riskAssessmentAvailable=True`, which is what lets
+  `riskLevel` influence the Health Score) for ANY non-OCR source,
+  including a future `GEMINI`-sourced merge. An AI-generated claim is
+  real content worth storing but is NOT a human/regulatory
+  confirmation. Fixed: only `REGULATORY_LOOKUP`/`CURATED_SEED`-ranked
+  sources promote to `VERIFIED`; a `GEMINI`-sourced merge now promotes
+  only to `LIMITED_DATA` and leaves `riskAssessmentAvailable` alone.
+  New tests: `test_regulatory_lookup_source_promotes_all_the_way_to_verified`,
+  `test_gemini_source_promotes_only_to_limited_data_never_verified`.
+- *Alias collisions/ambiguous aliases*: none found in the actual seed
+  data (programmatically verified: all 12 curated self-aliases + the 5
+  curated `_EXTRA_ALIASES` normalize to 17 distinct, non-colliding
+  keys). Found and fixed a related **completeness gap**: resolving via
+  E-number (step 1) returned early without registering the observed
+  display text as a new alias, so a later non-E-number-annotated
+  mention of the same name would have fallen through to creating a
+  duplicate stub instead of reaching the alias hit in step 2. Fixed —
+  see item 3-4 above and README 13.1. The known, accepted, narrow
+  residual risk from before (a curated seed entry added AFTER an
+  OCR-only stub already claimed its exact normalized name — the seed
+  loader logs and skips rather than repointing) is unchanged and still
+  intentionally out of automatic-repair scope; see the V15 entry.
+- *Lower-confidence overwrite of curated data*: re-verified via the
+  existing + new `merge_verified_fields` tests — a lower-rank OR
+  equal-rank-lower-confidence source can never touch a higher-rank
+  row's fields. No issue found beyond the verification-promotion bug
+  above.
+- *Unsafe TTL handling*: the SQLite naive/aware `datetime` bug fixed in
+  V15 was re-verified fixed (`_as_utc` applied consistently in
+  `ingredient_catalog.py`, `schemas/ingredient.py`, `food_analysis.py`)
+  — the migration/concurrency verification pass above exercises real
+  `TIMESTAMP WITH TIME ZONE` values end-to-end against genuine
+  Postgres, where this class of bug cannot occur in the first place
+  (Postgres always returns tz-aware values), so this pass adds
+  confirmation on top of the SQLite-side unit tests. No new TTL issue
+  found.
+- *Transaction/race problems*: **found and fixed two** — see item 3-4
+  above (test-harness deadlock + the E-number conflict-recovery bug).
+  Also noted (not fixed, low severity/likelihood, documented instead):
+  `_fill_missing_identity_fields` fills a null `e_number`/`ins_number`
+  on ANY row (curated or not) whenever the E-number-hit path or an
+  exact alias match supplies one, with no separate confidence gate of
+  its own — safe in practice because it can only ever fire when the
+  FULL normalized display text exactly matches an existing alias (or
+  the E-number itself already resolves), which structurally prevents a
+  stray OCR digit sequence from attaching to an unrelated curated row;
+  flagged here for visibility rather than engineered around, since
+  every synthetic ingredient's source is `OCR_HEURISTIC` regardless
+  (there is no different-source case to gate against yet).
+- *Secrets and unrelated files*: none found. `git diff --stat`
+  confined to `nutriguard-backend/` for both commits and this pass's
+  fixes; greeted for `api_key`/`secret`/`password`/PEM-block patterns
+  across the full `4b44b8f..fdb025f` range plus this pass's own diff —
+  no matches outside already-expected config field NAMES (e.g.
+  `JWT_SECRET: str`, `GEMINI_API_KEY: str = ""`); no `.env`/credential/
+  keystore-shaped file touched by any commit.
+
+Also incidentally discovered while running `tests/postgres/` as a
+whole (NOT part of this task, NOT fixed, reported for visibility): the
+PRE-EXISTING, unrelated
+`test_concurrent_enrichment_postgres.py::test_concurrent_enrichment_of_the_same_existing_row_preserves_both_groups`
+test (predates this branch entirely — inherited from `origin/main`,
+never previously run against real Postgres per every prior session's
+own "no Docker/Postgres available" note) fails deterministically (3/3
+runs) when run in the same pytest session as the file's other test, but
+passes in isolation. Root cause appears to be a stale assumption in the
+test itself, not a real application bug: V13 (already on `origin/main`
+before this branch existed) changed `_finalize_barcode_enrichment` so
+that completing ONLY the ingredients evidence group returns `200` with
+a null Health Score rather than `404`/`labelScanRequired` — this
+test's hardcoded "exactly one of the two concurrent calls succeeds, the
+other gets `ProductNotFoundError`" assertion only holds when the
+NUTRITION-only side happens to win the row-lock race, not when the
+INGREDIENTS-only side does (which now legitimately succeeds too, per
+V13). This is unrelated to the ingredient-knowledge-cache task and was
+deliberately NOT touched here (out of scope, a different file/feature);
+flagging it for a separate, dedicated fix.
+
+## Verification (this pass)
+
+- `python -m pytest -q` (host, Python 3.14): **410 passed, 4 skipped,
+  0 failed**.
+- `python -m pytest -q` (pinned image, Python 3.12): **410 passed, 4
+  skipped, 0 failed** — identical.
+- `alembic upgrade e4f5a6b7c8d9` → verify → `alembic downgrade
+  d3e4f5a6b7c8` → verify → `alembic upgrade e4f5a6b7c8d9` → verify,
+  against real disposable PostgreSQL 16: **PASSED** (see item 1-2
+  above for the exact assertions).
+- `tests/postgres/test_ingredient_catalog_concurrency_postgres.py`
+  (both tests, real disposable PostgreSQL 16, 5 repeated runs after the
+  fixes): **PASSED, 5/5, 0 failures**.
+- Runtime `app.openapi()` vs. tracked `openapi.json`, using the
+  repository's pinned dependencies (Python 3.12, `requirements.txt`
+  exactly): **EXACT MATCH — 0 differences.**
+- Commit review of `1d8c3d9`/`fdb025f` against the 7 requested risk
+  categories: 2 real issues found and fixed (see item 7 above), 1
+  unrelated pre-existing test issue found and reported (not fixed), no
+  secrets/unrelated files.
+
+## Unresolved risks (carried forward / new)
+
+- The pre-existing, unrelated `test_concurrent_enrichment_of_the_same_existing_row_preserves_both_groups`
+  test failure (see above) needs a separate, dedicated fix/task — its
+  assertion needs updating for V13's actual (correct) asymmetric
+  completion-gate behavior. Out of scope here.
+- `_fill_missing_identity_fields`'s lack of its own confidence gate
+  (see item 7 above) — safe today, flagged for whoever eventually adds
+  a second, non-OCR_HEURISTIC source that could reach that function.
+- Everything already listed as unresolved in the V15 entry below still
+  applies (no real external ingredient-lookup/regulatory-database
+  integration exists yet; `cas_number` not populated for curated seed
+  data; `_EXTRA_ALIASES` intentionally small/hand-curated) — this pass
+  did not change any of that.
+
+## Recommended next step
+
+Review the diff (including this pass's 2 bug fixes), then merge only
+after CI/human review confirms green — this handoff documents that a
+disposable Postgres 16 instance, a pinned-dependency Docker build, a
+real concurrent-session migration cycle, and the full opt-in
+concurrency suite all passed cleanly as of this pass's commit (see the
+git log / PR for the exact SHA). Do not merge or deploy without that
+separate review, per the task's own instruction.
+
+---
 
 ### V15: persistent ingredient knowledge cache
 

@@ -58,25 +58,37 @@ async def test_concurrent_resolution_of_the_same_new_ingredient_converges_on_one
     finally:
         await setup_session.close()
 
+    # `get_or_create_catalog_ingredient` is a lower-level service call
+    # meant to be composed inside a LARGER request-scoped transaction
+    # that commits once at the end (exactly how `food_analysis.py`
+    # calls it via `materialize_ingredients` -- see that module's own
+    # "exactly ONE db.commit()" transaction-boundary convention). Each
+    # concurrent "request" here must therefore commit ITS OWN work
+    # before returning, precisely like a real request would -- deferring
+    # both commits until AFTER `asyncio.gather` (as an earlier draft of
+    # this test did) self-deadlocks: the second session's INSERT blocks
+    # on Postgres waiting for the first session's transaction to
+    # resolve (commit or rollback), but that commit was scheduled to
+    # happen only after `gather` returns, which itself never happens
+    # while the second call is still blocked -- neither coroutine can
+    # make progress. Wrapping each side in its own resolve-then-commit
+    # coroutine (mirroring the sibling file's full `analyze_label_image_with_barcode(...)`
+    # calls, which already commit internally) avoids that entirely.
+    async def _resolve_and_commit(session):
+        resolved = await ingredient_catalog.get_or_create_catalog_ingredient(
+            session, create_synthetic_ingredient(ingredient_name)
+        )
+        await session.commit()
+        return resolved
+
     session_a = session_factory()
     session_b = session_factory()
     try:
         results = await asyncio.gather(
-            ingredient_catalog.get_or_create_catalog_ingredient(
-                session_a, create_synthetic_ingredient(ingredient_name)
-            ),
-            ingredient_catalog.get_or_create_catalog_ingredient(
-                session_b, create_synthetic_ingredient(ingredient_name)
-            ),
+            _resolve_and_commit(session_a),
+            _resolve_and_commit(session_b),
             return_exceptions=True,
         )
-        # Both sides need their own work committed for the "loser" to
-        # observe the "winner"'s row across separate connections/
-        # transactions -- mirrors real concurrent HTTP requests, each
-        # committing at the end of its own request.
-        for session, result in ((session_a, results[0]), (session_b, results[1])):
-            if not isinstance(result, BaseException):
-                await session.commit()
     finally:
         await session_a.close()
         await session_b.close()
@@ -106,6 +118,84 @@ async def test_concurrent_resolution_of_the_same_new_ingredient_converges_on_one
             IngredientAlias.__table__.delete().where(IngredientAlias.ingredient_id == expected_id)
         )
         await verify_session.execute(Ingredient.__table__.delete().where(Ingredient.id == expected_id))
+        await verify_session.commit()
+        await verify_session.close()
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_resolution_of_the_same_new_e_number_from_different_display_names_converges(postgres_url):
+    """Two concurrent OCR observations of the SAME never-before-seen
+    E-number but under DIFFERENT display text (different normalized
+    name, different deterministic id/slug -- e.g. "Vitamin C (E300)"
+    vs. "Ascorbic Acid (E300)") must still converge on exactly one
+    canonical `Ingredient` row, since `e_number` is the strongest
+    identity key (task requirement 2) -- not two rows racing to claim
+    the same E-number."""
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    from app.models.ingredient import Ingredient
+    from app.services import ingredient_catalog
+    from app.services.ocr_normalizer import create_synthetic_ingredient
+
+    engine = create_async_engine(postgres_url, future=True)
+    session_factory = async_sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
+
+    name_a = "Vitamin C Test (E300)"
+    name_b = "Ascorbic Acid Test (E300)"
+    synthetic_a = create_synthetic_ingredient(name_a)
+    synthetic_b = create_synthetic_ingredient(name_b)
+    assert synthetic_a.e_number == "E300"
+    assert synthetic_b.e_number == "E300"
+    assert synthetic_a.id != synthetic_b.id  # different display text -> different deterministic ids
+
+    setup_session = session_factory()
+    try:
+        await setup_session.execute(
+            Ingredient.__table__.delete().where(Ingredient.id.in_([synthetic_a.id, synthetic_b.id]))
+        )
+        await setup_session.commit()
+    finally:
+        await setup_session.close()
+
+    async def _resolve_and_commit(session, synthetic):
+        resolved = await ingredient_catalog.get_or_create_catalog_ingredient(session, synthetic)
+        await session.commit()
+        return resolved
+
+    session_a = session_factory()
+    session_b = session_factory()
+    try:
+        results = await asyncio.gather(
+            _resolve_and_commit(session_a, synthetic_a),
+            _resolve_and_commit(session_b, synthetic_b),
+            return_exceptions=True,
+        )
+    finally:
+        await session_a.close()
+        await session_b.close()
+
+    for result in results:
+        if isinstance(result, BaseException):
+            raise AssertionError(f"concurrent E-number resolution raised: {result!r}") from result
+
+    ids = {r.id for r in results}
+    assert len(ids) == 1, f"expected both concurrent calls to converge on ONE id, got {ids!r}"
+
+    verify_session = session_factory()
+    try:
+        e_number_count = (
+            await verify_session.execute(
+                select(func.count()).select_from(Ingredient).where(Ingredient.e_number == "E300")
+            )
+        ).scalar_one()
+        assert e_number_count == 1, f"expected exactly one row for E300, found {e_number_count}"
+    finally:
+        await verify_session.execute(
+            Ingredient.__table__.delete().where(Ingredient.id.in_([synthetic_a.id, synthetic_b.id]))
+        )
         await verify_session.commit()
         await verify_session.close()
 

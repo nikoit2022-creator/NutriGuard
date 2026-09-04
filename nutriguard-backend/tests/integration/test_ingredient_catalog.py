@@ -14,6 +14,7 @@ from app.models.enums import IngredientSource, IngredientVerificationStatus, Ris
 from app.models.ingredient import Ingredient
 from app.repositories import ingredient_alias_repository, ingredient_repository
 from app.services import ingredient_catalog
+from app.services.ingredient_normalization import normalize_ingredient_name
 from app.services.ocr_normalizer import create_synthetic_ingredient
 
 
@@ -64,6 +65,39 @@ async def test_local_cache_hit_by_e_number_reuses_the_curated_row_without_creati
 
     assert resolved.id == "e330_citric_acid"
     assert await ingredient_repository.count(db_session) == 1  # nothing new was created
+
+
+@pytest.mark.asyncio
+async def test_e_number_hit_registers_the_observed_display_text_as_a_new_alias(db_session):
+    """Verification-review regression: resolving via E-number (a
+    display text with no alias of its own yet, e.g. a scanning quirk
+    like a stray trailing period OCR left in the token) must ALSO
+    register that exact text as a new alias -- so a LATER scan of the
+    same display text that doesn't also happen to catch the E-number
+    (a blurrier crop) still resolves directly via alias instead of
+    falling through to creating a second, duplicate row."""
+    curated = _seeded_ingredient()
+    db_session.add(curated)
+    await db_session.flush()
+
+    first = create_synthetic_ingredient("Citric Acid Extra (E330)")
+    assert first.e_number == "E330"
+    normalized_text = normalize_ingredient_name(first.common_name)
+    resolved_via_e_number = await ingredient_catalog.get_or_create_catalog_ingredient(db_session, first)
+    assert resolved_via_e_number.id == "e330_citric_acid"
+
+    alias = await ingredient_alias_repository.get_by_normalized(db_session, normalized_text)
+    assert alias is not None
+    assert alias.ingredient_id == "e330_citric_acid"
+
+    # A later, otherwise-identical observation reuses the alias just
+    # registered (and, since `Ingredient` already exists and the alias
+    # already exists, this is now purely an alias-table hit, not a new
+    # E-number lookup outcome) -- no duplicate row either way.
+    second = create_synthetic_ingredient("Citric Acid Extra (E330)")
+    resolved_again = await ingredient_catalog.get_or_create_catalog_ingredient(db_session, second)
+    assert resolved_again.id == "e330_citric_acid"
+    assert await ingredient_repository.count(db_session) == 1
 
 
 @pytest.mark.asyncio
