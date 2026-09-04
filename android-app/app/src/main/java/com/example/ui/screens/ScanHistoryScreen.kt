@@ -38,6 +38,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.ui.theme.NutriGuardScannerTheme
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.NutriGuardSpacing
 import com.example.ui.theme.RiskGreen
@@ -70,166 +71,169 @@ fun ScanHistoryScreen(
         }
     }
 
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        item {
-            Spacer(modifier = Modifier.height(NutriGuardSpacing.md))
-            Text(
-                text = "Scan History",
-                style = MaterialTheme.typography.headlineLarge,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                text = "All products scanned and analyzed on this device",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(NutriGuardSpacing.sm))
-        }
-
-        if (historyList.isEmpty()) {
+    NutriGuardScannerTheme {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
             item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(NutriGuardRadius.large),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(32.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(56.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.surfaceVariant),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.History,
-                                contentDescription = "Empty history",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(28.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = "No Scanned Products Yet",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Scan a barcode or photograph an ingredient label from the Scan tab to see your log.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                        )
-                        Spacer(modifier = Modifier.height(20.dp))
-                        androidx.compose.material3.Button(
-                            onClick = onNavigateToScan,
-                            shape = RoundedCornerShape(NutriGuardRadius.medium),
-                            colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = com.example.ui.theme.EmeraldPrimary)
-                        ) {
-                            Text("Start Scanning")
-                        }
-                    }
-                }
+                Spacer(modifier = Modifier.height(NutriGuardSpacing.md))
+                Text(
+                    text = "Scan History",
+                    style = MaterialTheme.typography.headlineLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = "All products scanned and analyzed on this device",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(NutriGuardSpacing.sm))
             }
-        } else {
-            items(historyList) { history ->
-                val (scoreColor, scoreBg) = when {
-                    history.healthScore >= 80 -> RiskGreen to RiskGreen.copy(alpha = 0.15f)
-                    history.healthScore >= 60 -> RiskYellow to RiskYellow.copy(alpha = 0.15f)
-                    history.healthScore >= 40 -> RiskOrange to RiskOrange.copy(alpha = 0.15f)
-                    else -> RiskRed to RiskRed.copy(alpha = 0.15f)
-                }
 
-                val dateFormatted = SimpleDateFormat("MMM d, yyyy • h:mm a", Locale.getDefault())
-                    .format(Date(history.scannedAt))
-
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(NutriGuardRadius.medium))
-                        .clickable {
-                            val barcode = history.barcode
-                            if (!barcode.isNullOrBlank()) {
-                                pendingBarcode = barcode
-                                viewModel.scanBarcode(barcode)
-                            }
-                        },
-                    shape = RoundedCornerShape(NutriGuardRadius.medium),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+            if (historyList.isEmpty()) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(NutriGuardRadius.large),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f)
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(32.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(NutriGuardRadius.small))
-                                    .background(scoreBg)
-                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                                    .size(56.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                                contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    text = "${history.healthScore}",
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = scoreColor
+                                Icon(
+                                    imageVector = Icons.Default.History,
+                                    contentDescription = "Empty history",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(28.dp)
                                 )
                             }
-
-                            Spacer(modifier = Modifier.width(12.dp))
-
-                            Column {
-                                Text(
-                                    text = history.productName,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onSurface
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "No Scanned Products Yet",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Scan a barcode or photograph an ingredient label from the Scan tab to see your log.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(20.dp))
+                            androidx.compose.material3.Button(
+                                onClick = onNavigateToScan,
+                                shape = RoundedCornerShape(NutriGuardRadius.medium),
+                                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.primary
                                 )
-                                Text(
-                                    text = "${history.brand} • ${history.scanType}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Text(
-                                    text = dateFormatted,
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                                )
+                            ) {
+                                Text("Start Scanning")
                             }
                         }
+                    }
+                }
+            } else {
+                items(historyList) { history ->
+                    val (scoreColor, scoreBg) = when {
+                        history.healthScore >= 80 -> RiskGreen to RiskGreen.copy(alpha = 0.15f)
+                        history.healthScore >= 60 -> RiskYellow to RiskYellow.copy(alpha = 0.15f)
+                        history.healthScore >= 40 -> RiskOrange to RiskOrange.copy(alpha = 0.15f)
+                        else -> RiskRed to RiskRed.copy(alpha = 0.15f)
+                    }
 
-                        Icon(
-                            imageVector = Icons.Default.ChevronRight,
-                            contentDescription = "View Analysis",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                        )
+                    val dateFormatted = SimpleDateFormat("MMM d, yyyy • h:mm a", Locale.getDefault())
+                        .format(Date(history.scannedAt))
+
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(NutriGuardRadius.medium))
+                            .clickable {
+                                val barcode = history.barcode
+                                if (!barcode.isNullOrBlank()) {
+                                    pendingBarcode = barcode
+                                    viewModel.scanBarcode(barcode)
+                                }
+                            },
+                        shape = RoundedCornerShape(NutriGuardRadius.medium),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(NutriGuardRadius.small))
+                                        .background(scoreBg)
+                                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                                ) {
+                                    Text(
+                                        text = "${history.healthScore}",
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = scoreColor
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(12.dp))
+
+                                Column {
+                                    Text(
+                                        text = history.productName,
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = "${history.brand} • ${history.scanType}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = dateFormatted,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                    )
+                                }
+                            }
+
+                            Icon(
+                                imageVector = Icons.Default.ChevronRight,
+                                contentDescription = "View Analysis",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            )
+                        }
                     }
                 }
             }
-        }
 
-        item {
-            Spacer(modifier = Modifier.height(24.dp))
+            item {
+                Spacer(modifier = Modifier.height(24.dp))
+            }
         }
     }
 }
-
