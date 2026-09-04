@@ -45,7 +45,9 @@ sealed interface AnalysisUiState {
  * shape: a genuine success, a structured partial ("more evidence
  * needed") result, or a retryable failure. The screen stays put for
  * the whole [Searching] window and only navigates to Product Details
- * once a call resolves with a genuine success (see
+ * once a call resolves with a genuine success (including an
+ * ingredient-recognition success whose Health Score is still pending;
+ * see
  * [navigateToResultEvent]) -- never eagerly, and never for
  * [LabelScanRequired] or [Failed].
  */
@@ -256,14 +258,14 @@ class MainViewModel(
      * `POST /api/v1/scan/ocr-text` (review round 2, finding 2). Shares
      * [barcodeLookupState] with [scanBarcode]/[analyzeLabelImage] (see
      * that state's docs) -- stays on the Scan screen showing
-     * [BarcodeLookupUiState.Searching], and only navigates on a
-     * genuine, complete success; a structured partial result shows the
-     * verified evidence and what's still missing, exactly like a label
-     * photo, never a locally-fabricated Health Score.
+     * [BarcodeLookupUiState.Searching], and navigates on any genuine
+     * success. A structured partial result shows the verified evidence
+     * and what's still missing, exactly like a label photo, never a
+     * locally-fabricated Health Score.
      *
      * [pendingBarcode] is attached automatically exactly like
      * [analyzeLabelImage] -- a barcode-linked text submission keeps it
-     * until a genuine full success or an explicit cancel; a standalone
+     * until nutrition is also verified or an explicit cancel; a standalone
      * submission (no pending barcode) never adopts the synthetic
      * `ocr_.../img_...` id a plain response's own identity carries.
      */
@@ -276,7 +278,12 @@ class MainViewModel(
                 val result = repository.analyzeOcrText(text, barcodeForThisSubmission)
                 _analysisState.value = AnalysisUiState.Success(result)
                 _barcodeLookupState.value = BarcodeLookupUiState.Idle
-                _pendingBarcode.value = null
+                _pendingBarcode.value =
+                    if (barcodeForThisSubmission != null && !result.product.hasVerifiedNutrition) {
+                        barcodeForThisSubmission
+                    } else {
+                        null
+                    }
                 _navigateToResultEvent.tryEmit(Unit)
             } catch (e: LabelScanRequiredException) {
                 // Still incomplete -- a useful partial result, not a
@@ -322,8 +329,8 @@ class MainViewModel(
      * gallery pick -- both routes call this same function, see
      * `ScanHomeScreen`) for analysis. Shares [barcodeLookupState] with
      * [scanBarcode] (see that state's docs): stays on the Scan screen
-     * showing [BarcodeLookupUiState.Searching], and only navigates on a
-     * genuine, complete success.
+     * showing [BarcodeLookupUiState.Searching], and navigates on any
+     * genuine success.
      *
      * If [pendingBarcode] is currently set (a prior `scanBarcode` call
      * returned `labelScanRequired`, or an earlier photo for the SAME
@@ -332,11 +339,13 @@ class MainViewModel(
      * with that barcode identity into ONE product -- this is what lets
      * two sequential photos (e.g. nutrition panel, then ingredients
      * list) merge into the same result. [pendingBarcode] is cleared
-     * only on a genuine full success; a request that comes back STILL
-     * incomplete (another [LabelScanRequiredException]) leaves it
-     * untouched, so a follow-up photo keeps combining into the same
-     * product. Standalone submissions (no [pendingBarcode] set) are
-     * unaffected either way -- exactly the pre-existing behavior.
+     * only once nutrition is also verified; a request that succeeds
+     * with ingredients recognized but Health Score still pending keeps
+     * it, so a follow-up nutrition-panel photo keeps combining into the
+     * same product. A request that comes back STILL incomplete
+     * ([LabelScanRequiredException]) also leaves it untouched.
+     * Standalone submissions (no [pendingBarcode] set) are unaffected
+     * either way -- exactly the pre-existing behavior.
      */
     fun analyzeLabelImage(bitmap: Bitmap) {
         if (_barcodeLookupState.value is BarcodeLookupUiState.Searching) return
@@ -347,7 +356,12 @@ class MainViewModel(
                 val result = repository.analyzeImageLabel(bitmap, barcodeForThisSubmission)
                 _analysisState.value = AnalysisUiState.Success(result)
                 _barcodeLookupState.value = BarcodeLookupUiState.Idle
-                _pendingBarcode.value = null
+                _pendingBarcode.value =
+                    if (barcodeForThisSubmission != null && !result.product.hasVerifiedNutrition) {
+                        barcodeForThisSubmission
+                    } else {
+                        null
+                    }
                 _navigateToResultEvent.tryEmit(Unit)
             } catch (e: LabelScanRequiredException) {
                 // Still incomplete -- a useful partial result, not a

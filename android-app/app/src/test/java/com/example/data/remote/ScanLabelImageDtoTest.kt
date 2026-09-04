@@ -9,6 +9,7 @@ import com.example.util.WarningSeverity
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -42,7 +43,10 @@ class ScanLabelImageDtoTest {
             "isVegetarian": true,
             "isHalal": true,
             "isKosher": false,
-            "allergensDetected": "Peanuts, Soy"
+            "allergensDetected": "Peanuts, Soy",
+            "hasVerifiedNutrition": true,
+            "hasVerifiedIngredients": true,
+            "isVerified": true
           },
           "ingredients": [
             {
@@ -132,6 +136,9 @@ class ScanLabelImageDtoTest {
 
         // allergensDetected is the backend's string value, not a joined list.
         assertEquals("Peanuts, Soy", product.allergensDetected)
+        assertTrue(product.hasVerifiedNutrition)
+        assertTrue(product.hasVerifiedIngredients)
+        assertTrue(product.isVerified)
 
         // Ingredient fields, camelCase, flat badFor* (no nested health_profile_triggers).
         assertEquals(1, parsed.ingredients.size)
@@ -180,7 +187,7 @@ class ScanLabelImageDtoTest {
         assertEquals("Unknown Brand", product.brand)
         assertEquals("General Food", product.category)
         assertEquals("", product.rawIngredientText)
-        assertEquals(50, product.healthScore)
+        assertNull(product.healthScore)
         assertEquals(3, product.novaGroup)
         assertEquals(0.0, product.sugarGrams, 0.0001)
         assertEquals(0.0, product.sodiumMg, 0.0001)
@@ -194,6 +201,9 @@ class ScanLabelImageDtoTest {
         assertTrue(product.isHalal)
         assertTrue(product.isKosher)
         assertEquals("", product.allergensDetected)
+        assertFalse(product.hasVerifiedNutrition)
+        assertFalse(product.hasVerifiedIngredients)
+        assertFalse(product.isVerified)
         assertTrue(parsed.ingredients.isEmpty())
         assertTrue(parsed.warnings.isEmpty())
     }
@@ -207,7 +217,7 @@ class ScanLabelImageDtoTest {
 
         assertTrue(parsed.product.barcode.startsWith("SYNTH_IMG_"))
         assertEquals("Scanned Product", parsed.product.productName)
-        assertEquals(50, parsed.product.healthScore)
+        assertNull(parsed.product.healthScore)
     }
 
     // TEST 3: the multipart request part uses field name "image", not "file".

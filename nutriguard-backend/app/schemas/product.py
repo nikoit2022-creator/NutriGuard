@@ -38,3 +38,18 @@ class ProductOut(ORMModel):
 
     allergens_detected: str
     timestamp: int
+
+    # Additive (V13, documented, see README "Deviations" section 6 item
+    # 11 / section 11.14): these three were previously internal-only
+    # (see `app/models/product.py`'s docstring), but a `200` success
+    # response can now legitimately have `has_verified_nutrition=False`
+    # (an ingredients-only label/OCR scan) -- the client needs a
+    # reliable way to tell "no Health Score yet" (nutrition not
+    # verified) apart from "a genuine score of a low value", and to
+    # distinguish ingredient-recognition success from full
+    # verification/health-score readiness. `is_verified` is exactly
+    # `has_verified_nutrition AND has_verified_ingredients`, included
+    # for convenience so the client never has to recompute it.
+    has_verified_nutrition: bool
+    has_verified_ingredients: bool
+    is_verified: bool

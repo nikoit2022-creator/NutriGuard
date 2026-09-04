@@ -173,13 +173,20 @@ fun ProductDetailScreen(
 
                 // Health Score Gauge
                 item {
-                    HealthScoreGauge(
-                        score = analysis.healthScore,
-                        novaGroup = product.novaGroup,
-                        sugarGrams = product.sugarGrams,
-                        sodiumMg = product.sodiumMg,
-                        saturatedFatGrams = product.saturatedFatGrams
-                    )
+                    if (analysis.healthScore != null) {
+                        HealthScoreGauge(
+                            score = analysis.healthScore,
+                            novaGroup = product.novaGroup,
+                            sugarGrams = product.sugarGrams,
+                            sodiumMg = product.sodiumMg,
+                            saturatedFatGrams = product.saturatedFatGrams
+                        )
+                    } else {
+                        PendingHealthScoreCard(
+                            hasVerifiedIngredients = product.hasVerifiedIngredients,
+                            hasVerifiedNutrition = product.hasVerifiedNutrition
+                        )
+                    }
                 }
 
                 // Dietary Suitability Badges
@@ -309,3 +316,37 @@ fun ProductDetailScreen(
     }
 }
 
+@Composable
+private fun PendingHealthScoreCard(
+    hasVerifiedIngredients: Boolean,
+    hasVerifiedNutrition: Boolean
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(NutriGuardRadius.large),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+    ) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            Text(
+                text = "Health Score Pending",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = when {
+                    hasVerifiedIngredients && !hasVerifiedNutrition ->
+                        "Ingredients were recognized successfully. Scan the nutrition table to calculate a Health Score."
+                    !hasVerifiedIngredients && hasVerifiedNutrition ->
+                        "Nutrition data was found, but the ingredient list still needs a clearer scan."
+                    else ->
+                        "This scan saved useful product data, but more label evidence is needed before a Health Score can be calculated."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}

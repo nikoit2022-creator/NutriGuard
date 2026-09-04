@@ -512,19 +512,18 @@ async def test_literal_placeholder_barcode_values_become_none(app_client, monkey
 async def test_ocr_text_without_barcode_is_backward_compatible(app_client):
     """No `barcode` field at all -> still routed to the standalone
     (no-barcode) pipeline, same synthetic `ocr_...` identity as always.
-    V12 (review round 5, finding 1): the RESPONSE shape for this
-    endpoint changed (see `test_standalone_ocr_text_...` below) -- this
-    test only pins that omitting the field is still handled the same
-    way `_upload`'s placeholder-barcode tests above pin it for
-    `/scan/label-image`."""
+    V13: this endpoint now returns `200` once ingredients are recognized
+    (see `test_standalone_ocr_text_...` below) -- this test only pins
+    that omitting the field is still handled the same way `_upload`'s
+    placeholder-barcode tests above pin it for `/scan/label-image`."""
     headers = await _register_device(app_client, "ocr-text-no-barcode-device")
     resp = await app_client.post(
         "/api/v1/scan/ocr-text",
         json={"rawText": "Water, Sugar, Salt, Citric Acid"},
         headers=headers,
     )
-    assert resp.status_code == 404
-    barcode = resp.json()["error"]["details"]["discoveredIdentity"]["barcode"]
+    assert resp.status_code == 200
+    barcode = resp.json()["product"]["barcode"]
     assert barcode.startswith("ocr_")
 
 
@@ -537,11 +536,14 @@ async def test_ocr_text_with_barcode_enriches_canonical_product(app_client, db_s
         json={"rawText": "Water, Sugar, Salt, Citric Acid", "barcode": barcode},
         headers=headers,
     )
-    # Deterministic fallback nutrition (the documented OCR-text quirk --
-    # see food_analysis.analyze_ocr_text_with_barcode) is never treated
-    # as genuinely verified, so this stays labelScanRequired.
-    assert resp.status_code == 404
-    assert resp.json()["error"]["details"]["labelScanRequired"] is True
+    # V13: ingredients recognized from real, literal OCR text -> normal
+    # 200 success. Deterministic fallback nutrition (the documented
+    # OCR-text quirk -- see food_analysis.analyze_ocr_text_with_barcode)
+    # is still never treated as genuinely verified, so no Health Score.
+    assert resp.status_code == 200
+    assert resp.json()["healthScore"] is None
+    assert resp.json()["product"]["hasVerifiedNutrition"] is False
+    assert resp.json()["product"]["hasVerifiedIngredients"] is True
     assert await _product_count(db_session, barcode) == 1
 
 
@@ -777,7 +779,10 @@ async def test_nan_nutrition_value_is_never_persisted_db_level(app_client, monke
 
     barcode = "3775945807980"
     resp = await _upload(app_client, headers, barcode=barcode)
-    assert resp.status_code == 404  # sodiumMg rejected -> still incomplete
+    # V13: sodiumMg rejected -> nutrition stays incomplete, but real
+    # ingredients WERE recognized -> normal 200, healthScore null.
+    assert resp.status_code == 200
+    assert resp.json()["healthScore"] is None
 
     db_session.expire_all()
     stored = await db_session.get(Product, barcode)
@@ -793,7 +798,10 @@ async def test_infinity_nutrition_value_is_never_persisted_db_level(app_client, 
 
     barcode = "6941115109544"
     resp = await _upload(app_client, headers, barcode=barcode)
-    assert resp.status_code == 404
+    # V13: rejected nutrition value alone no longer fails the scan --
+    # ingredients were recognized -> 200, healthScore null.
+    assert resp.status_code == 200
+    assert resp.json()["healthScore"] is None
 
     db_session.expire_all()
     stored = await db_session.get(Product, barcode)
@@ -808,7 +816,8 @@ async def test_negative_nutrition_value_is_never_persisted_db_level(app_client, 
 
     barcode = "9413482690590"
     resp = await _upload(app_client, headers, barcode=barcode)
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    assert resp.json()["healthScore"] is None
 
     db_session.expire_all()
     stored = await db_session.get(Product, barcode)
@@ -823,7 +832,8 @@ async def test_boolean_nutrition_value_is_never_persisted_db_level(app_client, m
 
     barcode = "2981884718725"
     resp = await _upload(app_client, headers, barcode=barcode)
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    assert resp.json()["healthScore"] is None
 
     db_session.expire_all()
     stored = await db_session.get(Product, barcode)
@@ -838,7 +848,8 @@ async def test_out_of_range_nutrition_value_is_never_persisted_db_level(app_clie
 
     barcode = "0743961627182"
     resp = await _upload(app_client, headers, barcode=barcode)
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    assert resp.json()["healthScore"] is None
 
     db_session.expire_all()
     stored = await db_session.get(Product, barcode)
@@ -853,7 +864,8 @@ async def test_placeholder_string_nutrition_value_is_never_persisted_db_level(ap
 
     barcode = "6854312189007"
     resp = await _upload(app_client, headers, barcode=barcode)
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    assert resp.json()["healthScore"] is None
 
     db_session.expire_all()
     stored = await db_session.get(Product, barcode)
@@ -894,8 +906,10 @@ async def test_incomplete_enrichment_does_not_overwrite_existing_safe_nutrition_
     headers = await _register_device(app_client, "preserve-existing-nutrition-device")
 
     resp = await _upload(app_client, headers, barcode=barcode)
-    # sugarGrams rejected this round -> still incomplete overall.
-    assert resp.status_code == 404
+    # V13: sugarGrams rejected this round -> nutrition still incomplete
+    # overall, but real ingredients WERE recognized -> 200, score null.
+    assert resp.status_code == 200
+    assert resp.json()["healthScore"] is None
 
     db_session.expire_all()
     stored = await db_session.get(Product, barcode)
@@ -1184,8 +1198,10 @@ async def test_two_separate_label_scans_with_complementary_evidence_complete_pro
         saturatedFatGrams=float("nan"),
     )
     resp1 = await _upload(app_client, headers, barcode=barcode)
-    assert resp1.status_code == 404  # still incomplete -- nutrition missing
-    assert resp1.json()["error"]["details"]["labelScanRequired"] is True
+    # V13: ingredients recognized -> 200, even though nutrition is
+    # still missing (no Health Score yet).
+    assert resp1.status_code == 200
+    assert resp1.json()["healthScore"] is None
 
     db_session.expire_all()
     after_first = await db_session.get(Product, barcode)
@@ -1477,38 +1493,34 @@ async def test_standalone_label_image_null_nutrition_field_is_not_fabricated_ver
     one nutrition value (the label was unreadable there) -- must NOT
     silently score from a placeholder zero.
 
-    V12 (review round 5, finding 3): this is exactly the normal
+    V13 (see README section 11.14): this is exactly the normal
     "ingredients-only photo" case (the Android "Ingredient Label" tab's
     everyday output when only the ingredients list, not the nutrition
-    panel, was in frame) -- the response must hand back the genuinely
-    verified ingredient evidence as useful partial data, not just a
-    bare retry signal."""
+    panel, was in frame) -- ingredient recognition succeeded, so this is
+    now a normal `200` success carrying the genuinely verified
+    ingredient evidence, just with no Health Score."""
     _mock_full_gemini(monkeypatch, sodiumMg=None)
     headers = await _register_device(app_client, "standalone-null-nutrition-device")
 
     resp = await _upload(app_client, headers)
-    assert resp.status_code == 404
-    error = resp.json()["error"]
-    assert error["code"] == "PRODUCT_NOT_FOUND"
-    assert error["details"]["labelScanRequired"] is True
+    assert resp.status_code == 200
+    body = resp.json()
 
-    # Additive partial-analysis fields (finding 3): no fabricated/zero
-    # score, but the genuinely verified ingredients ARE included.
-    assert error["details"]["analysisComplete"] is False
-    assert error["details"]["healthScoreAvailable"] is False
-    assert error["details"]["healthScore"] is None
-    assert error["details"]["nutritionScanRequired"] is True
-    assert error["details"]["ingredientsScanRequired"] is False
-    ingredients_out = error["details"]["ingredients"]
+    # No fabricated/zero score, but the genuinely verified ingredients
+    # ARE included in the normal success response.
+    assert body["healthScore"] is None
+    assert body["warnings"] == []
+    assert body["product"]["hasVerifiedNutrition"] is False
+    assert body["product"]["hasVerifiedIngredients"] is True
+    ingredients_out = body["ingredients"]
     assert len(ingredients_out) >= 1
     names = {ing["commonName"] for ing in ingredients_out}
     assert "Sugar" in names
-    # Full IngredientOut-shaped entries (same shape the success response's
-    # `ingredients` array already uses) -- not a truncated summary.
+    # Full IngredientOut-shaped entries -- not a truncated summary.
     assert "riskLevel" in ingredients_out[0]
     assert "isVegan" in ingredients_out[0]
 
-    barcode = error["details"]["discoveredIdentity"]["barcode"]
+    barcode = body["product"]["barcode"]
     stored = await db_session.get(Product, barcode)
     assert stored.has_verified_nutrition is False
     assert stored.has_verified_ingredients is True
@@ -1563,18 +1575,20 @@ async def test_standalone_label_image_no_raw_image_bytes_persisted(app_client, m
 async def test_standalone_label_image_incomplete_response_still_preserves_provenance_and_no_image_bytes(
     app_client, monkeypatch, db_session
 ):
-    """The provenance/no-image-bytes guarantees above must hold for the
-    INCOMPLETE (404 partial) path too, not only the success path --
-    `_record_label_provenance` and `PIL.Image.verify()`-only image
-    handling both run before the completeness check."""
+    """The provenance/no-image-bytes guarantees above must hold for an
+    ingredients-only (nutrition still missing, V13: normal `200`) result
+    too, not only a fully-verified success -- `_record_label_provenance`
+    and `PIL.Image.verify()`-only image handling both run before the
+    Health-Score-readiness check."""
     image_bytes = _fake_jpeg_bytes()
     _mock_full_gemini(monkeypatch, sodiumMg=None)
     headers = await _register_device(app_client, "standalone-incomplete-provenance-device")
 
     files = {"image": ("label.jpg", image_bytes, "image/jpeg")}
     resp = await app_client.post("/api/v1/scan/label-image", headers=headers, files=files)
-    assert resp.status_code == 404
-    barcode = resp.json()["error"]["details"]["discoveredIdentity"]["barcode"]
+    assert resp.status_code == 200
+    assert resp.json()["healthScore"] is None
+    barcode = resp.json()["product"]["barcode"]
 
     sources = (
         await db_session.execute(
@@ -1591,25 +1605,29 @@ async def test_standalone_label_image_incomplete_response_still_preserves_proven
 
 
 @pytest.mark.asyncio
-async def test_neither_standalone_incomplete_response_creates_a_scan_history_entry(
+async def test_neither_standalone_ingredients_only_response_creates_a_scan_history_entry(
     app_client, monkeypatch, db_session
 ):
-    """Neither incomplete standalone path (label-image or ocr-text) may
-    leave behind a scan-history entry carrying a fake/placeholder score
-    -- `_finalize_standalone_label_analysis` only calls
-    `scan_history_repository.insert` AFTER the completeness gate."""
+    """Neither standalone path (label-image or ocr-text) may leave
+    behind a scan-history entry carrying a fake/placeholder score for an
+    ingredients-only result (V13: both now return `200`) --
+    `_finalize_standalone_label_analysis` only calls
+    `scan_history_repository.insert` when nutrition is ALSO verified,
+    i.e. when there is a real score to log."""
     from app.models.scan_history import ScanHistory
 
     _mock_full_gemini(monkeypatch, sodiumMg=None)
     headers = await _register_device(app_client, "no-scan-history-device")
 
     img_resp = await _upload(app_client, headers)
-    assert img_resp.status_code == 404
+    assert img_resp.status_code == 200
+    assert img_resp.json()["healthScore"] is None
 
     ocr_resp = await app_client.post(
         "/api/v1/scan/ocr-text", json={"rawText": "Water, Sugar, Salt"}, headers=headers
     )
-    assert ocr_resp.status_code == 404
+    assert ocr_resp.status_code == 200
+    assert ocr_resp.json()["healthScore"] is None
 
     count = (await db_session.execute(select(func.count()).select_from(ScanHistory))).scalar_one()
     assert count == 0
@@ -1670,10 +1688,8 @@ async def test_barcode_nutrition_plus_partial_ingredients_completes_normally(
 @pytest.mark.asyncio
 async def test_standalone_ocr_text_prefers_bulgarian_over_other_language_duplicate(app_client, db_session):
     """The language policy (EN/BG preference) still applies to standalone
-    OCR text even though the response is now gated on completeness (V12,
-    review round 5, finding 1) -- the language-resolved text isn't
-    surfaced in the 404 body itself (see `_label_scan_required_details`),
-    so this checks the PERSISTED row directly, same pattern the other
+    OCR text -- ingredients are recognized here (V13: normal `200`), so
+    this checks the PERSISTED row directly, same pattern the other
     `standalone_label_image_*` language tests in this section use."""
     headers = await _register_device(app_client, "standalone-ocr-bg-preferred-device")
     resp = await app_client.post(
@@ -1681,55 +1697,53 @@ async def test_standalone_ocr_text_prefers_bulgarian_over_other_language_duplica
         json={"rawText": "Вода, Захар, Сол / Wasser, Zucker, Salz"},
         headers=headers,
     )
-    assert resp.status_code == 404  # ingredients verified, nutrition never is -- see below
-    barcode = resp.json()["error"]["details"]["discoveredIdentity"]["barcode"]
+    assert resp.status_code == 200  # ingredients verified, nutrition never is -- see below
+    assert resp.json()["healthScore"] is None
+    barcode = resp.json()["product"]["barcode"]
 
     stored = await db_session.get(Product, barcode)
     assert "Захар" in stored.raw_ingredient_text
     assert "Zucker" not in stored.raw_ingredient_text
 
 
-# V12 (PR #9 review round 5, finding 1): the `always_verified` escape
-# hatch that used to force EVERY standalone `/scan/ocr-text` call to
-# `200`/`is_verified=True` regardless of nutrition trustworthiness has
-# been removed. This endpoint's nutrition is ALWAYS a heuristic guess,
-# never genuinely extracted -- so it can now NEVER complete the
-# NUTRITION group on its own, and a standalone OCR-text submission
-# CONSISTENTLY returns the partial/`labelScanRequired` response instead
-# of a fabricated `200`. See README section 11.11.
+# V13 (see README section 11.14): ingredient RECOGNITION, not full
+# verification, is the success gate for a label-driven scan. This
+# endpoint's nutrition is ALWAYS a heuristic guess, never genuinely
+# extracted -- so it can still NEVER complete the NUTRITION group on its
+# own -- but literal user-submitted OCR text IS always genuine
+# ingredient evidence, so a standalone OCR-text submission now
+# CONSISTENTLY returns a normal `200` (with `healthScore: null`) instead
+# of the `labelScanRequired` response.
 
 
 @pytest.mark.asyncio
-async def test_standalone_ocr_text_returns_partial_ingredients_without_health_score(app_client, db_session):
+async def test_standalone_ocr_text_returns_success_without_health_score(app_client, db_session):
     headers = await _register_device(app_client, "standalone-ocr-partial-device")
     resp = await app_client.post(
         "/api/v1/scan/ocr-text", json={"rawText": "Water, Sugar, Salt"}, headers=headers
     )
-    assert resp.status_code == 404
-    error = resp.json()["error"]
-    assert error["code"] == "PRODUCT_NOT_FOUND"
-    assert "healthScore" not in resp.json()  # not a FullProductAnalysisOut body at all
-    details = error["details"]
-    assert details["labelScanRequired"] is True
-    assert details["analysisComplete"] is False
-    assert details["healthScoreAvailable"] is False
-    assert details["healthScore"] is None
-    assert details["nutritionScanRequired"] is True
-    assert details["ingredientsScanRequired"] is False  # literal OCR text IS trustworthy ingredient evidence
-    ingredients_out = details["ingredients"]
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["healthScore"] is None
+    assert body["warnings"] == []
+    assert body["product"]["hasVerifiedNutrition"] is False
+    assert body["product"]["hasVerifiedIngredients"] is True
+    assert body["product"]["isVerified"] is False
+    ingredients_out = body["ingredients"]
     assert len(ingredients_out) >= 1
     names = {ing["commonName"] for ing in ingredients_out}
     assert "Sugar" in names
 
-    barcode = details["discoveredIdentity"]["barcode"]
+    barcode = body["product"]["barcode"]
     stored = await db_session.get(Product, barcode)
     assert stored.has_verified_nutrition is False
     assert stored.has_verified_ingredients is True
     assert stored.is_verified is False
 
-    # Consistent everywhere: a LATER lookup of the same (still
-    # incomplete) synthetic id also correctly stays gated -- no
-    # endpoint fabricates verification for it.
+    # A LATER lookup of the same (still nutrition-incomplete) synthetic
+    # id stays gated on `/scan/barcode` specifically -- that endpoint has
+    # no ingredient-recognition step of its own and is unaffected by
+    # V13, so it still only returns a genuine, non-null Health Score.
     lookup = await app_client.post("/api/v1/scan/barcode", json={"barcode": barcode}, headers=headers)
     assert lookup.status_code == 404
     assert lookup.json()["error"]["details"]["labelScanRequired"] is True
@@ -1760,8 +1774,9 @@ async def test_standalone_ocr_text_gemini_success_still_does_not_verify_nutritio
     resp = await app_client.post(
         "/api/v1/scan/ocr-text", json={"rawText": "Water, Sugar, Salt"}, headers=headers
     )
-    assert resp.status_code == 404
-    assert resp.json()["error"]["details"]["nutritionScanRequired"] is True
+    assert resp.status_code == 200
+    assert resp.json()["healthScore"] is None
+    assert resp.json()["product"]["hasVerifiedNutrition"] is False
 
 
 @pytest.mark.asyncio
@@ -1778,9 +1793,12 @@ async def test_ocr_text_with_barcode_then_label_image_completes_the_product(app_
         json={"rawText": "Contains: Sodium Nitrite, Corn Syrup", "barcode": barcode},
         headers=headers,
     )
-    assert ocr_resp.status_code == 404
-    assert ocr_resp.json()["error"]["details"]["ingredientsScanRequired"] is False
-    assert ocr_resp.json()["error"]["details"]["nutritionScanRequired"] is True
+    # V13: ingredients recognized from real OCR text -> normal 200,
+    # just with no Health Score yet (nutrition still missing).
+    assert ocr_resp.status_code == 200
+    assert ocr_resp.json()["healthScore"] is None
+    assert ocr_resp.json()["product"]["hasVerifiedIngredients"] is True
+    assert ocr_resp.json()["product"]["hasVerifiedNutrition"] is False
 
     _mock_full_gemini(
         monkeypatch,

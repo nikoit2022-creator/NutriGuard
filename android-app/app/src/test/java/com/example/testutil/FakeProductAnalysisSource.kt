@@ -103,8 +103,11 @@ fun sampleFullProductAnalysis(
     barcode: String = "4006381333931",
     productName: String = "Test Product",
     brand: String = "Test Brand",
-    healthScore: Int = 75,
-    isFromDatabaseCache: Boolean = false
+    healthScore: Int? = 75,
+    isFromDatabaseCache: Boolean = false,
+    hasVerifiedNutrition: Boolean = true,
+    hasVerifiedIngredients: Boolean = true,
+    isVerified: Boolean = true
 ): FullProductAnalysis {
     val product = ProductEntity(
         barcode = barcode,
@@ -126,7 +129,10 @@ fun sampleFullProductAnalysis(
         isVegetarian = false,
         isHalal = true,
         isKosher = true,
-        allergensDetected = "None"
+        allergensDetected = "None",
+        hasVerifiedNutrition = hasVerifiedNutrition,
+        hasVerifiedIngredients = hasVerifiedIngredients,
+        isVerified = isVerified
     )
     return FullProductAnalysis(
         product = product,

@@ -63,7 +63,10 @@ async def _seed_known_product(app_client, monkeypatch, headers, barcode: str) ->
         json={"rawText": "Contains: Sodium Nitrite, Corn Syrup", "barcode": barcode},
         headers=headers,
     )
-    assert seed.status_code == 404  # ingredients-only partial, by design
+    # V13: ingredients recognized -> normal 200 success, just with no
+    # Health Score yet (nutrition not verified through this endpoint).
+    assert seed.status_code == 200
+    assert seed.json()["healthScore"] is None
 
     async def fake_analyze_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
         return json.dumps(

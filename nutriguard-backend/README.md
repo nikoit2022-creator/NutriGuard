@@ -12,6 +12,50 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V13 (product change: ingredient-recognition success vs. health-score
+readiness):** `POST /scan/label-image`, `POST /scan/ocr-text`, and
+their barcode-linked variants used to treat FULL verification
+(`is_verified`/`is_complete` -- BOTH the nutrition and ingredients
+evidence groups) as the one gate for returning `200` at all. That
+conflated two different goals: ingredient recognition/categorization
+(what these scans are FOR) and full nutrition verification for Health
+Score readiness (a separate, optional bonus). The most common single
+label photo -- one that clearly shows the ingredients list but not the
+nutrition panel -- was returning the SAME `404`/`labelScanRequired`
+"please rescan" response as a genuine extraction failure, even though
+the ingredients had just been read and categorized correctly.
+
+1. **Success gate is now `has_verified_ingredients`/`ingredients_complete`
+   alone**, not `is_verified`/`is_complete`. `_finalize_barcode_enrichment`
+   and `_finalize_standalone_label_analysis` (the shared tail ends of
+   all four affected functions) return `200` whenever ingredient
+   recognition succeeded, independent of nutrition completeness.
+   `404`/`labelScanRequired` is now reserved for a genuine extraction
+   failure: no trustworthy ingredient evidence at all (Gemini AND the
+   deterministic fallback both produced nothing usable for
+   `/scan/label-image`; an unreadable submission for `/scan/ocr-text`).
+2. **`health_score` is now `int | None`** (CONTRACT CHANGE, additive --
+   `FullProductAnalysisOut` gained no new required field, only a wider
+   type for an existing one -- see item 11 below). A genuine score when
+   nutrition is ALSO verified; `null` (never a fabricated `0`) when it
+   isn't. No scan-history entry is written when there is no real score
+   to log. Health Score stays exactly what it always computed from
+   (`app/services/health_score.py`, unchanged) -- only WHEN it's
+   computed, and what happens when it can't be, changed.
+3. **`ProductOut` additively exposes `hasVerifiedNutrition`/
+   `hasVerifiedIngredients`/`isVerified`** so a client can tell "no
+   Health Score yet" (nutrition not verified) apart from "a genuine,
+   low score", and can render ingredient-recognition success and
+   health-score readiness as the two independent signals they now are.
+4. **`POST /scan/barcode` (`analyze_barcode`) is INTENTIONALLY
+   UNCHANGED.** It has no ingredient-recognition step of its own --
+   it's a pure identity lookup against trusted product sources -- so it
+   keeps gating on `is_verified` exactly as before (V6/V11).
+
+See section 11.14 and the "V13" entry in
+`app/services/food_analysis.py`'s module docstring for the full design
+rationale, and section 6 item 11 for the contract-change writeup.
+
 **V12 (bug fixes, PR #9 review round 5):** V11's field-safety fixes and
 cumulative-completeness model were correct, but three further gaps
 surfaced in review:
@@ -742,10 +786,62 @@ than silently resolved:
     pinned-dependency regeneration): `FullProductAnalysisOut` gained no
     fields, and `error.details` was already untyped `Any`. Covered by
     `tests/integration/test_label_barcode_enrichment.py`'s
-    `test_standalone_ocr_text_returns_partial_ingredients_without_health_score`
+    `test_standalone_ocr_text_returns_success_without_health_score`
     and `test_standalone_ocr_text_gemini_success_still_does_not_verify_nutrition`,
     and `tests/integration/test_scan_flow.py`'s
-    `test_scan_ocr_text_returns_partial_analysis_without_health_score`.
+    `test_scan_ocr_text_returns_success_without_health_score`.
+    **Superseded in part by V13** (item 11 below): this endpoint now
+    returns `200`, not `404`, for the "ingredients recognized, nutrition
+    not" case -- the underlying fact that this endpoint's nutrition can
+    never be genuinely verified through this endpoint alone is
+    unchanged, only what response that produces is different.
+
+11. **`POST /scan/label-image`/`POST /scan/ocr-text` (and their
+    barcode-linked variants) no longer gate `200` on full verification
+    (V13, product change).** Items 6 and 10 above (and section 11.11's
+    `is_verified` design) established `is_verified`/`is_complete` --
+    BOTH the nutrition and ingredients evidence groups -- as the single
+    gate for a `200` response from every label-driven scan. In practice
+    that conflated two different goals: ingredient recognition/
+    categorization (the primary purpose of a label scan) and full
+    nutrition verification for Health Score readiness (a separate,
+    optional bonus). The single most common real photo -- one that
+    clearly shows the ingredients list but not the nutrition panel --
+    was returning the exact same `404`/`labelScanRequired` "please
+    rescan" response as a genuine extraction failure (Gemini AND the
+    fallback both producing nothing usable), even though the
+    ingredients had just been read and categorized correctly. This has
+    been changed: the success gate for
+    `_finalize_barcode_enrichment`/`_finalize_standalone_label_analysis`
+    is now `has_verified_ingredients`/`ingredients_complete` alone.
+    `is_verified`/`has_verified_nutrition`/`has_verified_ingredients`
+    themselves, their merge semantics, and the `labelScanRequired`
+    response shape are ALL UNCHANGED -- only which side of that gate a
+    `200` vs. a `404` falls on. **Minimal contract change**:
+    `FullProductAnalysisOut.healthScore` is now `int | None` (a genuine
+    score when nutrition is also verified, `null` -- never a fabricated
+    `0` -- otherwise; no scan-history entry is written when there's no
+    real score to log), and `ProductOut` additively exposes
+    `hasVerifiedNutrition`/`hasVerifiedIngredients`/`isVerified` so a
+    client can tell "no score yet" apart from "a genuine low score".
+    Both changes are additive/widening only -- diffed against
+    `openapi.json` (see below) -- no field was removed or narrowed. A
+    barcode with a visible/supplied barcode is always used as the
+    product identity/enrichment key (unchanged from V8). `POST
+    /scan/barcode` (a pure identity lookup, no ingredient-recognition
+    step of its own) is INTENTIONALLY UNCHANGED -- it still only ever
+    returns a genuine, non-null Health Score, gated on `is_verified`
+    exactly as before. The OpenAPI schema diff for this change is
+    reviewed and applied to the checked-in `openapi.json` (the two
+    touched schemas, `FullProductAnalysisOut` and `ProductOut`, were
+    verified against the live app's generated schema; a full
+    pinned-dependency regeneration could not be run in this environment
+    -- the pinned `pydantic-core==2.10.4` has no prebuilt wheel for the
+    Python 3.14 interpreter available here and there is no C toolchain
+    to build one, an environment limitation unrelated to this change).
+    See section 11.14 for the full design writeup and
+    `tests/integration/test_ingredient_recognition_success.py` for the
+    end-to-end regression coverage.
 
 No other ambiguities were found that required deviating from the
 contract; where the contract was silent on an implementation detail
@@ -784,6 +880,33 @@ instruction not to modify the mobile app**:
 - No Retrofit/network client exists in the app yet; `FoodAnalysisRepository` reads/writes Room directly.
 - No token storage (e.g. `EncryptedSharedPreferences`/`DataStore`) for the access/refresh tokens this backend issues.
 - `GEMINI_API_KEY` is still embedded in the client's `BuildConfig` and called directly from the device — this backend supersedes that call path, but removing the client-side key requires an app change.
+
+**V13 contract change the client will need to handle (see section 11.14):**
+- `healthScore` in `FullProductAnalysisOut` is now nullable. A `200` from
+  `/scan/label-image`/`/scan/ocr-text` (or their barcode-linked variants)
+  can carry `healthScore: null` — this means "ingredients recognized,
+  nutrition not yet reliably known", not an error and not a real score
+  of 0. The client should render the product/ingredients normally and
+  show a "Health Score pending — scan the nutrition panel" affordance
+  (rather than a 0/100 score) whenever `healthScore` is `null`.
+- `ProductOut` additively gained `hasVerifiedNutrition`/
+  `hasVerifiedIngredients`/`isVerified` — the client can use these
+  instead of inferring completeness from `healthScore` alone.
+- `POST /scan/ocr-text` (standalone, no barcode) now returns `200`
+  instead of the `404`/`labelScanRequired` it returned as of V12 for
+  every call — nutrition there is still never genuinely verified on its
+  own, so `healthScore` will be `null` on essentially every standalone
+  call, but the endpoint itself no longer errors.
+- `/scan/label-image` and the barcode-linked variants now return `200`
+  (previously `404`/`labelScanRequired`) for the very common
+  "ingredients-only photo" case. A client that currently branches on
+  status code (200 = show result, 404 = show "rescan" prompt) should
+  instead branch on `healthScore == null` / `hasVerifiedNutrition ==
+  false` to decide whether to prompt for a nutrition-panel rescan — the
+  `404`/`labelScanRequired` path is now reserved for a genuine
+  extraction failure (nothing readable in the photo at all).
+- No behavior change for `POST /scan/barcode` — it still only ever
+  returns a genuine, non-null `healthScore`, or `404`.
 
 ## 10. Multi-source barcode product discovery
 
@@ -1775,6 +1898,125 @@ a disposable container — see the PR/final report for the transcript.
   proves the "already-verified nutrition + this scan's genuinely
   verified ingredients" case returns the normal full `200`, never the
   partial shape, once both groups are true.
+
+**V13 new coverage:** `tests/integration/test_ingredient_recognition_success.py`
+is the dedicated end-to-end file for this change -- one test per
+scenario named in the task: a standalone ingredients-only label image
+succeeding; a barcode-linked ingredients-only image enriching the
+product BY THAT BARCODE (identity, persisted `ingredient_ids`,
+provenance all checked); nutrition remaining optional across all three
+call shapes (standalone label image, barcode-linked label image,
+standalone OCR text) in one test; a Health Score appearing only for a
+nutrition-complete product and NOT for an otherwise-identical
+ingredients-only one (and never leaking into `/scan-history` for the
+latter); and a true upstream failure (Gemini unavailable, no barcode/
+provider evidence either) still returning the structured
+`labelScanRequired` `404`, standalone and barcode-linked. Every
+PRE-EXISTING test in `test_label_barcode_enrichment.py`,
+`test_scan_flow.py`, and `test_barcode_contract_change.py` that
+asserted the OLD `404`-on-incomplete-nutrition behavior for a case
+where ingredients WERE genuinely recognized was updated in place to the
+new `200`/`healthScore: null` expectation (its underlying DB-level
+assertions -- e.g. "a rejected nutrition value is never persisted,
+never overwrites an earlier safe one" -- are unchanged, only the
+response's status code and shape); tests describing a TRUE extraction
+failure (no barcode/provider evidence, Gemini AND the fallback both
+producing nothing usable) were left exactly as they were, since V13
+does not change that case at all.
+
+### 11.14 Ingredient-recognition success vs. health-score readiness (V13)
+
+**The problem.** A label scan (`/scan/label-image`, `/scan/ocr-text`,
+and their barcode-linked variants) does two genuinely different jobs:
+(1) extract the product name/ingredient text, recognize ingredient/
+entity names, and categorize them against the scientific ingredient
+database -- the scan's PRIMARY purpose -- and (2) extract a reliable
+nutrition panel, which feeds a SEPARATE, optional Health Score. Before
+V13, one gate (`is_verified`/`is_complete`, requiring BOTH) decided
+whether the endpoint returned `200` at all. Since a huge share of real
+photos legitimately capture only the ingredients list (or only the
+nutrition panel), that made the single most common successful scan
+outcome indistinguishable, at the HTTP level, from a genuine failure to
+read the label at all -- both returned `404`/`labelScanRequired`.
+
+**The fix.** `_finalize_barcode_enrichment` and
+`_finalize_standalone_label_analysis` (the shared tail ends of
+`analyze_label_image`, `analyze_ocr_text`,
+`analyze_label_image_with_barcode`, and `analyze_ocr_text_with_barcode`
+-- see `app/services/food_analysis.py`) now gate success on
+`has_verified_ingredients`/`ingredients_complete` alone:
+
+```
+if not <ingredients recognized>:
+    # genuine failure: no trustworthy ingredient evidence at all
+    raise ProductNotFoundError(..., details=_label_scan_required_details(product, None))
+
+# success: ingredients recognized -- persist, and separately...
+health_score = None
+if <nutrition also verified>:
+    health_score = <computed, and a scan-history entry is written>
+return {"product": ..., "ingredients": ..., "health_score": health_score, ...}
+```
+
+Everything upstream of that gate is UNCHANGED: the Gemini/fallback
+extraction chain (`_run_label_image_pipeline`/`_run_ai_or_fallback`),
+ingredient matching/categorization against the scientific database
+(`ocr_normalizer`/`ingredient_repository`), the language/translation
+policy (`label_language.resolve_label_text`), the barcode-as-identity-
+key merge rules (`_apply_label_enrichment`, "Barcode + label
+enrichment" section above), and the `has_verified_nutrition`/
+`has_verified_ingredients`/`is_verified` flags themselves and how
+they're computed (`_nutrition_group_is_complete`/
+`_ingredients_group_is_complete`, still requiring the same "all three
+core numeric inputs" / "real ingredient text" evidence as before, per
+V7/V11). What changed is purely which side of the response (`200` vs.
+`404`) a given completeness combination falls on, and what a `200`
+response now looks like when nutrition isn't part of it.
+
+**Why this is safe.** The failure case V13 must NOT weaken --
+"Gemini/image extraction is temporarily unavailable and there are no
+real extracted ingredients" -- still fails, because `ingredients_complete`
+is False in exactly that case: `_run_label_image_pipeline`'s
+deterministic fallback (for `/scan/label-image`) tokenizes a hardcoded
+placeholder/error string, never real label content, so
+`ingredients_trustworthy` (and therefore `ingredients_complete`) is
+`False`; the `has_verified_ingredients` cumulative gate in
+`_finalize_barcode_enrichment` is unaffected by this attempt either.
+`/scan/ocr-text` is the one case that now ALWAYS succeeds
+(`ingredients_trustworthy=True` unconditionally, since the caller's own
+literal text -- rejected below 3 characters by the router -- is
+genuine evidence by definition), which is a deliberate consequence of
+the same principle, not a new gap: this endpoint's ingredients were
+already always trustworthy before V13 (`has_verified_ingredients` could
+already become `True` on the very first call); only whether that alone
+was enough for a `200` has changed.
+
+**Response contract (minimal, additive/widening only -- see section 6
+item 11 for the full writeup):** `FullProductAnalysisOut.healthScore`
+is `int | None`; `null` (never a fabricated `0`) whenever nutrition
+isn't ALSO verified. `ProductOut` additively exposes
+`hasVerifiedNutrition`/`hasVerifiedIngredients`/`isVerified` so a
+client never has to infer completeness from a `null` score alone.
+`warnings` is `[]` (not partially computed from zero-filled/placeholder
+nutrition -- see `_score_and_warnings`, which is only ever called at
+all once nutrition is verified) whenever `healthScore` is `null`. No
+`scan_history` row is written for that scan (there's no real score to
+log) -- a client relying on `/scan-history` to show every past scan,
+not just scored ones, would need a product-owner decision to change
+that table's `health_score` column to nullable, which V13 deliberately
+does NOT do (out of scope -- see "Android client changes" in the PR/
+task response for the explicit call-out).
+
+**Barcode as identity key (requirement, unchanged from V8).** When a
+barcode is supplied alongside a label image (`/scan/label-image`'s
+optional multipart `barcode` field, or `/scan/ocr-text`'s optional JSON
+`barcode` field), it is ALWAYS used as the product's identity/
+enrichment key -- `_finalize_barcode_enrichment` resolves/creates the
+canonical row under that barcode (via `product_repository.get_by_barcode_or_aliases`
++ `insert_new`/`_apply_label_enrichment`) regardless of whether
+nutrition was also captured. V13 does not touch this at all; it only
+changes what response the caller gets back once that resolution
+finishes.
 
 ## 11.12 Canonical label evidence, nutrition basis, and test diagnostics
 

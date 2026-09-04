@@ -90,6 +90,32 @@ class MainViewModelBarcodeTest {
     }
 
     @Test
+    fun `barcode linked label success without nutrition keeps pending barcode for a follow up scan`() = runTest(testDispatcher) {
+        val fake = FakeProductAnalysisSource()
+        val viewModel = MainViewModel(fake)
+        fake.barcodeResult = Result.failure(LabelScanRequiredException("incomplete", null, emptyList(), null))
+        fake.imageResult = Result.success(
+            sampleFullProductAnalysis(
+                barcode = "4006381333931",
+                healthScore = null,
+                hasVerifiedNutrition = false,
+                hasVerifiedIngredients = true,
+                isVerified = false
+            )
+        )
+
+        viewModel.scanBarcode("4006381333931")
+        testDispatcher.scheduler.advanceUntilIdle()
+        viewModel.analyzeLabelImage(Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888))
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals("4006381333931", viewModel.pendingBarcode.value)
+        val analysis = viewModel.analysisState.value
+        assertTrue(analysis is AnalysisUiState.Success)
+        assertNull((analysis as AnalysisUiState.Success).analysis.healthScore)
+    }
+
+    @Test
     fun `scanBarcode ignores a repeated call while already searching`() = runTest(testDispatcher) {
         val fake = FakeProductAnalysisSource()
         fake.barcodeResult = Result.success(sampleFullProductAnalysis())

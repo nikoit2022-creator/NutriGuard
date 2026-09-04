@@ -58,32 +58,30 @@ async def _seed_verified_product(
 
 
 @pytest.mark.asyncio
-async def test_scan_ocr_text_returns_partial_analysis_without_health_score(app_client):
-    """V12 (PR #9 review round 5, finding 1): standalone `/scan/ocr-text`
-    no longer returns a `200` with a fabricated Health Score computed
-    from its always-heuristic nutrition -- see
-    `food_analysis.analyze_ocr_text`'s docstring. It DOES still establish
-    genuinely trustworthy ingredient evidence (real, literal OCR text),
-    surfaced as useful partial data on the resulting `404` (finding 3) --
-    see `tests/integration/test_label_barcode_enrichment.py`'s
-    "Standalone (no-barcode) endpoints" section for the full contract
-    coverage; this test just pins THIS endpoint's baseline shape."""
+async def test_scan_ocr_text_returns_success_without_health_score(app_client):
+    """V13 (see `food_analysis.analyze_ocr_text`'s docstring and README
+    section 11.14): standalone `/scan/ocr-text` returns a normal `200`
+    once ingredients are recognized -- real, literal OCR text always
+    is -- even though its nutrition figures are always a heuristic
+    guess, never genuinely verified. `healthScore` is `null` (never a
+    fabricated number) and `product.hasVerifiedNutrition` is `false`;
+    ingredient recognition succeeding is NOT gated on nutrition. See
+    `tests/integration/test_label_barcode_enrichment.py`'s "Standalone
+    (no-barcode) endpoints" section for the full contract coverage; this
+    test just pins THIS endpoint's baseline shape."""
     headers = await _register_device(app_client)
     resp = await app_client.post(
         "/api/v1/scan/ocr-text",
         json={"rawText": "Water, High Fructose Corn Syrup, Sodium Benzoate (E211)"},
         headers=headers,
     )
-    assert resp.status_code == 404
-    error = resp.json()["error"]
-    assert error["code"] == "PRODUCT_NOT_FOUND"
-    details = error["details"]
-    assert details["labelScanRequired"] is True
-    assert details["healthScoreAvailable"] is False
-    assert details["healthScore"] is None
-    assert details["nutritionScanRequired"] is True
-    assert details["ingredientsScanRequired"] is False
-    assert len(details["ingredients"]) >= 1
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["healthScore"] is None
+    assert body["warnings"] == []
+    assert body["product"]["hasVerifiedNutrition"] is False
+    assert body["product"]["hasVerifiedIngredients"] is True
+    assert len(body["ingredients"]) >= 1
 
 
 @pytest.mark.asyncio
@@ -255,15 +253,16 @@ async def test_get_product_not_found(app_client):
 @pytest.mark.asyncio
 async def test_get_product_after_scan(app_client):
     """GET /products/{barcode} finds a product row regardless of its
-    verification status -- it is still persisted even though `/scan/
-    ocr-text` itself now returns `404`/`labelScanRequired` for it (V12,
-    review round 5, finding 1)."""
+    verification status -- including one from `/scan/ocr-text`, which
+    (V13) now returns `200` itself once ingredients are recognized,
+    even without a Health Score."""
     headers = await _register_device(app_client)
     scan = await app_client.post(
         "/api/v1/scan/ocr-text", json={"rawText": "Water, Salt"}, headers=headers
     )
-    assert scan.status_code == 404
-    barcode = scan.json()["error"]["details"]["discoveredIdentity"]["barcode"]
+    assert scan.status_code == 200
+    assert scan.json()["healthScore"] is None
+    barcode = scan.json()["product"]["barcode"]
 
     resp = await app_client.get(f"/api/v1/products/{barcode}", headers=headers)
     assert resp.status_code == 200

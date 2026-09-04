@@ -749,7 +749,14 @@
             "title": "Ingredients"
           },
           "healthScore": {
-            "type": "integer",
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Healthscore"
           },
           "warnings": {
@@ -773,7 +780,7 @@
           "isFromDatabaseCache"
         ],
         "title": "FullProductAnalysisOut",
-        "description": "Mirrors com.example.data.repository.FullProductAnalysis (API Contract 5.9)."
+        "description": "Mirrors com.example.data.repository.FullProductAnalysis (API Contract 5.9).\n\nCONTRACT CHANGE (V13, documented, see README \"Deviations\" section 6\nitem 11 / section 11.14): `health_score` is now `int | None` instead\nof always `int`. A label-driven scan (`/scan/label-image`,\n`/scan/ocr-text`, and their barcode-linked variants) can return a\nnormal `200` success once ingredient recognition succeeds, even when\nnutrition extraction is missing/incomplete -- there is then no real\nHealth Score to report, and `null` is returned rather than a\nfabricated placeholder (never `0`, which would read as a real, very\npoor score). `/scan/barcode` is unaffected: it still only ever\nreturns a genuine, non-null score (see `food_analysis.analyze_barcode`)."
       },
       "HTTPValidationError": {
         "properties": {
@@ -1461,6 +1468,18 @@
           "timestamp": {
             "type": "integer",
             "title": "Timestamp"
+          },
+          "hasVerifiedNutrition": {
+            "type": "boolean",
+            "title": "Hasverifiednutrition"
+          },
+          "hasVerifiedIngredients": {
+            "type": "boolean",
+            "title": "Hasverifiedingredients"
+          },
+          "isVerified": {
+            "type": "boolean",
+            "title": "Isverified"
           }
         },
         "type": "object",
@@ -1485,7 +1504,10 @@
           "isHalal",
           "isKosher",
           "allergensDetected",
-          "timestamp"
+          "timestamp",
+          "hasVerifiedNutrition",
+          "hasVerifiedIngredients",
+          "isVerified"
         ],
         "title": "ProductOut",
         "description": "Mirrors com.example.data.model.ProductEntity exactly (API Contract 5.5).\n\n`ingredient_ids` is populated by the repository layer as a\ncomma-separated string (matching the Room column) even though the\ndatabase stores a normalized many-to-many relation internally."

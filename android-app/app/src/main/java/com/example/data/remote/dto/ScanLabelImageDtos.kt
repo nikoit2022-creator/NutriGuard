@@ -21,6 +21,9 @@ data class ScanLabelImageResponseDto(
     val isFromDatabaseCache: Boolean? = null
 ) {
     companion object {
+        private fun JSONObject.optNullableInt(key: String): Int? =
+            if (!has(key) || isNull(key)) null else optInt(key)
+
         fun fromJson(json: JSONObject): ScanLabelImageResponseDto {
             val productObj = json.optJSONObject("product")
             val ingredientsArray = json.optJSONArray("ingredients")
@@ -49,7 +52,7 @@ data class ScanLabelImageResponseDto(
             return ScanLabelImageResponseDto(
                 product = productObj?.let { ProductDto.fromJson(it) },
                 ingredients = ingredientsList,
-                healthScore = if (json.has("healthScore")) json.optInt("healthScore") else null,
+                healthScore = json.optNullableInt("healthScore"),
                 warnings = warningsList,
                 isFromDatabaseCache = if (json.has("isFromDatabaseCache")) json.optBoolean("isFromDatabaseCache") else null
             )
@@ -83,9 +86,15 @@ data class ProductDto(
     val isVegetarian: Boolean? = null,
     val isHalal: Boolean? = null,
     val isKosher: Boolean? = null,
-    val allergensDetected: String? = null
+    val allergensDetected: String? = null,
+    val hasVerifiedNutrition: Boolean? = null,
+    val hasVerifiedIngredients: Boolean? = null,
+    val isVerified: Boolean? = null
 ) {
     companion object {
+        private fun JSONObject.optNullableInt(key: String): Int? =
+            if (!has(key) || isNull(key)) null else optInt(key)
+
         fun fromJson(json: JSONObject): ProductDto {
             return ProductDto(
                 barcode = json.optString("barcode").takeIf { it.isNotBlank() },
@@ -95,7 +104,7 @@ data class ProductDto(
                 imageUrl = json.optString("imageUrl").takeIf { it.isNotBlank() },
                 rawIngredientText = json.optString("rawIngredientText").takeIf { it.isNotBlank() },
                 ingredientIds = json.optString("ingredientIds").takeIf { it.isNotBlank() },
-                healthScore = if (json.has("healthScore")) json.optInt("healthScore") else null,
+                healthScore = json.optNullableInt("healthScore"),
                 novaGroup = if (json.has("novaGroup")) json.optInt("novaGroup") else null,
                 sugarGrams = if (json.has("sugarGrams")) json.optDouble("sugarGrams") else null,
                 sodiumMg = if (json.has("sodiumMg")) json.optDouble("sodiumMg") else null,
@@ -108,7 +117,10 @@ data class ProductDto(
                 isVegetarian = if (json.has("isVegetarian")) json.optBoolean("isVegetarian") else null,
                 isHalal = if (json.has("isHalal")) json.optBoolean("isHalal") else null,
                 isKosher = if (json.has("isKosher")) json.optBoolean("isKosher") else null,
-                allergensDetected = json.optString("allergensDetected").takeIf { it.isNotBlank() }
+                allergensDetected = json.optString("allergensDetected").takeIf { it.isNotBlank() },
+                hasVerifiedNutrition = if (json.has("hasVerifiedNutrition")) json.optBoolean("hasVerifiedNutrition") else null,
+                hasVerifiedIngredients = if (json.has("hasVerifiedIngredients")) json.optBoolean("hasVerifiedIngredients") else null,
+                isVerified = if (json.has("isVerified")) json.optBoolean("isVerified") else null
             )
         }
     }
@@ -249,7 +261,8 @@ fun parseWarningSeverity(value: String?): WarningSeverity {
 data class ParsedScanData(
     val product: ProductEntity,
     val ingredients: List<IngredientEntity>,
-    val warnings: List<HealthWarning>
+    val warnings: List<HealthWarning>,
+    val isFromDatabaseCache: Boolean
 )
 
 /**
@@ -315,7 +328,7 @@ fun ScanLabelImageResponseDto.toParsedEntities(): ParsedScanData {
         category = productDto?.category ?: "General Food",
         rawIngredientText = productDto?.rawIngredientText ?: "",
         ingredientIds = joinedIngredientIds,
-        healthScore = healthScore ?: 50,
+        healthScore = healthScore,
         novaGroup = productDto?.novaGroup ?: 3,
         sugarGrams = productDto?.sugarGrams ?: 0.0,
         sodiumMg = productDto?.sodiumMg ?: 0.0,
@@ -329,6 +342,9 @@ fun ScanLabelImageResponseDto.toParsedEntities(): ParsedScanData {
         isHalal = productDto?.isHalal ?: true,
         isKosher = productDto?.isKosher ?: true,
         allergensDetected = productDto?.allergensDetected ?: "",
+        hasVerifiedNutrition = productDto?.hasVerifiedNutrition ?: false,
+        hasVerifiedIngredients = productDto?.hasVerifiedIngredients ?: false,
+        isVerified = productDto?.isVerified ?: false,
         imageUrl = productDto?.imageUrl,
         timestamp = System.currentTimeMillis()
     )
@@ -346,6 +362,7 @@ fun ScanLabelImageResponseDto.toParsedEntities(): ParsedScanData {
     return ParsedScanData(
         product = productEntity,
         ingredients = ingredientEntities,
-        warnings = domainWarnings
+        warnings = domainWarnings,
+        isFromDatabaseCache = isFromDatabaseCache ?: false
     )
 }

@@ -75,6 +75,41 @@ V7 (PR #7 review, round 2 fixes, documented, see README "Deviations"):
     a pre-existing/legacy row stored under a non-canonical form (e.g. a
     12-digit UPC-A row, found via a later 13-digit EAN-13-equivalent
     scan) is still found instead of duplicated.
+
+V13 (documented, see README "Deviations" section 6 item 11 / section
+11.14): INGREDIENT-RECOGNITION SUCCESS VS. HEALTH-SCORE READINESS.
+`/scan/label-image`, `/scan/ocr-text`, and their barcode-linked
+variants used to treat "sufficient verified data for a Health Score"
+(`is_complete`/`is_verified` — BOTH the nutrition and ingredients
+evidence groups) as the one gate for returning `200` at all. That
+conflated two different goals: ingredient recognition/categorization
+(this scan's PRIMARY purpose — see `_run_label_image_pipeline`/
+`_run_ai_or_fallback`, the ingredient-matching pipeline, and
+`app/services/ocr_normalizer.py`) and full nutrition verification for
+Health Score readiness (a separate, optional bonus). A label photo
+that clearly shows the ingredients list but not the nutrition panel —
+by far the most common single-photo "Ingredient Label" scan — was
+returning the SAME `404`/`labelScanRequired` "please rescan" response
+as a genuine extraction failure, even though the ingredients had just
+been read and categorized correctly.
+
+The success/failure gate for these four functions is now
+`has_verified_ingredients`/`ingredients_complete` alone (see
+`_finalize_barcode_enrichment` and `_finalize_standalone_label_analysis`
+below) — a `200` is returned whenever ingredient recognition succeeded,
+regardless of nutrition completeness. `is_verified`/`is_complete`
+(BOTH groups) is unchanged and continues to gate ONLY the Health Score:
+`health_score` in the response is `int | None` (see
+`app/schemas/scan.py`'s docstring) — a genuine score when nutrition is
+also verified, `None` (never a fabricated `0`) otherwise; no
+scan-history entry is written when there is no real score to log.
+`labelScanRequired`/404 is now reserved for what it should always have
+meant: no trustworthy ingredient evidence was extracted at all — Gemini
+AND the deterministic fallback both failed to produce real, usable
+label content. `POST /scan/barcode` (`analyze_barcode`, no image/OCR
+text — a pure identity lookup) is INTENTIONALLY UNCHANGED: it has no
+ingredient-recognition step of its own to succeed at, so it keeps
+gating on `is_verified` exactly as before.
 """
 import time
 import uuid
@@ -767,19 +802,21 @@ async def analyze_ocr_text(db: AsyncSession, user_id: uuid.UUID, raw_text: str) 
     characters), so `has_verified_ingredients` DOES still become True,
     same as before.
 
-    The practical effect: a standalone `/scan/ocr-text` call now
-    consistently returns the SAME structured `404 PRODUCT_NOT_FOUND` /
-    `labelScanRequired` response (with the partial, verified-ingredients
-    evidence attached -- see `_label_scan_required_details`) that
-    `/scan/label-image` already uses for an incomplete result, instead
-    of a `200` carrying a fabricated score -- since nutrition can never
-    be genuinely verified through THIS endpoint alone, that is now
-    EVERY call, not just a failure case. A barcode resubmitted through
-    `analyze_ocr_text_with_barcode` is unaffected by this scoping: an
-    EXISTING row's already-verified nutrition (from a trusted barcode
-    provider, or a later `/scan/label-image` call) is preserved and
-    still completes the product normally -- see that function's
-    docstring and README section 11.11's Android-facing contract note.
+    V13 AMENDMENT (see module docstring "V13" entry and README section
+    11.14 -- supersedes the paragraph above): `_finalize_standalone_label_analysis`
+    now gates success on ingredient recognition alone, not on full
+    verification. Since `ingredients_trustworthy=True` unconditionally
+    here, a standalone `/scan/ocr-text` call now ALWAYS returns `200`
+    (the router already rejects anything under 3 characters before this
+    function even runs) -- carrying the caller's own genuinely
+    recognized/categorized ingredients, but with `healthScore: null` and
+    `hasVerifiedNutrition: false` on the product, since nutrition still
+    can never be genuinely verified through this endpoint alone. A
+    barcode resubmitted through `analyze_ocr_text_with_barcode` is
+    unaffected by this scoping: an EXISTING row's already-verified
+    nutrition (from a trusted barcode provider, or a later
+    `/scan/label-image` call) is preserved and still completes the
+    product normally -- see that function's docstring.
     """
     all_db_ingredients = await ingredient_repository.get_all(db)
     data, ingredients = await _run_ai_or_fallback("Scanned Product", raw_text, all_db_ingredients)
@@ -852,6 +889,14 @@ async def analyze_ocr_text(db: AsyncSession, user_id: uuid.UUID, raw_text: str) 
 #   - A barcode that fails `barcode_validation.validate_and_normalize`
 #     is rejected with the standard `ValidationAppError` before any
 #     work is done -- never silently treated as "no barcode".
+#
+# V13 AMENDMENT: everything above (the merge rules themselves --
+# per-field identity/nutrition/ingredients merging, the `has_verified_*`
+# completeness gates, `is_verified`) is UNCHANGED. What changed is what
+# `_finalize_barcode_enrichment` does with the result: it now returns
+# `200` whenever `has_verified_ingredients` is True, independent of
+# `has_verified_nutrition`/`is_verified` -- see the module docstring's
+# "V13" entry and that function's own gate for the full rationale.
 # ---------------------------------------------------------------------------
 
 # Identity values considered "not meaningful" -- either a generic
@@ -1276,21 +1321,22 @@ async def _finalize_barcode_enrichment(
 
     Transaction boundaries (review finding 3): exactly ONE `db.commit()`
     call on every path through this function, not several --
-      - incomplete enrichment (nutrition still not verified after the
-        merge): ONE commit persists the product change and its
-        provenance together, then `ProductNotFoundError` is raised
-        (`labelScanRequired`) -- never a product row committed without
-        its provenance, and never a partial write left behind by a
-        later failure, because nothing before that commit is persisted
-        either.
-      - successful (verified) enrichment: product change + provenance +
-        Health Score + scan history are all flushed in-memory first and
-        committed together in the ONE final `db.commit()` below -- a
-        failure at ANY point before it (a provenance write error, a
-        scan-history write error, anything) rolls back the ENTIRE
-        attempt, including the product merge/insert, via `get_db`'s
-        `except Exception: await session.rollback()` (see
-        `app/database/session.py`). See
+      - no ingredients recognized (V13: the actual failure case, see
+        this function's own success-gate comment below -- no trustworthy
+        ingredient evidence at all, ever, for this barcode): ONE commit
+        persists the product change and its provenance together, then
+        `ProductNotFoundError` is raised (`labelScanRequired`) -- never a
+        product row committed without its provenance, and never a
+        partial write left behind by a later failure, because nothing
+        before that commit is persisted either.
+      - successful (ingredients recognized) enrichment: product change +
+        provenance + (when nutrition is ALSO verified) Health Score +
+        scan history are all flushed in-memory first and committed
+        together in the ONE final `db.commit()` below -- a failure at
+        ANY point before it (a provenance write error, a scan-history
+        write error, anything) rolls back the ENTIRE attempt, including
+        the product merge/insert, via `get_db`'s `except Exception:
+        await session.rollback()` (see `app/database/session.py`). See
         `tests/integration/test_label_barcode_enrichment.py`'s
         `test_*_failure_rolls_back_*` tests for direct proof.
     """
@@ -1356,56 +1402,71 @@ async def _finalize_barcode_enrichment(
         used_for_persisted_product=used_label_analysis,
     )
 
-    if not product.is_verified:
+    # SUCCESS GATE (V13, see module docstring "Ingredient-recognition
+    # success vs. health-score readiness" and README section 11.14):
+    # label-driven product enrichment succeeds once ingredient
+    # RECOGNITION succeeds -- not once the whole product is fully
+    # verified. `has_verified_ingredients` is cumulative for this
+    # barcode (see `_apply_label_enrichment`), so this is True whenever
+    # THIS attempt or any EARLIER one for the same barcode ever produced
+    # trustworthy ingredient evidence. Missing/incomplete NUTRITION
+    # alone never fails this endpoint any more -- only a genuine
+    # extraction failure (no trustworthy ingredients at all, ever, for
+    # this barcode) still returns the structured `labelScanRequired`
+    # response, exactly as before.
+    if not product.has_verified_ingredients:
         # Atomically persist ONLY the permitted incomplete identity +
         # provenance (one commit, nothing else -- no Health Score, no
-        # scan history for a row that isn't verified) before surfacing
-        # the same structured `labelScanRequired` response
-        # `/scan/barcode` already uses for this situation. `is_verified`
-        # (V11: both `has_verified_nutrition` AND
-        # `has_verified_ingredients`) is the single completeness gate --
-        # a row missing either evidence group still correctly returns
-        # `labelScanRequired` here.
+        # scan history for a row with no recognized ingredients) before
+        # surfacing the same structured `labelScanRequired` response
+        # `/scan/barcode` already uses for this situation.
         #
-        # V12 (review round 5, finding 3): if THIS attempt (or an
-        # earlier one) already locked in genuinely trustworthy
-        # ingredients, hand them back as useful partial data rather than
-        # discarding them -- e.g. a nutrition-panel-only follow-up photo
-        # for a product whose ingredients were already verified.
-        partial_ingredients = (
-            await fetch_ingredients_for_product(db, product) if product.has_verified_ingredients else None
-        )
+        # `has_verified_ingredients` is False here by construction, so
+        # there is never genuinely trustworthy partial-ingredient
+        # evidence to hand back (contrast `analyze_barcode`, which can
+        # legitimately reach this same helper function with ingredients
+        # verified but nutrition missing -- that path's own partial-
+        # ingredients handling is unaffected by this change).
         await db.commit()
         raise ProductNotFoundError(
-            f"Product {product.barcode} was found but lacks sufficient verified data for a Health Score.",
-            details=_label_scan_required_details(product, partial_ingredients),
+            f"Product {product.barcode} could not be read reliably -- no ingredients were recognized.",
+            details=_label_scan_required_details(product, None),
         )
 
     ingredients_out = await fetch_ingredients_for_product(db, product)
-    profile = await _get_profile_namespace(db, user_id)
-    score, warnings = _score_and_warnings(product, ingredients_out, profile)
-    product.health_score = score
 
-    await scan_history_repository.insert(
-        db,
-        ScanHistory(
-            user_id=user_id,
-            barcode=product.barcode,
-            product_name=product.product_name,
-            brand=product.brand,
-            health_score=score,
-            scan_type=scan_type,
-        ),
-    )
+    # Health Score stays a SEPARATE axis (V13): computed only when
+    # nutrition is ALSO reliably known -- ingredient-recognition success
+    # above must never depend on it. A successful ingredients-only
+    # enrichment still returns `200`, just with `healthScore: null` and
+    # no scan-history entry (there is no real score to log).
+    health_score_value: int | None = None
+    warnings: list[HealthWarning] = []
+    if product.has_verified_nutrition:
+        profile = await _get_profile_namespace(db, user_id)
+        health_score_value, warnings = _score_and_warnings(product, ingredients_out, profile)
+        product.health_score = health_score_value
+
+        await scan_history_repository.insert(
+            db,
+            ScanHistory(
+                user_id=user_id,
+                barcode=product.barcode,
+                product_name=product.product_name,
+                brand=product.brand,
+                health_score=health_score_value,
+                scan_type=scan_type,
+            ),
+        )
     # The single outer-transaction commit: product changes, provenance,
-    # Health Score, and scan history all land together, or (on any
-    # exception above) none of them do.
+    # and (when computed) Health Score + scan history all land together,
+    # or (on any exception above) none of them do.
     await db.commit()
 
     return {
         "product": product,
         "ingredients": ingredients_out,
-        "health_score": score,
+        "health_score": health_score_value,
         "warnings": warnings,
         "is_from_database_cache": not used_label_analysis,
     }
@@ -1550,6 +1611,22 @@ async def analyze_ocr_text_with_barcode(
 # for `/scan/ocr-text` specifically -- an Android client that assumed
 # this endpoint always returns `200` MUST be updated to handle this
 # response the same way it already has to handle `/scan/label-image`'s.
+#
+# V13 AMENDMENT (supersedes the V11/V12 paragraphs above -- see the
+# module docstring's "V13" entry and README section 11.14): the gate
+# below is now `ingredients_complete` alone, not `is_complete`
+# (BOTH groups). A `200` is returned whenever ingredient recognition
+# succeeded -- for `/scan/label-image` that is every case where Gemini
+# or the fallback produced real ingredient text (which, per
+# `_run_label_image_pipeline`, is every case EXCEPT a full Gemini+
+# fallback failure); for `/scan/ocr-text` that is now EVERY call, since
+# `analyze_ocr_text` always sets `ingredients_trustworthy=True` for the
+# caller's own genuine literal text. `healthScore` in that `200` is
+# `null` whenever nutrition isn't ALSO verified (always true for
+# standalone `/scan/ocr-text`, per its docstring) -- see each function's
+# own "Health Score stays a SEPARATE axis" comment below. The
+# `404`/`labelScanRequired` response itself (shape, `_label_scan_required_details`)
+# is unchanged; it is simply reached far less often now.
 # ---------------------------------------------------------------------------
 
 
@@ -1605,6 +1682,10 @@ async def _finalize_standalone_label_analysis(
 
     nutrition_complete = _nutrition_group_is_complete(validity)
     ingredients_complete = _ingredients_group_is_complete(data, ingredients_trustworthy)
+    # `is_complete` still tracks full verification / Health-Score
+    # readiness for `Product.is_verified` -- kept exactly as before.
+    # V13: it is deliberately NOT the success/failure gate below any
+    # more -- see that gate's own comment.
     is_complete = nutrition_complete and ingredients_complete
 
     barcode = f"{barcode_prefix}_{int(time.time() * 1000)}"
@@ -1632,40 +1713,58 @@ async def _finalize_standalone_label_analysis(
         used_for_persisted_product=True,
     )
 
-    if not is_complete:
-        # V12 (review round 5, finding 3): the ingredients group is
-        # often exactly what a standalone label-image/OCR-text scan DID
-        # establish (e.g. an ingredients-only photo, or any literal
-        # OCR-text submission) -- hand it back as useful partial data
-        # instead of a bare retry signal.
-        partial_ingredients = ingredients if ingredients_complete else None
+    # SUCCESS GATE (V13, see module docstring "Ingredient-recognition
+    # success vs. health-score readiness" and README section 11.14):
+    # ingredient RECOGNITION, not full verification, is the primary
+    # success condition for a label-driven scan. Only a genuine
+    # extraction failure -- no trustworthy ingredient evidence at all
+    # (Gemini AND the deterministic fallback both produced nothing
+    # usable for `/scan/label-image`; an unreadable/too-short submission
+    # for `/scan/ocr-text`) -- still returns the structured
+    # `labelScanRequired` response; missing/incomplete nutrition alone
+    # never does any more.
+    if not ingredients_complete:
+        # `ingredients_complete` is False here by construction, so there
+        # is no genuinely trustworthy partial evidence to hand back.
         await db.commit()
         raise ProductNotFoundError(
-            f"Product {product.barcode} was found but lacks sufficient verified data for a Health Score.",
-            details=_label_scan_required_details(product, partial_ingredients),
+            f"Product {product.barcode} could not be read reliably -- no ingredients were recognized.",
+            details=_label_scan_required_details(product, None),
         )
 
-    profile = await _get_profile_namespace(db, user_id)
-    score, warnings = _score_and_warnings(product, ingredients, profile)
-    product.health_score = score
+    # Health Score stays a SEPARATE axis (V13): computed only when
+    # nutrition is ALSO reliably known -- ingredient-recognition success
+    # above must never depend on it. An ingredients-only scan still
+    # returns `200`, just with `healthScore: null` and no scan-history
+    # entry (there is no real score to log). `/scan/ocr-text` in
+    # particular can now NEVER complete the nutrition group on its own
+    # (its nutrition is always a heuristic guess -- see
+    # `analyze_ocr_text`'s docstring), so a standalone OCR-text call
+    # always takes this branch.
+    health_score_value: int | None = None
+    warnings: list[HealthWarning] = []
+    if nutrition_complete:
+        profile = await _get_profile_namespace(db, user_id)
+        health_score_value, warnings = _score_and_warnings(product, ingredients, profile)
+        product.health_score = health_score_value
 
-    await scan_history_repository.insert(
-        db,
-        ScanHistory(
-            user_id=user_id,
-            barcode=product.barcode,
-            product_name=product.product_name,
-            brand=product.brand,
-            health_score=score,
-            scan_type=scan_type,
-        ),
-    )
+        await scan_history_repository.insert(
+            db,
+            ScanHistory(
+                user_id=user_id,
+                barcode=product.barcode,
+                product_name=product.product_name,
+                brand=product.brand,
+                health_score=health_score_value,
+                scan_type=scan_type,
+            ),
+        )
     await db.commit()
 
     return {
         "product": product,
         "ingredients": ingredients,
-        "health_score": score,
+        "health_score": health_score_value,
         "warnings": warnings,
         "is_from_database_cache": False,
     }

@@ -20,7 +20,7 @@ import kotlinx.coroutines.withContext
 data class FullProductAnalysis(
     val product: ProductEntity,
     val ingredients: List<IngredientEntity>,
-    val healthScore: Int,
+    val healthScore: Int?,
     val warnings: List<com.example.util.HealthWarning>,
     val isFromDatabaseCache: Boolean
 )
@@ -71,6 +71,52 @@ class FoodAnalysisRepository(
     private val apiService: NutriGuardApiService
 ) : ProductAnalysisSource {
 
+    private fun ProductEntity.hasUsableVerifiedScore(): Boolean =
+        isVerified && hasVerifiedNutrition && hasVerifiedIngredients && healthScore != null
+
+    private suspend fun finalizeBackendAnalysis(
+        parsedData: com.example.data.remote.dto.ParsedScanData,
+        scanType: String
+    ): FullProductAnalysis {
+        val analyzedProd = parsedData.product
+        val ingList = parsedData.ingredients
+
+        if (ingList.isNotEmpty()) {
+            ingredientDao.insertAll(ingList)
+        }
+
+        val profile = userProfileDao.getProfileSync() ?: UserHealthProfile()
+        val finalWarnings = if (analyzedProd.hasUsableVerifiedScore()) {
+            val personalizedWarnings = PersonalizedWarningEngine.generateWarnings(analyzedProd, ingList, profile)
+            (parsedData.warnings + personalizedWarnings).distinctBy { "${it.title}_${it.condition}" }
+        } else {
+            parsedData.warnings
+        }
+
+        productDao.insertProduct(analyzedProd)
+
+        val finalScore = analyzedProd.healthScore
+        if (finalScore != null) {
+            scanHistoryDao.insertHistory(
+                ScanHistoryEntity(
+                    barcode = analyzedProd.barcode,
+                    productName = analyzedProd.productName,
+                    brand = analyzedProd.brand,
+                    healthScore = finalScore,
+                    scanType = scanType
+                )
+            )
+        }
+
+        return FullProductAnalysis(
+            product = analyzedProd,
+            ingredients = ingList,
+            healthScore = finalScore,
+            warnings = finalWarnings,
+            isFromDatabaseCache = parsedData.isFromDatabaseCache
+        )
+    }
+
     override val allIngredients: Flow<List<IngredientEntity>> = ingredientDao.getAllIngredients()
     override val allProducts: Flow<List<ProductEntity>> = productDao.getAllProducts()
     override val scanHistory: Flow<List<ScanHistoryEntity>> = scanHistoryDao.getAllHistory()
@@ -102,7 +148,7 @@ class FoodAnalysisRepository(
         val existing = productDao.getProductByBarcode(barcode)
         val profile = userProfileDao.getProfileSync() ?: UserHealthProfile()
 
-        if (existing != null) {
+        if (existing?.hasUsableVerifiedScore() == true) {
             val ingList = fetchIngredientsForProduct(existing)
             val scoreBreakdown = HealthScoreCalculator.calculate(
                 ingredients = ingList,
@@ -193,47 +239,7 @@ class FoodAnalysisRepository(
         // BarcodeServerException / BarcodeAuthException / BarcodeParseException
         // -- all handled by MainViewModel.
         val parsedData = apiService.scanOcrText(rawText, barcode)
-        val analyzedProd = parsedData.product
-        val ingList = parsedData.ingredients
-
-        if (ingList.isNotEmpty()) {
-            ingredientDao.insertAll(ingList)
-        }
-
-        val profile = userProfileDao.getProfileSync() ?: UserHealthProfile()
-        val scoreBreakdown = HealthScoreCalculator.calculate(
-            ingredients = ingList,
-            sugarGrams = analyzedProd.sugarGrams,
-            sodiumMg = analyzedProd.sodiumMg,
-            saturatedFatGrams = analyzedProd.saturatedFatGrams,
-            hasArtificialSweeteners = analyzedProd.hasArtificialSweeteners,
-            hasPreservatives = analyzedProd.hasPreservatives,
-            novaGroup = analyzedProd.novaGroup
-        )
-
-        val personalizedWarnings = PersonalizedWarningEngine.generateWarnings(analyzedProd, ingList, profile)
-        val allWarnings = (parsedData.warnings + personalizedWarnings).distinctBy { "${it.title}_${it.condition}" }
-
-        val finalProd = analyzedProd.copy(healthScore = scoreBreakdown.totalScore)
-        productDao.insertProduct(finalProd)
-
-        scanHistoryDao.insertHistory(
-            ScanHistoryEntity(
-                barcode = finalProd.barcode,
-                productName = finalProd.productName,
-                brand = finalProd.brand,
-                healthScore = scoreBreakdown.totalScore,
-                scanType = "OCR_LABEL"
-            )
-        )
-
-        return@withContext FullProductAnalysis(
-            product = finalProd,
-            ingredients = ingList,
-            healthScore = scoreBreakdown.totalScore,
-            warnings = allWarnings,
-            isFromDatabaseCache = false
-        )
+        return@withContext finalizeBackendAnalysis(parsedData, scanType = "OCR_LABEL")
     }
 
     override suspend fun analyzeImageLabel(bitmap: Bitmap, barcode: String?): FullProductAnalysis = withContext(Dispatchers.IO) {
@@ -245,51 +251,7 @@ class FoodAnalysisRepository(
         // BarcodeServerException / BarcodeAuthException / BarcodeParseException
         // -- all handled by MainViewModel, never silently swallowed here.
         val parsedData = apiService.scanLabelImage(bitmap, barcode)
-        val analyzedProd = parsedData.product
-        val ingList = parsedData.ingredients
-
-        // Step 2: Persist detected ingredients to Room
-        if (ingList.isNotEmpty()) {
-            ingredientDao.insertAll(ingList)
-        }
-
-        // Step 3: Calculate score & warnings aligned with user profile
-        val profile = userProfileDao.getProfileSync() ?: UserHealthProfile()
-        val scoreBreakdown = HealthScoreCalculator.calculate(
-            ingredients = ingList,
-            sugarGrams = analyzedProd.sugarGrams,
-            sodiumMg = analyzedProd.sodiumMg,
-            saturatedFatGrams = analyzedProd.saturatedFatGrams,
-            hasArtificialSweeteners = analyzedProd.hasArtificialSweeteners,
-            hasPreservatives = analyzedProd.hasPreservatives,
-            novaGroup = analyzedProd.novaGroup
-        )
-
-        // Combine backend warnings with personalized user profile rules
-        val personalizedWarnings = PersonalizedWarningEngine.generateWarnings(analyzedProd, ingList, profile)
-        val allWarnings = (parsedData.warnings + personalizedWarnings).distinctBy { "${it.title}_${it.condition}" }
-
-        val finalProd = analyzedProd.copy(healthScore = scoreBreakdown.totalScore)
-
-        // Step 4: Persist product & scan history to Room
-        productDao.insertProduct(finalProd)
-        scanHistoryDao.insertHistory(
-            ScanHistoryEntity(
-                barcode = finalProd.barcode,
-                productName = finalProd.productName,
-                brand = finalProd.brand,
-                healthScore = scoreBreakdown.totalScore,
-                scanType = "LABEL_IMAGE"
-            )
-        )
-
-        return@withContext FullProductAnalysis(
-            product = finalProd,
-            ingredients = ingList,
-            healthScore = scoreBreakdown.totalScore,
-            warnings = allWarnings,
-            isFromDatabaseCache = false
-        )
+        return@withContext finalizeBackendAnalysis(parsedData, scanType = "LABEL_IMAGE")
     }
 
     private suspend fun fetchIngredientsForProduct(product: ProductEntity): List<IngredientEntity> {
