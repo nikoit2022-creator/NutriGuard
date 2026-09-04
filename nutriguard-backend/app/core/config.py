@@ -92,6 +92,19 @@ class Settings(BaseSettings):
     # re-verify/refresh it from providers again.
     BARCODE_DISCOVERY_CACHE_SECONDS: int = 30 * 24 * 60 * 60  # 30 days
 
+    # --- Ingredient catalog cache (persistent ingredient knowledge cache) ---
+    # How long a VERIFIED ingredient's regulatory/scientific data is
+    # trusted before it's flagged for revalidation (see
+    # app.services.ingredient_catalog.is_stale). Never blocks a scan --
+    # the last known value is still served immediately, only marked
+    # `needsRefresh` once expired.
+    INGREDIENT_VERIFIED_DATA_TTL_SECONDS: int = 180 * 24 * 60 * 60  # ~6 months
+    # How long a not-yet-VERIFIED (UNVERIFIED/LIMITED_DATA) ingredient
+    # record is treated as a fresh negative-cache entry, so the same
+    # unresolved ingredient isn't re-attempted for every product within
+    # this window (see app.services.ingredient_catalog.is_within_negative_cache_window).
+    INGREDIENT_NEGATIVE_CACHE_TTL_SECONDS: int = 24 * 60 * 60  # 24 hours
+
     @property
     def cors_origins_list(self) -> List[str]:
         if self.CORS_ORIGINS.strip() == "*":

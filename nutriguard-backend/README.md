@@ -12,6 +12,27 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V15 (persistent ingredient knowledge cache):** An OCR/Gemini-observed
+ingredient with no scientific-database match used to be recreated from
+scratch, in memory only, on every single scan/read — never a real,
+queryable, reusable row. `ingredients` (plus a new `ingredient_aliases`
+index table) is now the one persistent catalog for BOTH curated and
+OCR-observed data: local-first resolution by official identifier (an
+E-number) then by a known name/spelling/Bulgarian alias before ever
+creating a new minimal `UNVERIFIED` record (race-safe — concurrent
+scans of the same new ingredient converge on one row, never a
+duplicate); `IngredientEntity` gains additive provenance fields
+(`verificationStatus`, `source`, `sourceRecordId`/`sourceUrl`,
+`retrievedAt`/`lastVerifiedAt`, `confidence`, `schemaVersion`,
+`needsRefresh`) plus `insNumber`/`casNumber`; the Health Score's
+existing "unconfirmed risk never counts" rule (V14) is preserved
+end-to-end; and `Product`'s existing id-only relationship to
+`ingredients` means an update to a canonical ingredient is immediately
+visible to every product that references it, with zero duplication.
+See section 13 for the full design writeup, and deviation item 13 in
+section 6 for the one (additive) behavior change this causes.
+Migration `e4f5a6b7c8d9`.
+
 **V14 (data-quality fix: honest scientific ingredient profiles):** An
 OCR-only ("synthetic") ingredient — a label token with no scientific-
 database match — used to be filled with fabricated generic
@@ -509,19 +530,25 @@ snapshot is included at `openapi.json` for convenience/diffing).
 | `users` | Logical account (1:1 with a device today; supports multiple devices for future real login) |
 | `devices` | Registered client devices, keyed by client-generated `device_id` |
 | `refresh_tokens` | Persisted refresh-token registry (`jti`), enabling rotation and revocation |
-| `ingredients` | Scientific ingredient database — mirrors `IngredientEntity` exactly |
+| `ingredients` | The one persistent, reusable ingredient catalog — mirrors `IngredientEntity` (plus additive canonical-identity/provenance columns, see section 13) — every curated/seeded entry AND every OCR/Gemini-observed ingredient with no curated match (an `UNVERIFIED` minimal record, see section 13) |
+| `ingredient_aliases` | Reverse-lookup index from any known name/spelling variant (English, Bulgarian, OCR/spelling variant) to its one canonical `ingredients` row — see section 13 |
 | `products` | Analyzed products — mirrors `ProductEntity` exactly, including a denormalized `ingredient_ids` text column (see section 6), plus additive discovery-provenance columns (see section 10.4) not part of the public API contract |
 | `scan_history` | Per-user scan log — mirrors `ScanHistoryEntity` |
 | `user_health_profiles` | One row per user — mirrors `UserHealthProfile` |
 | `product_sources` | One row per (barcode, provider) external discovery — see section 10.4 |
 
 Indexes: `ingredients(common_name)`, `ingredients(e_number)`,
+`ingredients(normalized_name)`, `ingredients(ins_number)` (unique),
+`ingredients(cas_number)` (unique),
+`ingredient_aliases(ingredient_id)`, `ingredient_aliases(alias_normalized)`
+(unique — the actual identity-resolution lookup key, see section 13),
 `products(product_name)`, `products(brand)`, `devices(device_id)`,
 `refresh_tokens(jti)`, `scan_history(user_id)`, `scan_history(scanned_at)`,
 `product_sources(barcode)`
 — covering every lookup path used by the endpoints (barcode PK lookup,
-ingredient search/E-number lookup, product search, per-user history
-ordered by recency, per-barcode provenance lookup).
+ingredient search/E-number lookup, alias-based canonical-identity
+resolution, product search, per-user history ordered by recency,
+per-barcode provenance lookup).
 
 ## 6. Deviations from the API Contract (documented, not silent)
 
@@ -925,10 +952,11 @@ than silently resolved:
       normalized to the empty string — `"None"`/`"None reported"` is
       not a verified list of countries, it just looked like one.
     - Migration `d3e4f5a6b7c8` adds `ingredients.risk_assessment_available`
-      (`NOT NULL DEFAULT true`) — correct for every existing row, since
-      only curated/seeded data is ever persisted to this table; a
-      synthetic ingredient is always reconstructed in memory, never
-      inserted here.
+      (`NOT NULL DEFAULT true`) — correct for every existing row AT THAT
+      POINT IN THE MIGRATION CHAIN, since only curated/seeded data was
+      persisted to this table until the very next migration
+      (`e4f5a6b7c8d9`, see section 13) made a synthetic ingredient a
+      real, reusable, persisted row too.
     - `bad_for*`/`allergens` heuristics on a synthetic ingredient are
       UNCHANGED (out of scope for this task — they feed the separate,
       pre-existing Personalized Warning Engine, not a scientific
@@ -939,6 +967,20 @@ than silently resolved:
       `tests/unit/test_ingredient_schema_data_quality.py`,
       `tests/unit/test_food_analysis_risk_scoring.py`, and
       `tests/integration/test_barcode_contract_change.py`.
+
+13. **`GET /api/v1/ingredients/{id}` for a `synth_...` id now returns
+    `200` with a minimal `UNVERIFIED` record instead of `404`, once
+    that ingredient has actually been observed by a scan** (persistent-
+    ingredient-knowledge-cache task, see section 13). Previously a
+    synthetic ingredient was reconstructed in memory on every product
+    read and never persisted to the `ingredients` table at all, so a
+    direct lookup by its id always `404`d. It is now a real, reusable
+    catalog row (get-or-create, race-safe — section 13.4), which is the
+    entire point of the change (multiple products reusing ONE record
+    instead of each re-deriving their own unpersisted stand-in) — the
+    side effect is that a direct `GET` on that id also now succeeds.
+    Additive/backward-compatible: a previously-404 case becomes 200; no
+    previously-200 response's shape changed. See section 13.7.
 
 No other ambiguities were found that required deviating from the
 contract; where the contract was silent on an implementation detail
@@ -2152,11 +2194,13 @@ test and must be rerun on the deployment VM before rollout.
 app/
 ├── api/v1/            # FastAPI routers (one file per resource)
 ├── core/               # config, security (JWT), exceptions, logging, rate limiting
-├── models/             # SQLAlchemy ORM models (includes product_source.py)
+├── models/             # SQLAlchemy ORM models (includes product_source.py, ingredient_alias.py)
 ├── schemas/             # Pydantic request/response schemas (camelCase)
-├── repositories/        # DB access layer (no business logic; includes product_source_repository.py)
+├── repositories/        # DB access layer (no business logic; includes product_source_repository.py,
+│                         #   ingredient_alias_repository.py)
 ├── services/            # business logic: health score, warnings, OCR, fallback analysis, orchestration,
-│                         #   barcode_validation.py, barcode_discovery.py, barcode_text_safety.py
+│                         #   barcode_validation.py, barcode_discovery.py, barcode_text_safety.py,
+│                         #   ingredient_catalog.py, ingredient_normalization.py, ingredient_regulatory.py
 ├── integrations/        # GeminiService, and barcode_providers/ (Open Food Facts, GS1, UPCitemdb adapters)
 ├── database/             # engine/session/declarative base
 ├── seed/                 # scientific ingredient seed data + loader
@@ -2170,3 +2214,162 @@ scripts/
 └── extract_kotlin_ingredients.py   # one-off tool used to generate app/seed/ingredients_seed.json from the original Kotlin source
 docker-compose.yml / docker-compose.prod.yml / Dockerfile / docker/entrypoint.sh
 ```
+
+## 13. Persistent ingredient knowledge cache
+
+Task: "persistent ingredient knowledge cache". Builds directly on
+section 6 item 12's data-quality fix (no fabricated scientific claims
+for an OCR-only ingredient) by making the SAME `ingredients` table the
+one, reusable, persistent catalog for those ingredients too, instead of
+recreating an unpersisted in-memory stand-in on every single scan.
+
+### 13.1 Local-first resolution
+
+`app.services.ingredient_catalog.get_or_create_catalog_ingredient` is
+called (via `materialize_ingredients`) right after ingredient matching,
+at every scan pipeline (`analyze_ocr_text`, `analyze_ocr_text_with_barcode`,
+`analyze_label_image`, `analyze_label_image_with_barcode`, and the
+barcode-discovery bridge), for every token that had no curated-database
+match:
+
+1. **Official identifier first** — an E-number literally present in
+   the OCR text (`ingredient_repository.get_by_official_identifier`)
+   always wins.
+2. **Known alias** — any previously-learned English/Bulgarian/spelling/
+   OCR-variant name (`ingredient_alias_repository.get_by_normalized`,
+   keyed on `app.services.ingredient_normalization.normalize_ingredient_name`).
+3. **Otherwise**: get-or-create a minimal row (race-safe, see 13.4) and
+   register this name as its first alias, so the next occurrence of
+   this exact ingredient — from this request or a concurrent one —
+   resolves via step 2 instead of creating another row.
+
+No external ingredient-lookup API exists in this codebase today
+(Gemini is used only for whole-label extraction, never a per-ingredient
+regulatory lookup) — steps 1-3 above are the entire "external source or
+model" call this task's requirement 1 describes; a future integration
+of a real one has a ready seam (`IngredientSource.REGULATORY_LOOKUP`,
+`IngredientVerificationStatus.LIMITED_DATA`, `merge_verified_fields`,
+`is_within_negative_cache_window` — all real, fully tested, simply
+unused by any current caller with non-empty data, since OCR/Gemini
+today produce no scientific claims by design).
+
+### 13.2 Canonical identity
+
+`Ingredient` gained `normalized_name` (canonical, comparable form of
+`common_name`), `ins_number` (Codex Alimentarius INS code — derived
+from a genuine E-number when one exists, e.g. `E951` → INS `951`,
+never fabricated; see `ingredient_catalog.derive_ins_number_from_e_number`),
+and `cas_number` (CAS registry number — column present, not populated
+for the curated seed data in this change; a wrong CAS number would be
+exactly the kind of fabricated identifier this project's data-quality
+work exists to prevent). `IngredientAlias` (new table, see section 5)
+is the actual many-to-one identity index: one canonical `ingredients`
+row, any number of alias rows pointing at it, `alias_normalized`
+globally UNIQUE so a normalized name can never ambiguously resolve to
+two different ingredients. The raw `synth_...` id/hash
+(`ocr_normalizer.create_synthetic_ingredient`) is NEVER treated as
+proof of identity — it is only ever a primary key to look an
+ALREADY-established row back up; the alias/identifier resolution above
+is always what decides two mentions are the same ingredient.
+
+`app/seed/load_seed.py` registers each curated row's own name as its
+first alias, plus a small, explicit, hand-verified set of additional
+variants (`_EXTRA_ALIASES`) migrating the existing (unchanged, still
+used for its own original matching-time-substitution purpose)
+`label_language._BULGARIAN_INGREDIENT_ALIASES` dict into persistent,
+queryable rows for the curated ingredients it already covered
+(Aspartame/`аспартам`/`Aspartam`, Sodium Nitrite/`натриев нитрит`,
+HFCS/`HFCS`, MSG/`MSG`).
+
+### 13.3 Provenance, verification status, and the regulatory/scientific cache TTL
+
+Record-level provenance (not per-field — see `Ingredient`'s class
+docstring for why: every field on a row was written together, from one
+source, at one point in time; there is no per-field mixed-provenance
+case in this codebase to track). New additive `IngredientEntity`
+fields: `verificationStatus` (`VERIFIED`/`LIMITED_DATA`/`UNVERIFIED`),
+`source` (`CURATED_SEED`/`REGULATORY_LOOKUP`/`GEMINI`/`OCR_HEURISTIC`),
+`sourceRecordId`, `sourceUrl`, `retrievedAt`/`lastVerifiedAt` (epoch
+milliseconds, matching this API's existing `timestamp`/`scannedAt`
+convention), `confidence`, `schemaVersion`, and a computed
+`needsRefresh` (`true` once a VERIFIED row's `lastVerifiedAt` is older
+than `INGREDIENT_VERIFIED_DATA_TTL_SECONDS`, default ~6 months — never
+blocks a scan, the last known value is still served immediately, only
+flagged for a future refresh). `INGREDIENT_NEGATIVE_CACHE_TTL_SECONDS`
+(default 24h) gates `ingredient_catalog.is_within_negative_cache_window`
+for a not-yet-VERIFIED row — the point a future real revalidation
+attempt would check before spending a network call on an already-fresh
+negative result.
+
+`ingredient_catalog.merge_verified_fields` is the confidence/source-
+priority-gated merge ("lower-quality OCR/Gemini data must never
+overwrite curated or regulatory information", `SOURCE_PRIORITY`:
+CURATED_SEED > REGULATORY_LOOKUP > GEMINI > OCR_HEURISTIC, confidence
+as the same-rank tie-breaker) — fully tested
+(`tests/unit/test_ingredient_catalog_pure.py`), ready for the future
+integration described in 13.1. What DOES run live today:
+`ingredient_catalog._fill_missing_identity_fields` fills (never
+overwrites) a currently-null `e_number`/`ins_number` on an existing
+UNVERIFIED row when a later observation of the same alias supplies one
+the earlier observation's OCR text didn't contain.
+
+### 13.4 Concurrency
+
+`ingredient_repository.insert_new`/`ingredient_alias_repository.get_or_create`
+use the exact SAVEPOINT (`begin_nested`) get-or-create pattern already
+established by `product_repository.insert_new`/
+`product_source_repository.record_discovery` — a primary-key or unique-
+alias conflict only undoes that one row's insert, never any other work
+already flushed earlier in the same transaction; the loser re-fetches
+and reuses the winner's row rather than erroring or duplicating. See
+`tests/postgres/test_ingredient_catalog_concurrency_postgres.py` (real,
+concurrent-session PostgreSQL coverage, same opt-in convention as the
+sibling barcode/product test — not run in this environment, no
+Docker/Postgres available here; run it against a disposable Postgres
+instance before deploying, exactly like that sibling file).
+
+### 13.5 Product relationships
+
+Unchanged by this task, and already correct: `Product.ingredient_ids`
+has always stored ids only (comma-separated), never a copy of the
+scientific profile, and `food_analysis.fetch_ingredients_for_product`
+already re-reads live `Ingredient` rows on every request. This task's
+job was making sure a given normalized name/identifier always resolves
+to the SAME id — once it does, "one canonical ingredient linked to
+multiple products, with an update visible to all of them on their next
+retrieval" already falls out of the existing design for free. See
+`tests/integration/test_ingredient_knowledge_cache_end_to_end.py`.
+
+### 13.6 ADI and privacy
+
+Unaffected/unchanged: `IngredientOut.adiMinMgPerKgBwPerDay`/
+`adiMaxMgPerKgBwPerDay` (section 6 item 12) are still derived at
+presentation time from the canonical row's own `acceptableDailyIntake`
+text, never stored per-product; nothing in this task's new columns
+ever holds an image, a full model prompt/response, a user id, or a
+health profile — only ingredient name/identifier text and the
+provenance metadata in 13.3.
+
+### 13.7 A previously-404 lookup now returns real (if minimal) data
+
+Because an OCR-only ingredient is now a real, persisted row instead of
+an unpersisted in-memory reconstruction, `GET /api/v1/ingredients/{id}`
+for a `synth_...` id that has actually been observed by a scan now
+returns `200` with a minimal `UNVERIFIED` record instead of `404` —
+this is additive/backward-compatible (a previously-404 case becomes
+200; no previously-200 response's shape changed) but is called out
+explicitly per the project's contract-deviation convention (section 6).
+
+### 13.8 Tests
+
+`tests/unit/test_ingredient_normalization.py` (pure text normalization),
+`tests/unit/test_ingredient_catalog_pure.py` (INS derivation, staleness/
+negative-cache TTL, confidence-gated merge), `tests/unit/test_ingredient_knowledge_cache_migration.py`,
+`tests/integration/test_ingredient_catalog.py` (local-first resolution,
+E-number/alias/Bulgarian dedup, race-safe insert), `tests/integration/test_load_seed.py`
+(seed-time provenance + alias registration, idempotency),
+`tests/integration/test_ingredient_knowledge_cache_end_to_end.py`
+(one canonical ingredient across two real products, an update visible
+on next retrieval, `needsRefresh` fresh vs. expired), and
+`tests/postgres/test_ingredient_catalog_concurrency_postgres.py`
+(opt-in, real concurrent-session PostgreSQL).

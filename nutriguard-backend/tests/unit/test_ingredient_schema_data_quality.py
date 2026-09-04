@@ -100,7 +100,9 @@ def test_unassessed_synthetic_ingredient_out_never_fabricates_a_rationale():
 
 def test_ingredient_out_field_set_is_purely_additive():
     """Every field an old client already parses is still present and
-    unchanged in shape -- only new keys were added."""
+    unchanged in shape -- only new keys were added, across BOTH the
+    "data quality" task and the later "persistent ingredient knowledge
+    cache" task."""
     original_camel_fields = {
         "id", "commonName", "scientificName", "eNumber", "category", "description",
         "purposeInFood", "healthConcerns", "evidenceLevel", "countriesRestrictedOrBanned",
@@ -112,8 +114,13 @@ def test_ingredient_out_field_set_is_purely_additive():
     }
     dumped = IngredientOut(**_curated_kwargs()).model_dump(by_alias=True)
     assert original_camel_fields.issubset(dumped.keys())
-    new_fields = {
+    data_quality_task_fields = {
         "riskAssessmentAvailable", "riskRationale", "efsaApprovalStatus",
         "fdaApprovalStatus", "adiMinMgPerKgBwPerDay", "adiMaxMgPerKgBwPerDay", "adiSource",
     }
-    assert dumped.keys() == original_camel_fields | new_fields
+    knowledge_cache_task_fields = {
+        "insNumber", "casNumber", "verificationStatus", "source", "sourceRecordId",
+        "sourceUrl", "retrievedAt", "lastVerifiedAt", "confidence", "schemaVersion",
+        "needsRefresh",
+    }
+    assert dumped.keys() == original_camel_fields | data_quality_task_fields | knowledge_cache_task_fields

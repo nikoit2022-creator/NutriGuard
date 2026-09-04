@@ -1,8 +1,60 @@
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import RiskLevel
 from app.models.ingredient import Ingredient
+
+
+async def get_by_id(db: AsyncSession, ingredient_id: str) -> Ingredient | None:
+    return await db.get(Ingredient, ingredient_id)
+
+
+async def get_by_official_identifier(
+    db: AsyncSession, *, e_number: str | None = None, ins_number: str | None = None, cas_number: str | None = None
+) -> Ingredient | None:
+    """Strongest canonical-identity lookup (task requirement 2): an
+    official regulatory identifier, when one was actually recognized in
+    the OCR text, always wins over a name-based match. Only ever
+    queries the identifiers actually supplied -- a bare OCR name never
+    reaches this function's `e_number`/`ins_number`/`cas_number`
+    parameters (see `ingredient_catalog`), so a coincidental name
+    collision can never be misread as an identifier match."""
+    if not e_number and not ins_number and not cas_number:
+        return None
+    clauses = []
+    if e_number:
+        clauses.append(Ingredient.e_number == e_number)
+    if ins_number:
+        clauses.append(Ingredient.ins_number == ins_number)
+    if cas_number:
+        clauses.append(Ingredient.cas_number == cas_number)
+    stmt = select(Ingredient).where(or_(*clauses)).limit(1)
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def insert_new(db: AsyncSession, ingredient: Ingredient) -> Ingredient | None:
+    """Attempts to INSERT a brand-new ingredient row. Returns `None` on
+    a primary-key conflict (another concurrent scan already created
+    this exact id -- see `ingredient_catalog.get_or_create_catalog_ingredient`,
+    which re-fetches and reuses the winner rather than erroring); never
+    called for a row that might collide with an existing curated one by
+    normalized name/alias, since the caller always tries the alias
+    lookup first.
+
+    Same SAVEPOINT (`begin_nested`) pattern as
+    `product_repository.insert_new`/`product_source_repository.record_discovery`
+    -- a conflict here must only undo THIS row's insert, never any other
+    work already flushed earlier in the same request/transaction.
+    """
+    try:
+        async with db.begin_nested():
+            db.add(ingredient)
+            await db.flush()
+        return ingredient
+    except IntegrityError:
+        return None
 
 
 async def get_by_id_or_e_number(db: AsyncSession, identifier: str) -> Ingredient | None:
