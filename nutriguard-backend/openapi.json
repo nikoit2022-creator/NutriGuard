@@ -671,6 +671,16 @@
   },
   "components": {
     "schemas": {
+      "ApprovalStatus": {
+        "type": "string",
+        "enum": [
+          "APPROVED",
+          "NOT_APPROVED",
+          "NO_INFORMATION"
+        ],
+        "title": "ApprovalStatus",
+        "description": "Compact, structured regulatory-approval status for a single\nauthority (EFSA, FDA, ...), derived from that authority's free-text\nstatus field -- never fabricated from vague wording. See\n`app.services.ingredient_regulatory.derive_approval_status`."
+      },
       "BarcodeScanRequest": {
         "properties": {
           "barcode": {
@@ -1032,6 +1042,28 @@
             ],
             "title": "Enumber"
           },
+          "insNumber": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Insnumber"
+          },
+          "casNumber": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Casnumber"
+          },
           "category": {
             "type": "string",
             "title": "Category"
@@ -1094,6 +1126,91 @@
           "riskLevel": {
             "$ref": "#/components/schemas/RiskLevel"
           },
+          "riskAssessmentAvailable": {
+            "type": "boolean",
+            "title": "Riskassessmentavailable",
+            "default": true
+          },
+          "verificationStatus": {
+            "$ref": "#/components/schemas/IngredientVerificationStatus",
+            "default": "VERIFIED"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IngredientSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sourceRecordId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sourcerecordid"
+          },
+          "sourceUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sourceurl"
+          },
+          "retrievedAt": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrievedat"
+          },
+          "lastVerifiedAt": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lastverifiedat"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "schemaVersion": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schemaversion"
+          },
           "isGluten": {
             "type": "boolean",
             "title": "Isgluten"
@@ -1145,6 +1262,70 @@
           "badForHighCholesterol": {
             "type": "boolean",
             "title": "Badforhighcholesterol"
+          },
+          "needsRefresh": {
+            "type": "boolean",
+            "title": "Needsrefresh",
+            "description": "Task requirement 5: a VERIFIED record's data is not cached\nforever. `True` once `lastVerifiedAt` is older than the\nconfigured TTL -- the last known value above is still exactly\nwhat a client should show; this only flags it for a future\nrefresh, it never withholds/blocks anything.",
+            "readOnly": true
+          },
+          "riskRationale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Riskrationale",
+            "description": "Why `riskLevel` is what it is, reusing the ingredient's own\ncurated evidence-level text -- never a fabricated explanation.\n`None` whenever there is no real assessment to explain.",
+            "readOnly": true
+          },
+          "efsaApprovalStatus": {
+            "$ref": "#/components/schemas/ApprovalStatus",
+            "readOnly": true
+          },
+          "fdaApprovalStatus": {
+            "$ref": "#/components/schemas/ApprovalStatus",
+            "readOnly": true
+          },
+          "adiMinMgPerKgBwPerDay": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adiminmgperkgbwperday",
+            "readOnly": true
+          },
+          "adiMaxMgPerKgBwPerDay": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adimaxmgperkgbwperday",
+            "readOnly": true
+          },
+          "adiSource": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adisource",
+            "description": "The verified citation backing the numeric ADI range, only\never populated alongside an actual parsed number.",
+            "readOnly": true
           }
         },
         "type": "object",
@@ -1177,10 +1358,38 @@
           "badForGout",
           "badForPregnancy",
           "badForChildren",
-          "badForHighCholesterol"
+          "badForHighCholesterol",
+          "needsRefresh",
+          "riskRationale",
+          "efsaApprovalStatus",
+          "fdaApprovalStatus",
+          "adiMinMgPerKgBwPerDay",
+          "adiMaxMgPerKgBwPerDay",
+          "adiSource"
         ],
         "title": "IngredientOut",
-        "description": "Mirrors com.example.data.model.IngredientEntity exactly (API Contract 5.4)."
+        "description": "Mirrors com.example.data.model.IngredientEntity exactly (API Contract 5.4),\nplus additive, backward-compatible data-quality fields (see the\n\"backend-ingredient-profile-data-quality\" task): the original\n`riskLevel`/`efsaStatus`/`fdaStatus`/`acceptableDailyIntake` text\nfields are preserved unchanged for existing clients; the new fields\nbelow let an updated client distinguish a genuine assessment from\nan absent one, without ever fabricating one."
+      },
+      "IngredientSource": {
+        "type": "string",
+        "enum": [
+          "CURATED_SEED",
+          "REGULATORY_LOOKUP",
+          "GEMINI",
+          "OCR_HEURISTIC"
+        ],
+        "title": "IngredientSource",
+        "description": "Where an `Ingredient`/`IngredientAlias` row's data came from --\nalso the priority ranking used to decide whether new data is\nallowed to overwrite what's already stored (see\n`app.services.ingredient_catalog.SOURCE_PRIORITY`/`merge_verified_fields`:\nlower-priority/lower-confidence data must never overwrite\nhigher-priority/higher-confidence data)."
+      },
+      "IngredientVerificationStatus": {
+        "type": "string",
+        "enum": [
+          "VERIFIED",
+          "LIMITED_DATA",
+          "UNVERIFIED"
+        ],
+        "title": "IngredientVerificationStatus",
+        "description": "Whether an `Ingredient` catalog row is real curated/regulatory\ndata or just a minimal observation record (see\n`app.services.ingredient_catalog`). Never inferred from keywords --\nset explicitly wherever a row is created or promoted.\n\nVERIFIED: a curated/seeded or otherwise human/regulatory-confirmed\nrecord -- its scientific/regulatory fields are real.\nLIMITED_DATA: partially confirmed (e.g. an official identifier or a\nprovider-supplied name is known, but the scientific/regulatory\nfields are not yet curated) -- reserved for future use by a real\nexternal-lookup integration; nothing in this codebase produces it\nyet (see `ingredient_catalog`'s module docstring).\nUNVERIFIED: a bare observation from OCR/Gemini text with no\nscientific-database match at all -- every scientific/regulatory\nfield is empty, `riskLevel` is the neutral SAFE placeholder, and it\nmust never move the Health Score (see `IngredientOut.risk_assessment_available`,\nwhich is `True` only for VERIFIED)."
       },
       "OcrTextScanRequest": {
         "properties": {

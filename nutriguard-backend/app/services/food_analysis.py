@@ -113,13 +113,14 @@ gating on `is_verified` exactly as before.
 """
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import (
     AIServiceUnavailableError,
     ImageUnreadableError,
@@ -128,7 +129,7 @@ from app.core.exceptions import (
 )
 from app.integrations.barcode_providers.base import ProviderProductResult
 from app.integrations.gemini import GeminiUnavailableError, gemini_service
-from app.models.enums import ScanType, WarningSeverity
+from app.models.enums import IngredientVerificationStatus, ScanType, WarningSeverity
 from app.models.product import Product
 from app.models.scan_history import ScanHistory
 from app.repositories import (
@@ -140,6 +141,8 @@ from app.repositories import (
 )
 from app.services import barcode_discovery, gemini_image_parser, health_score, warning_engine
 from app.services import barcode_validation
+from app.services import ingredient_catalog
+from app.services import ingredient_regulatory
 from app.services.barcode_text_safety import is_placeholder
 from app.services.barcode_validation import validate_and_normalize
 from app.services.fallback_analysis import AnalyzedProductData, fallback_local_analysis
@@ -387,6 +390,26 @@ def _not_found_details(barcode: str, attempts: list["barcode_discovery.ProviderA
     }
 
 
+def _as_utc(value: datetime) -> datetime:
+    """SQLite doesn't preserve timezone info on a `DateTime(timezone=True)`
+    column -- a value written as UTC (every timestamp this module ever
+    writes, see `ingredient_catalog._utcnow`) comes back naive, and both
+    `datetime` subtraction and `.timestamp()` silently misbehave for a
+    naive value (the latter assumes the LOCAL system timezone) unless
+    corrected first. Same pattern as `auth_service`'s
+    `expires_at.replace(tzinfo=timezone.utc)`."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _to_epoch_millis(value: datetime | None) -> int | None:
+    """Matches `IngredientOut`'s own `_serialize_epoch_millis` field
+    serializer -- kept as a tiny standalone helper (not imported from
+    `app/schemas/`, per this function's own schema-free-services rule)
+    so `_ingredient_out_dict` renders `retrievedAt`/`lastVerifiedAt`
+    identically to the normal response path."""
+    return None if value is None else int(_as_utc(value).timestamp() * 1000)
+
+
 def _ingredient_out_dict(ing: Any) -> dict:
     """Plain-dict mirror of `app.schemas.ingredient.IngredientOut`'s
     camelCase shape, built BY HAND rather than by importing that schema
@@ -397,18 +420,36 @@ def _ingredient_out_dict(ing: Any) -> dict:
     must already be plain, JSON-serializable data. Works identically for
     a real `Ingredient` ORM row and a `SyntheticIngredient` (see
     `ocr_normalizer.create_synthetic_ingredient`) -- both expose the
-    exact same attribute names. Field names/casing are kept in exact
-    sync with `IngredientOut` so a partial-analysis `ingredients` list
+    exact same attribute names. Field names/casing -- including the
+    additive `riskAssessmentAvailable`/`riskRationale`/
+    `efsaApprovalStatus`/`fdaApprovalStatus`/`adiMinMgPerKgBwPerDay`/
+    `adiMaxMgPerKgBwPerDay`/`adiSource` data-quality fields, derived via
+    `app.services.ingredient_regulatory` exactly like the schema's own
+    `@computed_field`s -- are kept in exact sync with `IngredientOut` so
+    a partial-analysis `ingredients` list
     (see `_label_scan_required_details`) can be rendered by the SAME
     Android model/adapter the normal success response's `ingredients`
     array already uses -- no new client-side type.
     """
     risk_level = ing.risk_level
+    risk_assessment_available = getattr(ing, "risk_assessment_available", True)
+    adi_min, adi_max = ingredient_regulatory.derive_adi_range_mg_per_kg_bw_per_day(
+        ing.acceptable_daily_intake
+    )
+    verification_status = getattr(ing, "verification_status", IngredientVerificationStatus.UNVERIFIED)
+    source = getattr(ing, "source", None)
+    last_verified_at = getattr(ing, "last_verified_at", None)
+    needs_refresh = False
+    if verification_status == IngredientVerificationStatus.VERIFIED and last_verified_at is not None:
+        age = datetime.now(timezone.utc) - _as_utc(last_verified_at)
+        needs_refresh = age > timedelta(seconds=settings.INGREDIENT_VERIFIED_DATA_TTL_SECONDS)
     return {
         "id": ing.id,
         "commonName": ing.common_name,
         "scientificName": ing.scientific_name,
         "eNumber": ing.e_number,
+        "insNumber": getattr(ing, "ins_number", None),
+        "casNumber": getattr(ing, "cas_number", None),
         "category": ing.category,
         "description": ing.description,
         "purposeInFood": ing.purpose_in_food,
@@ -423,6 +464,24 @@ def _ingredient_out_dict(ing: Any) -> dict:
         "allergens": ing.allergens,
         "references": ing.references,
         "riskLevel": risk_level.value if hasattr(risk_level, "value") else risk_level,
+        "riskAssessmentAvailable": risk_assessment_available,
+        "riskRationale": (ing.evidence_level or None) if risk_assessment_available else None,
+        "efsaApprovalStatus": ingredient_regulatory.derive_approval_status(ing.efsa_status).value,
+        "fdaApprovalStatus": ingredient_regulatory.derive_approval_status(ing.fda_status).value,
+        "adiMinMgPerKgBwPerDay": adi_min,
+        "adiMaxMgPerKgBwPerDay": adi_max,
+        "adiSource": (ing.references or None) if adi_min is not None else None,
+        "verificationStatus": (
+            verification_status.value if hasattr(verification_status, "value") else verification_status
+        ),
+        "source": (source.value if hasattr(source, "value") else source),
+        "sourceRecordId": getattr(ing, "source_record_id", None),
+        "sourceUrl": getattr(ing, "source_url", None),
+        "retrievedAt": _to_epoch_millis(getattr(ing, "retrieved_at", None)),
+        "lastVerifiedAt": _to_epoch_millis(last_verified_at),
+        "confidence": (float(c) if (c := getattr(ing, "confidence", None)) is not None else None),
+        "schemaVersion": getattr(ing, "schema_version", None),
+        "needsRefresh": needs_refresh,
         "isGluten": ing.is_gluten,
         "isLactose": ing.is_lactose,
         "isVegan": ing.is_vegan,
@@ -537,6 +596,11 @@ async def _persist_discovered_product(
     data, ingredients, nutrition_known, ingredients_known = _to_analyzed_data_from_discovery(
         discovered, all_db_ingredients
     )
+    # Persistent ingredient knowledge cache: any ingredient with no
+    # curated match becomes a real, reusable catalog row (get-or-create,
+    # race-safe) instead of an unpersisted in-memory stub -- see
+    # `ingredient_catalog`'s module docstring.
+    ingredients = await ingredient_catalog.materialize_ingredients(db, ingredients)
     is_complete = nutrition_known and ingredients_known
     # Canonical GTIN-13 storage key (see product_repository.get_by_barcode_or_aliases)
     # — every equivalent representation of this barcode converges on one row.
@@ -673,7 +737,20 @@ async def _get_profile_namespace(db: AsyncSession, user_id: uuid.UUID) -> Simple
 
 
 def _score_and_warnings(product: Product, ingredients: list[Any], profile: SimpleNamespace):
-    risk_levels = [ing.risk_level for ing in ingredients]
+    # An ingredient with no real risk assessment (an OCR-only match with
+    # no scientific-database row -- see `ocr_normalizer.SyntheticIngredient`,
+    # `risk_assessment_available=False`) carries a neutral SAFE
+    # `risk_level` placeholder, never a real one -- it must never move
+    # the Health Score in either direction, so it is excluded here
+    # rather than counted as SAFE (which the loop below would otherwise
+    # do silently, since SAFE contributes no deduction anyway -- this
+    # exclusion is what actually matters once a future HIGH_CONCERN/
+    # POTENTIAL_CONCERN default is ever considered for unassessed rows).
+    risk_levels = [
+        ing.risk_level
+        for ing in ingredients
+        if getattr(ing, "risk_assessment_available", True)
+    ]
     breakdown = health_score.calculate(
         ingredient_risk_levels=risk_levels,
         sugar_grams=float(product.sugar_grams),
@@ -820,6 +897,7 @@ async def analyze_ocr_text(db: AsyncSession, user_id: uuid.UUID, raw_text: str) 
     """
     all_db_ingredients = await ingredient_repository.get_all(db)
     data, ingredients = await _run_ai_or_fallback("Scanned Product", raw_text, all_db_ingredients)
+    ingredients = await ingredient_catalog.materialize_ingredients(db, ingredients)
     validity = gemini_image_parser.LabelFieldValidity()
     ingredients_trustworthy = True
 
@@ -1379,7 +1457,9 @@ async def _finalize_barcode_enrichment(
         for unknown in norm.unknown_ingredients:
             rebuilt.append(create_synthetic_ingredient(unknown))
         if rebuilt:
-            ingredients = rebuilt
+            # Persistent ingredient knowledge cache -- see
+            # `ingredient_catalog`'s module docstring.
+            ingredients = await ingredient_catalog.materialize_ingredients(db, rebuilt)
     data.raw_ingredient_text = label_result.canonical_text
 
     source_label = "label_scan_translated" if label_result.translation_used else "label_scan"
@@ -1501,6 +1581,14 @@ async def analyze_label_image_with_barcode(
     data, ingredients, validity, ingredients_trustworthy = await _run_label_image_pipeline(
         image_bytes, all_db_ingredients
     )
+    # Persistent ingredient knowledge cache -- see `ingredient_catalog`'s
+    # module docstring. The Bulgarian-alias-aware rebuild further down
+    # (see `_finalize_barcode_enrichment`/`_finalize_standalone_label_analysis`)
+    # re-materializes again when it replaces this list -- cheap (a local
+    # get-or-create against an already-existing row after the first
+    # time) and keeps every code path honestly covered rather than
+    # relying on the rebuild always running.
+    ingredients = await ingredient_catalog.materialize_ingredients(db, ingredients)
 
     return await _finalize_barcode_enrichment(
         db,
@@ -1550,6 +1638,7 @@ async def analyze_ocr_text_with_barcode(
 
     all_db_ingredients = await ingredient_repository.get_all(db)
     data, ingredients = await _run_ai_or_fallback("Scanned Product", raw_text, all_db_ingredients)
+    ingredients = await ingredient_catalog.materialize_ingredients(db, ingredients)
     validity = gemini_image_parser.LabelFieldValidity()
     ingredients_trustworthy = True
 
@@ -1677,7 +1766,9 @@ async def _finalize_standalone_label_analysis(
         for unknown in norm.unknown_ingredients:
             rebuilt.append(create_synthetic_ingredient(unknown))
         if rebuilt:
-            ingredients = rebuilt
+            # Persistent ingredient knowledge cache -- see
+            # `ingredient_catalog`'s module docstring.
+            ingredients = await ingredient_catalog.materialize_ingredients(db, rebuilt)
     data.raw_ingredient_text = label_result.canonical_text
 
     nutrition_complete = _nutrition_group_is_complete(validity)
@@ -1797,6 +1888,14 @@ async def analyze_label_image(db: AsyncSession, user_id: uuid.UUID, image_bytes:
     data, ingredients, validity, ingredients_trustworthy = await _run_label_image_pipeline(
         image_bytes, all_db_ingredients
     )
+    # Persistent ingredient knowledge cache -- see `ingredient_catalog`'s
+    # module docstring. The Bulgarian-alias-aware rebuild further down
+    # (see `_finalize_barcode_enrichment`/`_finalize_standalone_label_analysis`)
+    # re-materializes again when it replaces this list -- cheap (a local
+    # get-or-create against an already-existing row after the first
+    # time) and keeps every code path honestly covered rather than
+    # relying on the rebuild always running.
+    ingredients = await ingredient_catalog.materialize_ingredients(db, ingredients)
 
     return await _finalize_standalone_label_analysis(
         db,

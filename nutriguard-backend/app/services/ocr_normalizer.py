@@ -80,7 +80,14 @@ def match_against_database(tokens: list[str], db_ingredients: list[Any]) -> Norm
 @dataclass
 class SyntheticIngredient:
     """Plain in-memory stand-in for an IngredientEntity that has no
-    scientific-database match, built purely from keyword heuristics."""
+    scientific-database match. It is built ONLY from what the OCR text
+    itself genuinely provides (the raw name, and an E-number when the
+    text literally contains one) -- OCR is provenance, not scientific
+    evidence, so every field that would require verified scientific/
+    regulatory data (description, purpose, health concerns, evidence
+    level, EFSA/FDA status, ADI, countries, references, risk level) is
+    left honestly empty/neutral rather than filled with a fabricated
+    generic placeholder. See `create_synthetic_ingredient`."""
 
     id: str
     common_name: str
@@ -100,6 +107,14 @@ class SyntheticIngredient:
     allergens: str
     references: str
     risk_level: RiskLevel
+    # Always False here: no scientific-database match means no real
+    # assessment was ever made. `risk_level` above is a safe, neutral
+    # placeholder (SAFE) -- never a keyword guess -- and callers must
+    # gate on this flag rather than trusting it directly (see
+    # `IngredientOut.risk_assessment_available` and
+    # `food_analysis._score_and_warnings`, which excludes any
+    # ingredient with this flag False from the Health Score).
+    risk_assessment_available: bool = False
     is_gluten: bool = False
     is_lactose: bool = False
     is_vegan: bool = True
@@ -116,21 +131,23 @@ class SyntheticIngredient:
 
 
 def create_synthetic_ingredient(name: str) -> SyntheticIngredient:
+    """Build a placeholder ingredient for an OCR token that has no
+    scientific-database match.
+
+    Deliberately honest, not "helpful": OCR only ever tells us the raw
+    label text (and, when literally present, an E-number) -- it is
+    provenance, not scientific evidence. Every field that would require
+    real curated/verified data (description, purpose, health concerns,
+    evidence level, EFSA/FDA status, ADI, countries, references, and
+    the risk assessment itself) is left honestly empty/neutral rather
+    than filled with a fabricated generic string. `risk_level` is
+    always the safe, neutral default (never inferred from a keyword in
+    the OCR name) and `risk_assessment_available=False` tells callers
+    (Health Score, API clients) that it is not a real assessment.
+    """
     lower = name.lower()
     e_match = _E_NUMBER.search(lower)
     formatted_e = ("E" + e_match.group(1).upper()) if e_match else None
-
-    is_high_risk = any(
-        kw in lower for kw in ("nitrit", "aspartam", "titanium", "benzoate", "dye", "red 40")
-    )
-    is_moderate = any(kw in lower for kw in ("sugar", "syrup", "msg", "glutamate", "fat", "oil"))
-
-    if is_high_risk:
-        risk = RiskLevel.HIGH_CONCERN
-    elif is_moderate:
-        risk = RiskLevel.POTENTIAL_CONCERN
-    else:
-        risk = RiskLevel.SAFE
 
     slug = re.sub(r"[^a-z0-9_]", "", name.lower().replace(" ", "_"))
     if not slug:
@@ -146,30 +163,27 @@ def create_synthetic_ingredient(name: str) -> SyntheticIngredient:
     return SyntheticIngredient(
         id=f"synth_{slug}",
         common_name=name[:1].upper() + name[1:] if name else name,
-        scientific_name=formatted_e or "Normalized Food Component",
+        scientific_name=formatted_e or "",
         e_number=formatted_e,
         category=f"Food Additive ({formatted_e})" if formatted_e else "Ingredient",
-        description="Ingredient extracted via OCR label scan.",
-        purpose_in_food="Food component / formulation ingredient.",
-        health_concerns=(
-            "Contains additives associated with health warnings."
-            if risk == RiskLevel.HIGH_CONCERN
-            else "Standard ingredient."
-        ),
-        evidence_level="Extracted via OCR",
-        countries_restricted_or_banned="Subject to standard local food safety regulations.",
-        efsa_status="Standard Food Additive/Ingredient",
-        fda_status="Recognized Ingredient",
+        description="",
+        purpose_in_food="",
+        health_concerns="",
+        evidence_level="",
+        countries_restricted_or_banned="",
+        efsa_status="",
+        fda_status="",
         who_iarc_classification=None,
-        acceptable_daily_intake="Standard dietary intake",
-        side_effects="See individual sensitivity profile",
+        acceptable_daily_intake="",
+        side_effects="",
         allergens=(
             "Potential Allergen"
             if any(kw in lower for kw in ("milk", "whey", "soy", "wheat", "peanut"))
             else "None"
         ),
-        references="NutriGuard OCR & Scientific Pipeline",
-        risk_level=risk,
+        references="",
+        risk_level=RiskLevel.SAFE,
+        risk_assessment_available=False,
         bad_for_diabetes=any(kw in lower for kw in ("sugar", "syrup", "dextrose")),
         bad_for_hypertension=any(kw in lower for kw in ("sodium", "salt", "msg")),
         bad_for_high_cholesterol=any(kw in lower for kw in ("palm", "fat", "hydrogenated")),

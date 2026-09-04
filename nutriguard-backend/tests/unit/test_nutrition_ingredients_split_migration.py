@@ -34,9 +34,13 @@ def test_migration_has_the_current_single_head_as_its_parent():
     assert revision is not None
     assert revision.down_revision == "cf5522508f9a"
     assert script.get_revision(revision.down_revision) is not None
-    # The additive nutrition-basis migration must extend this revision,
-    # preserving a single linear head rather than branching from it.
-    assert list(script.get_heads()) == ["b2c3d4e5f6a7"]
+    # Every later migration must extend this one in a single line, never
+    # branch from it. The current head has moved on since this test was
+    # written (b2c3d4e5f6a7 -> d3e4f5a6b7c8, "add ingredient
+    # risk_assessment_available flag") -- `test_migration_chain_has_a_
+    # single_head` in `test_barcode_discovery_migration.py` re-verifies
+    # the whole chain dynamically on every change, so this file only
+    # needs to keep pinning ITS OWN direct child.
     assert script.get_revision("b2c3d4e5f6a7").down_revision == REVISION
 
 
