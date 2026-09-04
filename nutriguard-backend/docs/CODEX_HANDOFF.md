@@ -6,12 +6,168 @@ Date: 2026-09-04
 
 - Branch: `feat/backend-ingredient-profile-data-quality`, based on
   GitHub `origin/main` at `4b44b8f04e95bc1fa58fe27546f17dcab605d562`.
-  Third task on this same (still unmerged) branch — see "V15" and
-  "V14" below for the first two tasks' own handoff summaries, preserved
-  as-is.
+  Fourth task on this same (still unmerged) branch — see "V16", "V15"
+  and "V14" below for the first three tasks' own handoff summaries,
+  preserved as-is.
 - Backend-only changes (`nutriguard-backend/` only); `android-app/**`,
   `main`, the live database/Docker volumes, `.env`, and credentials
   were not touched.
+
+### V17: resolved the documented deterministic PostgreSQL test failure
+
+The V16 entry below reported
+`test_concurrent_enrichment_of_the_same_existing_row_preserves_both_groups`
+as "a pre-existing, unrelated test issue, found and reported (not
+fixed)". This task's own instruction pushed back correctly: it IS in
+the same product/ingredient enrichment and concurrency area, so it
+needed to actually be resolved and proven, not left as "unrelated"
+by assertion alone. Root-caused and fixed here.
+
+**Reproduction (task requirement 1) — all three scenarios, against a
+fresh disposable PostgreSQL 16 instance, before any fix:**
+
+- *Alone*, 10 repeated fresh-DB runs: **8 passed, 2 failed** — already
+  disproves last task's working theory ("passes alone, fails with its
+  sibling"); that theory was drawn from a single alone-run and was
+  itself wrong. It's flaky alone too.
+- *Together with its sibling test* (`test_concurrent_enrichment_of_the_same_new_barcode_converges_on_one_row`),
+  5 repeated fresh-DB runs, both orders: **failed 5/5 in normal order**
+  in this batch, **passed 3/3 in reversed order** in a separate batch
+  — inconsistent with either file/order being the cause; consistent
+  with pure timing-based nondeterminism.
+- *As part of the complete opt-in `tests/postgres/` directory*: same
+  pattern — pass/fail tracked the individual test's own race outcome,
+  not directory composition.
+
+**Determination (requirement 2) — a 15-iteration diagnostic script**
+(`asyncio.gather`-ing the exact two concurrent calls the test makes,
+printed per-call, not part of the repo) against real Postgres nailed
+the exact mechanism:
+
+- **15/15 iterations**: the FINAL persisted row was IDENTICAL and
+  fully correct — `hasVerifiedIngredients=True`,
+  `hasVerifiedNutrition=True`, `isVerified=True`, `healthScore=85`.
+  The `for_update=True` row-lock concurrency guarantee never once
+  failed. This rules out *transaction isolation/session reuse* and
+  *a real production concurrency bug* outright — nothing was ever lost
+  or corrupted.
+- **12/15 iterations**: the INGREDIENTS-photo call's transaction
+  committed first → it got `SUCCESS(healthScore=None)` (a normal `200`,
+  not `labelScanRequired`) → the NUTRITION-photo call committed second,
+  saw both groups, got `SUCCESS(healthScore=85)`. Two successes, zero
+  `labelScanRequired` — exactly the pattern the OLD assertion rejected.
+- **3/15 iterations**: the NUTRITION-photo call committed first → it
+  got `labelScanRequired` (nutrition alone was never enough) → the
+  INGREDIENTS-photo call committed second, saw both groups, got
+  `SUCCESS(healthScore=85)`. One success, one `labelScanRequired` —
+  the ONLY pattern the OLD assertion accepted.
+- Full DB resets between every iteration (fresh migrate each time)
+  rule out *test-state leakage/order dependence* as well — the same
+  two outcomes occur from a clean slate, in either order, with no
+  prior test having run at all.
+
+**Root cause: a stale assertion, citing the exact code that supersedes
+it** (requirement 3) — `app/services/food_analysis.py`,
+`_finalize_barcode_enrichment`'s own "SUCCESS GATE (V13...)" comment
+block (search that file for `SUCCESS GATE`): "label-driven product
+enrichment succeeds once ingredient RECOGNITION succeeds... Missing/
+incomplete NUTRITION alone never fails this endpoint any more." Also
+`README.md`'s "V13" Changelog entry and section 11.14
+("Ingredient-recognition success vs. health-score readiness"). V13
+predates this branch entirely (already on `origin/main`) and is
+otherwise fully, correctly implemented and already covered
+deterministically elsewhere
+(`tests/integration/test_label_barcode_enrichment.py::test_barcode_nutrition_plus_later_ingredients_only_photo_completes_product`
+and `::test_barcode_ingredients_plus_later_nutrition_only_photo_completes_product`
+cover both sequential orderings already) — only this ONE concurrency
+test's assertion never accounted for it.
+
+**Fix applied (requirement 3 — assertion + description only, nothing
+in `app/` touched, no guarantee weakened):**
+`tests/postgres/test_concurrent_enrichment_postgres.py`:
+- Docstring rewritten to state the ACTUAL invariant (exactly one call
+  always sees the real Health Score; the other's own response
+  legitimately depends on race timing) and cites the V13 contract
+  above plus this task's own 15-iteration finding.
+- Assertion rewritten to check the REAL invariant directly: exactly
+  one of the two results has a non-null `health_score` (never both —
+  duplicated evidence — never neither — lost evidence); the other
+  result is then EITHER `labelScanRequired` (nutrition-only committed
+  first) OR a success with `health_score is None` (ingredients-only
+  committed first, V13) — both explicitly checked, neither silently
+  accepted by omission. No `pytest.mark.skip`, no loosened row-state
+  assertions (the final-row checks are byte-for-byte unchanged).
+
+**Verification (requirement 5), all against the same disposable
+Postgres 16 + pinned-dependency Docker image used in the V16 pass:**
+- Fixed test alone: **15/15 passed** (both legitimate orderings
+  occurred naturally across the 15 runs, both correctly accepted).
+- Fixed test + sibling, normal order: **5/5 passed** (`2 passed` each).
+- Fixed test + sibling, reversed order: **3/3 passed**.
+- Complete `tests/postgres/` directory (all 4 tests): **3/3 runs, 4/4
+  tests passed each time**.
+- `python -m pytest -q`: **410 passed, 4 skipped, 0 failed** — both on
+  the host (Python 3.14) and inside the pinned-dependency image
+  (Python 3.12) — identical, and identical to the V16 pass's count
+  (this task changed a test file that's skipped in the default local
+  run, so the count is unaffected).
+- `python -m alembic heads`: one head, `e4f5a6b7c8d9` — unchanged (no
+  migration touched by this task).
+- Runtime `app.openapi()` vs. tracked `openapi.json`, pinned
+  dependencies (Python 3.12, `requirements.txt` exactly): **EXACT
+  MATCH** — unchanged (no schema/route touched by this task).
+- Diff review: **one file changed**
+  (`tests/postgres/test_concurrent_enrichment_postgres.py`, +61/-12),
+  fully scoped to `nutriguard-backend/`, no secrets
+  (`api_key`/`secret`/`password`/PEM patterns grepped across both this
+  diff and the full `4b44b8f..HEAD` branch range — none found beyond
+  expected config field names).
+
+## Verification (V17 summary)
+
+- Reproduction: alone (8/10 pass pre-fix, confirming flakiness),
+  with sibling (both orders, pre-fix), full `tests/postgres/`
+  directory (pre-fix) — all three reproduced the SAME nondeterministic
+  pattern, never a distinct order-dependent or leakage-dependent one.
+- 15-iteration diagnostic: 15/15 final-row correctness, 12/15 +
+  3/15 = the exact two legitimate V13 orderings, 0 unexpected outcomes.
+- Post-fix: 15/15 (alone) + 5/5 (with sibling, normal order) + 3/3
+  (reversed order) + 3/3 runs × 4/4 tests (full directory) = **26/26
+  postgres-test executions passed** across every combination requested.
+- `pytest -q` (host + pinned image): 410 passed, 4 skipped, 0 failed,
+  both environments identical.
+- `alembic heads`: single head, `e4f5a6b7c8d9`.
+- OpenAPI (pinned deps): exact match.
+- Secrets/unrelated files: none.
+
+## Unresolved risks (after V17)
+
+- None new. Everything listed as unresolved in the V16 entry below
+  still applies (no real external ingredient-lookup/regulatory-database
+  integration exists yet; `cas_number` not populated for curated seed
+  data; `_EXTRA_ALIASES` intentionally small/hand-curated;
+  `_fill_missing_identity_fields`'s lack of its own confidence gate,
+  safe today, flagged for a future non-OCR_HEURISTIC source) — this
+  task did not change any of that. The item this task existed to
+  resolve (the deterministic test failure) is now closed: fixed, not
+  skipped, not weakened, with the root cause proven and cited.
+
+## Recommended next step
+
+This branch (backend-only, `android-app/**`/`main`/live
+stack/credentials untouched throughout) has now had ALL of its
+previously-flagged verification gaps closed: migration up/down/up
+cycle proven against real Postgres (V16), both opt-in concurrency test
+files proven against real concurrent Postgres sessions with 0
+failures across 26 executions (V16 + V17), the complete backend suite
+green in both the host and pinned-dependency environments, a single
+Alembic head, an exact-match OpenAPI regeneration under the pinned
+dependency set, and no outstanding "reported but not fixed" items in
+this area. The branch is ready for PR review. Opening the actual PR
+(and any merge/deploy) still requires the explicit go-ahead this task
+series has consistently deferred to a human/CI review step.
+
+---
 
 ### V16: final pre-PR verification (found and fixed 2 real bugs)
 
