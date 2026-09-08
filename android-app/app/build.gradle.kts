@@ -11,7 +11,7 @@ val localProperties = Properties().apply {
 val backendBaseUrl = providers.gradleProperty("BACKEND_BASE_URL").orNull
   ?: System.getenv("BACKEND_BASE_URL")
   ?: localProperties.getProperty("BACKEND_BASE_URL")
-  ?: "http://10.0.2.2:8000/"
+  ?: "https://ubuntu.taileaa26d.ts.net/"
 require(backendBaseUrl.endsWith("/")) { "BACKEND_BASE_URL must end with a trailing slash" }
 val escapedBackendBaseUrl = backendBaseUrl.replace("\\", "\\\\").replace("\"", "\\\"")
 
