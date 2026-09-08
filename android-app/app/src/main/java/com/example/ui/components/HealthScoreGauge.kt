@@ -4,7 +4,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -70,8 +69,7 @@ fun HealthScoreGauge(
         else -> Triple(RiskRed, "Poor", "Highly processed or high-concern additives")
     }
 
-    val isDark = isSystemInDarkTheme()
-    val badgeBg = if (isDark) scoreColor.copy(alpha = 0.2f) else scoreColor.copy(alpha = 0.12f)
+    val badgeBg = scoreColor.copy(alpha = 0.12f)
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -129,7 +127,7 @@ fun HealthScoreGauge(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier.size(100.dp)
                 ) {
-                    val trackColor = if (isDark) Color(0xFF1E2D42) else Color(0xFFE2E8F0)
+                    val trackColor = Color(0xFFE2E8F0)
                     Canvas(modifier = Modifier.size(92.dp)) {
                         val strokeWidth = 9.dp.toPx()
                         drawArc(

@@ -44,7 +44,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.ui.theme.EmeraldPrimary
+import com.example.ui.theme.ScannerViolet
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.NutriGuardSpacing
 import com.example.ui.viewmodel.MainViewModel
@@ -108,7 +108,7 @@ fun ArchitectureAdminScreen(
                 indicator = { tabPositions ->
                     TabRowDefaults.SecondaryIndicator(
                         Modifier.tabIndicatorOffset(tabPositions[selectedTab]),
-                        color = EmeraldPrimary
+                        color = ScannerViolet
                     )
                 }
             ) {
@@ -450,10 +450,10 @@ private fun MetricBadge(title: String, count: String) {
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(NutriGuardRadius.medium))
-            .background(EmeraldPrimary.copy(alpha = 0.08f))
+            .background(ScannerViolet.copy(alpha = 0.08f))
             .border(
                 1.dp,
-                EmeraldPrimary.copy(alpha = 0.2f),
+                ScannerViolet.copy(alpha = 0.2f),
                 RoundedCornerShape(NutriGuardRadius.medium)
             )
             .padding(horizontal = 12.dp, vertical = 12.dp)
@@ -462,7 +462,7 @@ private fun MetricBadge(title: String, count: String) {
             text = count,
             fontSize = 20.sp,
             fontWeight = FontWeight.Bold,
-            color = EmeraldPrimary
+            color = ScannerViolet
         )
         Spacer(modifier = Modifier.height(2.dp))
         Text(

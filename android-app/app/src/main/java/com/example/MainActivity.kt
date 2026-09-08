@@ -64,9 +64,8 @@ import com.example.ui.screens.ProductDetailScreen
 import com.example.ui.screens.ScanHomeScreen
 import com.example.ui.screens.ScanHistoryScreen
 import com.example.ui.screens.ScientificLibraryScreen
-import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.NutriGuardRadius
-import com.example.ui.theme.NutriGuardTheme
+import com.example.ui.theme.NutriGuardScannerTheme
 import com.example.ui.theme.ScannerPageBackground
 import com.example.ui.theme.ScannerSlateMuted
 import com.example.ui.theme.ScannerSoftBorder
@@ -102,7 +101,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val appContainer = (application as NutriGuardApplication).container
         setContent {
-            NutriGuardTheme {
+            NutriGuardScannerTheme {
                 var authState by remember {
                     mutableStateOf<DeviceAuthState>(
                         if (appContainer.authTokenStore.hasValidToken()) {
@@ -190,13 +189,13 @@ private fun AuthBootstrapScreen(
             Box(
                 modifier = Modifier
                     .size(80.dp)
-                    .background(EmeraldPrimary.copy(alpha = 0.12f), shape = RoundedCornerShape(20.dp)),
+                    .background(ScannerViolet.copy(alpha = 0.12f), shape = RoundedCornerShape(20.dp)),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Default.Shield,
                     contentDescription = "NutriGuard Shield",
-                    tint = EmeraldPrimary,
+                    tint = ScannerViolet,
                     modifier = Modifier.size(44.dp)
                 )
             }
@@ -215,7 +214,7 @@ private fun AuthBootstrapScreen(
             if (isConnecting) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(32.dp),
-                    color = EmeraldPrimary,
+                    color = ScannerViolet,
                     strokeWidth = 3.dp
                 )
                 Spacer(modifier = Modifier.height(16.dp))
@@ -259,7 +258,7 @@ private fun AuthBootstrapScreen(
                         Button(
                             onClick = onRetry,
                             shape = RoundedCornerShape(NutriGuardRadius.small),
-                            colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
+                            colors = ButtonDefaults.buttonColors(containerColor = ScannerViolet),
                             modifier = Modifier.testTag("retry_auth_button")
                         ) {
                             Icon(

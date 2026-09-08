@@ -45,7 +45,7 @@ import com.example.data.model.IngredientEntity
 import com.example.data.model.RiskLevel
 import com.example.ui.components.IngredientChip
 import com.example.ui.components.IngredientDetailBottomSheet
-import com.example.ui.theme.EmeraldPrimary
+import com.example.ui.theme.ScannerViolet
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.NutriGuardSpacing
 import com.example.ui.viewmodel.MainViewModel
@@ -140,7 +140,7 @@ fun ScientificLibraryScreen(
                 singleLine = true,
                 shape = RoundedCornerShape(NutriGuardRadius.medium),
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = EmeraldPrimary,
+                    focusedBorderColor = ScannerViolet,
                     unfocusedBorderColor = MaterialTheme.colorScheme.outline
                 )
             )
@@ -234,11 +234,11 @@ private fun FilterPill(
         modifier = Modifier
             .clip(RoundedCornerShape(NutriGuardRadius.pill))
             .background(
-                if (isSelected) EmeraldPrimary else MaterialTheme.colorScheme.surface
+                if (isSelected) ScannerViolet else MaterialTheme.colorScheme.surface
             )
             .border(
                 width = 1.dp,
-                color = if (isSelected) EmeraldPrimary else MaterialTheme.colorScheme.outline,
+                color = if (isSelected) ScannerViolet else MaterialTheme.colorScheme.outline,
                 shape = RoundedCornerShape(NutriGuardRadius.pill)
             )
             .clickable { onClick() }

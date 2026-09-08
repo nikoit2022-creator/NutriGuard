@@ -39,6 +39,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -48,9 +49,14 @@ import com.example.ui.components.HealthScoreGauge
 import com.example.ui.components.IngredientChip
 import com.example.ui.components.IngredientDetailBottomSheet
 import com.example.ui.components.PersonalizedWarningCard
-import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.NutriGuardSpacing
+import com.example.ui.theme.ScannerHeroEnd
+import com.example.ui.theme.ScannerHeroMiddle
+import com.example.ui.theme.ScannerHeroStart
+import com.example.ui.theme.ScannerPageBackground
+import com.example.ui.theme.ScannerSlateMuted
+import com.example.ui.theme.ScannerViolet
 import com.example.ui.viewmodel.AnalysisUiState
 import com.example.ui.viewmodel.MainViewModel
 
@@ -65,7 +71,9 @@ fun ProductDetailScreen(
     when (val state = uiState) {
         is AnalysisUiState.Loading -> {
             Box(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(ScannerPageBackground),
                 contentAlignment = Alignment.Center
             ) {
                 Column(
@@ -73,7 +81,7 @@ fun ProductDetailScreen(
                     modifier = Modifier.padding(24.dp)
                 ) {
                     CircularProgressIndicator(
-                        color = EmeraldPrimary,
+                        color = ScannerViolet,
                         modifier = Modifier.size(44.dp)
                     )
                     Spacer(modifier = Modifier.height(20.dp))
@@ -97,6 +105,7 @@ fun ProductDetailScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
+                    .background(ScannerPageBackground)
                     .padding(24.dp),
                 contentAlignment = Alignment.Center
             ) {
@@ -117,7 +126,7 @@ fun ProductDetailScreen(
                     Button(
                         onClick = onBack,
                         shape = RoundedCornerShape(NutriGuardRadius.medium),
-                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                        colors = ButtonDefaults.buttonColors(containerColor = ScannerViolet)
                     ) {
                         Text("Back to Scanner")
                     }
@@ -132,6 +141,7 @@ fun ProductDetailScreen(
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
+                    .background(ScannerPageBackground)
                     .padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(NutriGuardSpacing.lg)
             ) {
@@ -139,19 +149,27 @@ fun ProductDetailScreen(
                 item {
                     Spacer(modifier = Modifier.height(NutriGuardSpacing.sm))
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(NutriGuardRadius.hero))
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(ScannerHeroStart, ScannerHeroMiddle, ScannerHeroEnd)
+                                )
+                            )
+                            .padding(18.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         IconButton(
                             onClick = onBack,
                             modifier = Modifier
                                 .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.82f))
                         ) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                                 contentDescription = "Back",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                tint = ScannerViolet
                             )
                         }
                         Spacer(modifier = Modifier.width(12.dp))
@@ -226,7 +244,7 @@ fun ProductDetailScreen(
                         Text(
                             text = "Tap to view scientific profile",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = ScannerSlateMuted
                         )
                     }
                 }
@@ -307,7 +325,9 @@ fun ProductDetailScreen(
 
         else -> {
             Box(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(ScannerPageBackground),
                 contentAlignment = Alignment.Center
             ) {
                 Text("No analysis available.")
