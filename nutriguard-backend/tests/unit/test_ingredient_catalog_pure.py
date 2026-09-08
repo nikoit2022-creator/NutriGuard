@@ -14,9 +14,11 @@ from app.core.config import settings
 from app.models.enums import IngredientSource, IngredientVerificationStatus, RiskLevel
 from app.services.ingredient_catalog import (
     derive_ins_number_from_e_number,
+    get_field_source,
     is_stale,
     is_within_negative_cache_window,
     merge_verified_fields,
+    resolve_field_source,
 )
 
 NOW = datetime(2026, 9, 4, tzinfo=timezone.utc)
@@ -122,6 +124,7 @@ class _MergeableIngredient:
     verification_status: IngredientVerificationStatus = IngredientVerificationStatus.UNVERIFIED
     last_verified_at: datetime | None = None
     risk_assessment_available: bool = False
+    field_provenance_json: str | None = None
 
 
 def test_lower_priority_source_cannot_overwrite_curated_data():
@@ -394,3 +397,125 @@ def test_none_incoming_value_never_erases_an_existing_optional_field():
     )
     assert changed is True
     assert stub.who_iarc_classification == "Group 2B - Possibly Carcinogenic"
+
+
+# --- PR #13 review fix: truthful per-field scientific/regulatory provenance -
+
+
+def test_resolve_field_source_falls_back_to_the_row_level_source_when_never_independently_merged():
+    """A row that has never been through `merge_verified_fields` (a
+    curated/seeded row, or a fresh OCR stub) has no per-field entries at
+    all -- every field's real origin IS the row's own record-level
+    `source`."""
+    assert resolve_field_source(None, "description", fallback=IngredientSource.CURATED_SEED) == (
+        IngredientSource.CURATED_SEED
+    )
+    assert resolve_field_source("{}", "description", fallback=IngredientSource.CURATED_SEED) == (
+        IngredientSource.CURATED_SEED
+    )
+
+
+def test_resolve_field_source_is_defensive_against_malformed_json():
+    """Never raises on a corrupt/unexpected `field_provenance_json` --
+    degrades to "no per-field provenance recorded", never blocks reading
+    an otherwise-valid row."""
+    assert resolve_field_source("not json", "description", fallback=IngredientSource.GEMINI) == IngredientSource.GEMINI
+    assert resolve_field_source("[1, 2]", "description", fallback=IngredientSource.GEMINI) == IngredientSource.GEMINI
+    assert resolve_field_source("{}", "description", fallback=IngredientSource.GEMINI) == IngredientSource.GEMINI
+
+
+def test_partial_regulatory_merge_never_relabels_an_untouched_curated_field():
+    """The exact PR #13 review scenario: CURATED_SEED data (now stale --
+    see `_stale_curated`) merged with a PARTIAL regulatory refresh --
+    every returned claim (per field) must retain its REAL source. Only
+    `description` is supplied by the REGULATORY_LOOKUP call;
+    `healthConcerns`/`efsaStatus`/... must keep reporting CURATED_SEED,
+    even though the row's own record-level `source` legitimately moves
+    to REGULATORY_LOOKUP because real content genuinely changed (task
+    requirement 5e, `test_regulatory_lookup_revalidation_with_genuinely_new_content_updates_provenance`)."""
+    curated = _stale_curated(
+        health_concerns="Old curated health concern.", efsa_status="Old curated EFSA status."
+    )
+    changed = merge_verified_fields(
+        curated,
+        fields={"description": "Fresh regulatory-lookup description."},
+        source=IngredientSource.REGULATORY_LOOKUP,
+        confidence=0.9,
+        now=NOW,
+    )
+    assert changed is True
+    assert curated.description == "Fresh regulatory-lookup description."
+    assert curated.health_concerns == "Old curated health concern."  # untouched, content-wise
+    assert curated.efsa_status == "Old curated EFSA status."  # untouched, content-wise
+
+    # The row-level columns DO move (existing, correct behavior -- see
+    # `test_regulatory_lookup_revalidation_with_genuinely_new_content_updates_provenance`).
+    assert curated.source == IngredientSource.REGULATORY_LOOKUP
+
+    # But per-field attribution stays honest: only the field the
+    # regulatory response ACTUALLY supplied is attributed to it.
+    assert get_field_source(curated, "description") == IngredientSource.REGULATORY_LOOKUP
+    assert get_field_source(curated, "health_concerns") == IngredientSource.CURATED_SEED
+    assert get_field_source(curated, "efsa_status") == IngredientSource.CURATED_SEED
+
+
+def test_second_partial_merge_still_protects_a_field_untouched_by_either_call():
+    """Two SEPARATE partial merges over time (GEMINI, then
+    REGULATORY_LOOKUP) -- a field only the FIRST call touched must keep
+    reporting GEMINI, not silently inherit the second call's
+    REGULATORY_LOOKUP just because the row's record-level source moved
+    again."""
+    stub = _MergeableIngredient(source=IngredientSource.OCR_HEURISTIC, confidence=0.2)
+    merge_verified_fields(
+        stub,
+        fields={"description": "An AI-suggested description."},
+        source=IngredientSource.GEMINI,
+        confidence=0.8,
+    )
+    merge_verified_fields(
+        stub,
+        fields={"health_concerns": "A regulator-confirmed concern."},
+        source=IngredientSource.REGULATORY_LOOKUP,
+        confidence=0.9,
+    )
+    assert stub.description == "An AI-suggested description."
+    assert stub.health_concerns == "A regulator-confirmed concern."
+    assert get_field_source(stub, "description") == IngredientSource.GEMINI
+    assert get_field_source(stub, "health_concerns") == IngredientSource.REGULATORY_LOOKUP
+    # Never independently merged by either call -- still correctly
+    # attributed to the row's ORIGINAL (pre-both-calls) source.
+    assert get_field_source(stub, "efsa_status") == IngredientSource.OCR_HEURISTIC
+
+
+def test_a_lower_ranked_partial_merge_that_is_rejected_leaves_provenance_untouched():
+    """A rejected merge (task requirement 3: lower rank can't overwrite)
+    must not write ANY per-field provenance -- nothing was actually
+    accepted."""
+    curated = _MergeableIngredient(
+        description="Real curated description.", source=IngredientSource.CURATED_SEED, confidence=1.0
+    )
+    changed = merge_verified_fields(
+        curated,
+        fields={"description": "some OCR guess"},
+        source=IngredientSource.OCR_HEURISTIC,
+        confidence=0.9,
+    )
+    assert changed is False
+    assert curated.field_provenance_json is None
+    assert get_field_source(curated, "description") == IngredientSource.CURATED_SEED
+
+
+def test_stale_revalidation_with_no_touched_fields_does_not_write_field_provenance():
+    """A pure stale-revalidation call that supplies NO real (non-blank)
+    field values has nothing to attribute per-field -- it must not
+    write an empty/no-op `field_provenance_json` either."""
+    curated = _stale_curated()
+    changed = merge_verified_fields(
+        curated,
+        fields={"description": ""},  # blank -- nothing to attribute
+        source=IngredientSource.CURATED_SEED,
+        confidence=1.0,
+        now=NOW,
+    )
+    assert changed is True  # stale revalidation still "succeeds"
+    assert curated.field_provenance_json is None

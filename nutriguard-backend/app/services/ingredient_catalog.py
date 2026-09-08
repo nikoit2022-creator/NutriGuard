@@ -47,6 +47,7 @@ real, fully tested, ready seams for a FUTURE such integration, not
 something faked here to justify testing them. See
 `docs/CODEX_HANDOFF.md` for the full scoping note.
 """
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -60,7 +61,7 @@ from app.models.enums import (
     RiskLevel,
 )
 from app.models.ingredient import Ingredient
-from app.repositories import ingredient_alias_repository, ingredient_repository
+from app.repositories import ingredient_alias_repository, ingredient_repository, product_repository
 from app.services.barcode_text_safety import is_placeholder
 from app.services.ingredient_normalization import normalize_ingredient_name
 from app.services.ocr_normalizer import SyntheticIngredient
@@ -173,6 +174,92 @@ def _is_blank_value(value: Any) -> bool:
     return False
 
 
+def _parse_field_provenance_json(raw: str | None) -> dict[str, dict[str, Any]]:
+    """Never raises on malformed/missing input -- a corrupt or absent
+    `field_provenance_json` degrades to "no per-field provenance
+    recorded yet" (every field then correctly falls back to the row's
+    own record-level `source`, see `resolve_field_source`), never to an
+    error that would block reading an otherwise-valid `Ingredient` row."""
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _dump_field_provenance(provenance: dict[str, dict[str, Any]]) -> str:
+    return json.dumps(provenance, sort_keys=True)
+
+
+def _load_field_provenance(existing: Any) -> dict[str, dict[str, Any]]:
+    return _parse_field_provenance_json(getattr(existing, "field_provenance_json", None))
+
+
+def resolve_field_source(
+    field_provenance_json: str | None, field_name: str, *, fallback: IngredientSource
+) -> IngredientSource:
+    """The TRUE source that actually supplied `field_name`'s CURRENT
+    value on a row -- task: "scientific/regulatory provenance
+    truthful" (PR #13 review). Reads this row's own per-field
+    provenance (see `Ingredient.field_provenance_json`) when
+    `merge_verified_fields` has ever independently written `field_name`
+    specifically; otherwise falls back to `fallback` (the row's own
+    record-level `source`, accurate for any field that predates
+    per-field tracking or has simply never been independently merged --
+    a curated/seeded row's fields all came from one atomic INSERT, and
+    a freshly get-or-created OCR stub's fields are all still blank from
+    that same single write).
+
+    Any caller gating a regulatory claim (an EFSA/FDA approval status,
+    a numeric ADI figure -- see `app.services.ingredient_regulatory`)
+    on trustworthiness MUST resolve the source through this function,
+    never read the row's bare `source` column directly for that
+    purpose -- doing so would relabel an untouched field as if the
+    row's most recent partial merge had supplied it too, exactly the
+    bug this function exists to close.
+    """
+    entry = _parse_field_provenance_json(field_provenance_json).get(field_name)
+    if not entry:
+        return fallback
+    try:
+        return IngredientSource(entry["source"])
+    except (KeyError, ValueError):
+        return fallback
+
+
+def get_field_source(ingredient: Ingredient, field_name: str) -> IngredientSource:
+    """`resolve_field_source` for a real `Ingredient` ORM row."""
+    return resolve_field_source(
+        ingredient.field_provenance_json, field_name, fallback=ingredient.source
+    )
+
+
+def _backfill_field_provenance(existing: Any, *, now: datetime) -> dict[str, dict[str, Any]]:
+    """Ensures every `_MERGEABLE_FIELDS` member has an explicit
+    provenance entry BEFORE `merge_verified_fields` is allowed to move
+    this row's record-level `source`/`confidence` any further --
+    lazily snapshots the row's CURRENT (pre-this-call)
+    `source`/`confidence`/`retrieved_at` onto any field that doesn't
+    already have its own entry, so those untouched fields keep
+    reporting their real, original origin forever after, even once the
+    record-level `source` moves on to (honestly) describe only the
+    field(s) THIS call actually supplies. A no-op past the first-ever
+    `merge_verified_fields` call on a given row -- every mergeable
+    field already has its own entry by then."""
+    provenance = _load_field_provenance(existing)
+    baseline_retrieved_at = existing.retrieved_at or now
+    baseline = {
+        "source": existing.source.value,
+        "confidence": float(existing.confidence),
+        "retrievedAt": _as_utc(baseline_retrieved_at).isoformat(),
+    }
+    for field_name in _MERGEABLE_FIELDS:
+        provenance.setdefault(field_name, dict(baseline))
+    return provenance
+
+
 def merge_verified_fields(
     existing: Ingredient,
     *,
@@ -188,6 +275,18 @@ def merge_verified_fields(
     curated or regulatory information. Returns whether anything was
     actually applied (a genuine field change, OR a successful stale
     revalidation with unchanged values -- see below).
+
+    `fields` is explicitly allowed to be a PARTIAL subset (a regulatory
+    response that only supplies e.g. `description`) -- this function
+    never requires a complete profile. PR #13 review fix ("scientific/
+    regulatory provenance truthful"): only the field(s) actually
+    supplied a real (non-blank) value get attributed to `source` in
+    `existing.field_provenance_json` -- an untouched field keeps
+    reporting whatever source ACTUALLY wrote it, even though the row's
+    own record-level `source`/`confidence` (below) may move to describe
+    this call's contribution. See `resolve_field_source`, the only
+    honest way to read back which source is really behind a given
+    field's current value.
 
     Priority is source-rank first (`SOURCE_PRIORITY`), `confidence` as
     the tie-breaker within the same source rank -- a same-source
@@ -249,11 +348,13 @@ def merge_verified_fields(
         return False
 
     changed = False
+    touched_fields: list[str] = []
     for field_name, value in fields.items():
         if field_name not in _MERGEABLE_FIELDS:
             continue
         if _is_blank_value(value):
             continue
+        touched_fields.append(field_name)
         if getattr(existing, field_name) != value:
             setattr(existing, field_name, value)
             changed = True
@@ -261,12 +362,30 @@ def merge_verified_fields(
     if not changed and not stale_trusted_revalidation:
         return False
 
+    # PR #13 review fix ("scientific/regulatory provenance truthful"):
+    # snapshot every field's pre-existing provenance BEFORE the
+    # record-level `source`/`confidence` below can move on, then record
+    # THIS call's own source/confidence against only the field(s) it
+    # actually supplied a real (non-blank) value for -- never the whole
+    # row. This is what keeps an untouched field honestly reporting its
+    # real, older origin even once a partial merge moves the record-
+    # level columns -- see `Ingredient.field_provenance_json` and
+    # `resolve_field_source`.
+    if touched_fields:
+        field_provenance = _backfill_field_provenance(existing, now=now)
+        entry = {"source": source.value, "confidence": confidence, "retrievedAt": now.isoformat()}
+        for field_name in touched_fields:
+            field_provenance[field_name] = entry
+        existing.field_provenance_json = _dump_field_provenance(field_provenance)
+
     # Record-level provenance stays honest (task requirement 5): only
     # actually move `source`/`confidence` when the incoming contribution
     # is genuinely at least as authoritative, or it changed real content
     # (see the stale-revalidation docstring section above) -- a pure
     # "still current" revalidation from a lower-ranked trusted source
     # leaves the row's recorded source/confidence exactly as they were.
+    # Per-field provenance (above) is what protects any OTHER,
+    # untouched field regardless of what happens to these two below.
     if incoming_rank >= existing_rank or changed:
         existing.source = source
         existing.confidence = confidence
@@ -364,6 +483,62 @@ def _build_minimal_row(synthetic: SyntheticIngredient, normalized: str) -> Ingre
     )
 
 
+async def _reconcile_official_identifier_conflict(
+    db: AsyncSession, *, official: Ingredient, alias_owner: Ingredient
+) -> Ingredient:
+    """`official` was resolved via a genuine official identifier
+    (E-number/INS/CAS) match -- the strongest canonical-identity proof
+    this module has (task requirement 2). `alias_owner` is whatever
+    OLDER/weaker row currently owns the contested normalized-name
+    alias instead -- typically an earlier UNVERIFIED synthetic
+    observation that only ever saw a bare name, never the identifier.
+    PR #13 review fix ("canonical identity precedence"): an official
+    identifier must always outrank a normalized-name alias, so
+    `official` is ALWAYS the return value here, never `alias_owner` --
+    but getting that right must not lose data or silently discard a
+    row something else may depend on:
+
+      * every alias `alias_owner` owns (the contested one AND any other
+        name/spelling variant it accumulated) is repointed onto
+        `official`, so every future lookup of any of those names
+        converges on the actually-correct canonical row too, not just
+        the one contested alias -- this is the "preserve ... useful
+        aliases" half of the fix.
+      * `alias_owner` itself is deleted ONLY when that is PROVABLY
+        safe: never when it's curated/verified data (a real, reviewed
+        row is never silently discarded, regardless of any alias
+        conflict), and never while any `Product.ingredient_ids` still
+        references its id (deleting it would leave that product with a
+        dangling ingredient reference) -- this is the "preserve
+        existing product relationships" half. Both are conservative on
+        purpose: this reconciliation has no way to safely MERGE two
+        different products' ingredient lists, so it never attempts to.
+      * when deletion isn't safe, `alias_owner` is simply left in
+        place -- unreachable by name from now on (every alias points at
+        `official`), but still perfectly valid for whatever already
+        references its id directly. That is the deterministic outcome
+        when both rows already have product references: neither row is
+        touched or merged, only the alias index converges, so every
+        existing product keeps exactly the ingredient row it already
+        had.
+    """
+    if alias_owner.id == official.id:
+        return official
+
+    for other_alias in await ingredient_alias_repository.list_for_ingredient(db, alias_owner.id):
+        other_alias.ingredient_id = official.id
+    await db.flush()
+
+    is_curated_or_verified = (
+        alias_owner.verification_status == IngredientVerificationStatus.VERIFIED
+        or alias_owner.source == IngredientSource.CURATED_SEED
+    )
+    if not is_curated_or_verified and not await product_repository.has_ingredient_reference(db, alias_owner.id):
+        await ingredient_repository.delete(db, alias_owner)
+
+    return official
+
+
 async def _register_alias_and_resolve_canonical(
     db: AsyncSession,
     *,
@@ -371,6 +546,7 @@ async def _register_alias_and_resolve_canonical(
     synthetic: SyntheticIngredient,
     normalized: str,
     owns_row: bool,
+    official_identifier_match: bool = False,
 ) -> Ingredient:
     """Register `synthetic.common_name` as an alias of `candidate` and
     return whichever `Ingredient` row is ACTUALLY canonical for that
@@ -392,6 +568,18 @@ async def _register_alias_and_resolve_canonical(
     (concurrent, or a later scan resolving via alias vs. one still
     holding the loser's id) could disagree about which one is
     canonical.
+
+    `official_identifier_match=True` only when `candidate` was resolved
+    via `ingredient_repository.get_by_official_identifier` (E-number/
+    INS/CAS -- always `owns_row=False` when this is set, since such a
+    row is by definition a pre-existing lookup result, never something
+    this call itself just inserted). PR #13 review fix ("canonical
+    identity precedence"): a bare alias-table conflict is a coin flip
+    between two equally-unproven candidates (handled below, unchanged),
+    but an official identifier is definitive proof of identity -- it
+    must win even when the alias table currently disagrees, so this
+    case is handled BEFORE the generic `owns_row` race-loser logic ever
+    runs (see `_reconcile_official_identifier_conflict`).
 
     `owns_row=True` only for a row THIS call itself just INSERTed with
     no primary-key conflict -- if it turns out to be the alias race's
@@ -423,6 +611,9 @@ async def _register_alias_and_resolve_canonical(
         # nothing; never delete `candidate` in this branch, since we
         # could not actually confirm a winner to converge onto.
         return candidate
+
+    if official_identifier_match:
+        return await _reconcile_official_identifier_conflict(db, official=candidate, alias_owner=canonical)
 
     if owns_row:
         await ingredient_repository.delete(db, candidate)
@@ -475,7 +666,12 @@ async def get_or_create_catalog_ingredient(db: AsyncSession, synthetic: Syntheti
         # instead of needing another E-number-only lookup.
         _fill_missing_identity_fields(resolved, synthetic)
         return await _register_alias_and_resolve_canonical(
-            db, candidate=resolved, synthetic=synthetic, normalized=normalized, owns_row=False
+            db,
+            candidate=resolved,
+            synthetic=synthetic,
+            normalized=normalized,
+            owns_row=False,
+            official_identifier_match=True,
         )
 
     # Genuinely new -- race-safe get-or-create. Two concurrent scans of
@@ -499,6 +695,14 @@ async def get_or_create_catalog_ingredient(db: AsyncSession, synthetic: Syntheti
     # NOT create (see `_register_alias_and_resolve_canonical`'s
     # `owns_row` docstring).
     owns_row = inserted is not None
+    # `True` only when the fallback chain below had to fall all the way
+    # to an official-identifier re-fetch to recover from the conflict
+    # (see `_register_alias_and_resolve_canonical`'s
+    # `official_identifier_match` docstring) -- can only ever become
+    # `True` while `owns_row` is `False` (this branch is only reached
+    # when `inserted` is still `None`, i.e. our own insert already
+    # lost).
+    official_identifier_match = False
     if inserted is None:
         inserted = await ingredient_repository.get_by_id(db, synthetic.id)
     if inserted is None:
@@ -509,6 +713,7 @@ async def get_or_create_catalog_ingredient(db: AsyncSession, synthetic: Syntheti
         inserted = await ingredient_repository.get_by_official_identifier(
             db, e_number=synthetic.e_number, ins_number=row.ins_number, cas_number=row.cas_number
         )
+        official_identifier_match = inserted is not None
     if inserted is None:
         raise RuntimeError(
             f"Ingredient insert for id={synthetic.id!r} (e_number={synthetic.e_number!r}) "
@@ -520,7 +725,12 @@ async def get_or_create_catalog_ingredient(db: AsyncSession, synthetic: Syntheti
         _fill_missing_identity_fields(inserted, synthetic)
 
     return await _register_alias_and_resolve_canonical(
-        db, candidate=inserted, synthetic=synthetic, normalized=normalized, owns_row=owns_row
+        db,
+        candidate=inserted,
+        synthetic=synthetic,
+        normalized=normalized,
+        owns_row=owns_row,
+        official_identifier_match=official_identifier_match,
     )
 
 

@@ -102,25 +102,37 @@ class Ingredient(Base):
 
     # --- Verification status + provenance (persistent ingredient
     # knowledge cache -- see app.services.ingredient_catalog) ---
-    # Record-level provenance, not per-field, for the SCIENTIFIC/
-    # REGULATORY content columns specifically (`app.services.
-    # ingredient_catalog._MERGEABLE_FIELDS`: description, purpose,
-    # health concerns, EFSA/FDA status, ADI, risk level, ...): every one
-    # of those is written together, from one source, at one point in
-    # time, and `merge_verified_fields` enforces that atomically -- it
-    # only ever moves `source`/`confidence` when it is also the field
-    # values' own real origin, never leaving a row claiming a source for
-    # content that source didn't actually supply (mirrors `ProductSource`'s
-    # own per-record provenance design). The one deliberate, narrow
-    # exception is identity backfill (`_fill_missing_identity_fields`):
-    # a later, lower-trust observation may fill in a still-`None`
-    # `e_number`/`ins_number` on an existing row without moving
-    # `source`, since an identifier is not "scientific/regulatory
-    # content" in the same sense and that function only ever fills an
-    # empty slot, never overwrites one -- this one column pair is
-    # genuinely not represented by a single-source claim, which is why
-    # `ins_number` in particular is never presented as an independently-
-    # verified identifier on the wire (see `IngredientOut.ins_number_verified`).
+    # `source`/`confidence`/`retrieved_at`/`last_verified_at` below are
+    # this ROW's own current values -- convenient record-level defaults,
+    # and the honest, complete picture for a row whose SCIENTIFIC/
+    # REGULATORY content columns (`app.services.ingredient_catalog.
+    # _MERGEABLE_FIELDS`: description, purpose, health concerns,
+    # EFSA/FDA status, ADI, risk level, ...) have only ever been written
+    # together, from one source, at one point in time (a curated/seeded
+    # row's single atomic INSERT; a freshly get-or-created OCR stub's
+    # single, still-blank write). PR #13 review fix ("scientific/
+    # regulatory provenance truthful"): `merge_verified_fields` accepts
+    # a PARTIAL subset of `_MERGEABLE_FIELDS` (e.g. a regulatory lookup
+    # response that only updates `description`), so once that has
+    # actually happened, these four record-level columns alone can no
+    # longer honestly describe EVERY field's own real origin -- moving
+    # them for the whole row would relabel an untouched field (still,
+    # in truth, older/lower-trust content) as if the incoming provider
+    # had supplied it too. See `field_provenance_json` below, which is
+    # what makes the per-field claim honest once that's ever happened;
+    # these four columns are never removed -- `is_stale`/the negative-
+    # cache window/`get_or_create_catalog_ingredient`'s local-first
+    # resolution all still key off the row as a whole. The one other
+    # deliberate, narrow exception is identity backfill
+    # (`_fill_missing_identity_fields`): a later, lower-trust observation
+    # may fill in a still-`None` `e_number`/`ins_number` on an existing
+    # row without moving `source`, since an identifier is not
+    # "scientific/regulatory content" in the same sense and that
+    # function only ever fills an empty slot, never overwrites one --
+    # this one column pair is genuinely not represented by a
+    # single-source claim, which is why `ins_number` in particular is
+    # never presented as an independently-verified identifier on the
+    # wire (see `IngredientOut.ins_number_verified`).
     verification_status: Mapped[IngredientVerificationStatus] = mapped_column(
         "verification_status",
         Enum(IngredientVerificationStatus, name="ingredient_verification_status", native_enum=True),
@@ -144,6 +156,24 @@ class Ingredient(Base):
     )
     confidence: Mapped[float] = mapped_column("confidence", Numeric(4, 3), nullable=False, default=0)
     schema_version: Mapped[int] = mapped_column("schema_version", Integer, nullable=False, default=1)
+    # Per-field provenance for `app.services.ingredient_catalog.
+    # _MERGEABLE_FIELDS` specifically (PR #13 review fix, see the class
+    # docstring section above): a compact JSON object,
+    # `{field_name: {"source", "confidence", "retrievedAt"}}`, with one
+    # entry per mergeable field that `merge_verified_fields` has ever
+    # independently written. `NULL`, or a missing key for a given field,
+    # means that field has never been independently merged -- its real
+    # origin IS this row's own `source` above (see
+    # `ingredient_catalog.resolve_field_source`, the only intended
+    # reader of this column; nothing else should parse it directly).
+    # Stored as a JSON-serialized string, not a native JSON column type
+    # -- same "compact, curated JSON" convention already used by
+    # `ProductSource.normalized_ingredients_json`/`nutrition_json`, kept
+    # for the same reason: portability with this project's SQLite test
+    # DB, which has no native JSON type.
+    field_provenance_json: Mapped[str | None] = mapped_column(
+        "field_provenance_json", Text, nullable=True, default=None
+    )
 
     # Nullable (migration f5a6b7c8d9e0): `NULL` means genuinely unknown
     # -- neither confirmed present nor confirmed absent. A curated/

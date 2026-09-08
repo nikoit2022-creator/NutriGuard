@@ -435,13 +435,27 @@ def _ingredient_out_dict(ing: Any) -> dict:
     risk_assessment_available = getattr(ing, "risk_assessment_available", True)
     verification_status = getattr(ing, "verification_status", IngredientVerificationStatus.UNVERIFIED)
     source = getattr(ing, "source", None)
+    # PR #13 review fix ("scientific/regulatory provenance truthful"):
+    # gate each field on ITS OWN true source, not blindly this row's
+    # record-level `source` -- a partial `merge_verified_fields` call
+    # that only ever touched one of these three fields must never make
+    # an untouched one look regulatory-confirmed too. See
+    # `ingredient_catalog.resolve_field_source`; falls back to `source`
+    # itself for a row that predates per-field tracking or a
+    # `SyntheticIngredient` (has no `field_provenance_json` at all).
+    field_provenance_json = getattr(ing, "field_provenance_json", None)
+    efsa_source = ingredient_catalog.resolve_field_source(field_provenance_json, "efsa_status", fallback=source)
+    fda_source = ingredient_catalog.resolve_field_source(field_provenance_json, "fda_status", fallback=source)
+    adi_source_resolved = ingredient_catalog.resolve_field_source(
+        field_provenance_json, "acceptable_daily_intake", fallback=source
+    )
     # Task requirement 4: gated exactly like `IngredientOut`'s own
     # `efsaApprovalStatus`/`fdaApprovalStatus`/`adiMin.../adiMax...` --
     # `NO_INFORMATION`/`None` unless this ingredient is VERIFIED and
     # CURATED_SEED/REGULATORY_LOOKUP-sourced (see
     # `ingredient_regulatory.derive_gated_approval_status`).
     adi_min, adi_max = ingredient_regulatory.derive_gated_adi_range_mg_per_kg_bw_per_day(
-        ing.acceptable_daily_intake, verification_status=verification_status, source=source
+        ing.acceptable_daily_intake, verification_status=verification_status, source=adi_source_resolved
     )
     last_verified_at = getattr(ing, "last_verified_at", None)
     needs_refresh = False
@@ -476,10 +490,10 @@ def _ingredient_out_dict(ing: Any) -> dict:
         "riskAssessmentAvailable": risk_assessment_available,
         "riskRationale": (ing.evidence_level or None) if risk_assessment_available else None,
         "efsaApprovalStatus": ingredient_regulatory.derive_gated_approval_status(
-            ing.efsa_status, verification_status=verification_status, source=source
+            ing.efsa_status, verification_status=verification_status, source=efsa_source
         ).value,
         "fdaApprovalStatus": ingredient_regulatory.derive_gated_approval_status(
-            ing.fda_status, verification_status=verification_status, source=source
+            ing.fda_status, verification_status=verification_status, source=fda_source
         ).value,
         "adiMinMgPerKgBwPerDay": adi_min,
         "adiMaxMgPerKgBwPerDay": adi_max,

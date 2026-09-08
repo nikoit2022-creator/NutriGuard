@@ -12,6 +12,7 @@ import pytest
 
 from app.models.enums import IngredientSource, IngredientVerificationStatus, RiskLevel
 from app.models.ingredient import Ingredient
+from app.models.product import Product
 from app.repositories import ingredient_alias_repository, ingredient_repository
 from app.services import ingredient_catalog
 from app.services.ingredient_normalization import normalize_ingredient_name
@@ -282,3 +283,192 @@ async def test_alias_get_or_create_is_idempotent_under_a_normalized_alias_confli
     )
     assert second.id == first.id
     assert second.alias_text == "Citric Acid"  # the original row, unchanged
+
+
+# --- 6. Canonical identity precedence: official identifier > alias --------
+# PR #13 review blocker: an official-identifier match used to lose to a
+# pre-existing alias owned by an older, weaker (UNVERIFIED synthetic) row
+# -- `_register_alias_and_resolve_canonical` would see the alias's
+# existing owner and return THAT instead of the official-identifier
+# match, silently downgrading a curated/verified resolution to an
+# unverified one. Fixed by `_reconcile_official_identifier_conflict`.
+
+
+async def _stub_owning_alias(db_session, *, ingredient_id: str, alias_normalized: str) -> Ingredient:
+    """A pre-existing UNVERIFIED synthetic row that already owns
+    `alias_normalized` -- built directly (not via
+    `get_or_create_catalog_ingredient`) so the test controls the exact
+    starting state: this row's alias predates any knowledge of the
+    curated/official row created separately in each test below."""
+    stub = Ingredient(
+        id=ingredient_id,
+        common_name="Ascorbic Acid",
+        normalized_name=alias_normalized,
+        verification_status=IngredientVerificationStatus.UNVERIFIED,
+        source=IngredientSource.OCR_HEURISTIC,
+        confidence=0.2,
+        risk_level=RiskLevel.SAFE,
+        risk_assessment_available=False,
+    )
+    db_session.add(stub)
+    await db_session.flush()
+    await ingredient_alias_repository.get_or_create(
+        db_session,
+        ingredient_id=stub.id,
+        alias_text="Ascorbic Acid",
+        alias_normalized=alias_normalized,
+        language=None,
+        source=IngredientSource.OCR_HEURISTIC,
+    )
+    return stub
+
+
+@pytest.mark.asyncio
+async def test_official_identifier_match_outranks_a_pre_existing_alias_owned_by_a_different_row(db_session):
+    """The exact PR #13 scenario: an older UNVERIFIED synthetic row
+    already owns the "ascorbic acid" alias; a later observation supplies
+    an E-number that resolves to a SEPARATE, curated/verified row. The
+    curated row must win -- never the alias's pre-existing owner."""
+    curated = _seeded_ingredient(
+        id="e300_ascorbic_acid",
+        common_name="L-Ascorbic Acid",  # deliberately NOT "Ascorbic Acid" -- its
+        normalized_name="l-ascorbic acid",  # own auto-registered alias must not
+        e_number="E300",  # already claim "ascorbic acid" for this test's setup
+    )
+    db_session.add(curated)
+    await db_session.flush()
+
+    stub = await _stub_owning_alias(db_session, ingredient_id="synth_ascorbic_stub", alias_normalized="ascorbic acid")
+    assert await ingredient_repository.count(db_session) == 2
+
+    later_observation = replace(create_synthetic_ingredient("Ascorbic Acid"), e_number="E300")
+    assert normalize_ingredient_name(later_observation.common_name) == "ascorbic acid"
+
+    resolved = await ingredient_catalog.get_or_create_catalog_ingredient(db_session, later_observation)
+
+    assert resolved.id == curated.id  # the curated/verified row wins, never the stub
+    assert resolved.verification_status == IngredientVerificationStatus.VERIFIED
+
+    # The contested alias now converges on the curated row -- any future
+    # resolution of "ascorbic acid" (with or without the E-number) hits
+    # the curated row directly.
+    alias = await ingredient_alias_repository.get_by_normalized(db_session, "ascorbic acid")
+    assert alias is not None
+    assert alias.ingredient_id == curated.id
+
+    # The stub had no product referencing it and isn't curated/verified
+    # -- provably safe to remove, so it must not be left behind as an
+    # orphan duplicate.
+    assert await ingredient_repository.get_by_id(db_session, stub.id) is None
+    assert await ingredient_repository.count(db_session) == 1
+
+
+@pytest.mark.asyncio
+async def test_official_identifier_conflict_resolution_never_deletes_a_curated_or_verified_row(db_session):
+    """Defense in depth: even if the ALIAS OWNER (the "losing" side of
+    the conflict) is itself curated/verified, it must never be deleted
+    -- only a genuinely disposable synthetic duplicate may ever be
+    removed."""
+    official = _seeded_ingredient(
+        id="e300_ascorbic_acid", common_name="L-Ascorbic Acid", normalized_name="l-ascorbic acid", e_number="E300"
+    )
+    other_curated = _seeded_ingredient(
+        id="curated_ascorbic_acid_variant",
+        common_name="Ascorbic Acid",
+        normalized_name="ascorbic acid",
+        e_number=None,
+    )
+    db_session.add_all([official, other_curated])
+    await db_session.flush()
+    await ingredient_alias_repository.get_or_create(
+        db_session,
+        ingredient_id=other_curated.id,
+        alias_text="Ascorbic Acid",
+        alias_normalized="ascorbic acid",
+        language=None,
+        source=IngredientSource.CURATED_SEED,
+    )
+
+    later_observation = replace(create_synthetic_ingredient("Ascorbic Acid"), e_number="E300")
+    resolved = await ingredient_catalog.get_or_create_catalog_ingredient(db_session, later_observation)
+
+    assert resolved.id == official.id
+    # `other_curated` is itself VERIFIED/CURATED_SEED -- never deleted,
+    # even though it lost the alias to `official`.
+    assert await ingredient_repository.get_by_id(db_session, other_curated.id) is not None
+    assert await ingredient_repository.count(db_session) == 2
+
+    alias = await ingredient_alias_repository.get_by_normalized(db_session, "ascorbic acid")
+    assert alias.ingredient_id == official.id
+
+
+@pytest.mark.asyncio
+async def test_official_identifier_conflict_resolution_preserves_existing_product_relationships(db_session):
+    """Deterministic behavior when the alias-owning duplicate ALREADY
+    has a product relationship (task: "define deterministic behavior if
+    both rows already have product references"): the stub is left in
+    place -- unreachable by name from now on, but still valid for the
+    product that already references its id directly -- rather than
+    deleted out from under that product."""
+    curated = _seeded_ingredient(
+        id="e300_ascorbic_acid", common_name="L-Ascorbic Acid", normalized_name="l-ascorbic acid", e_number="E300"
+    )
+    db_session.add(curated)
+    await db_session.flush()
+
+    stub = await _stub_owning_alias(db_session, ingredient_id="synth_ascorbic_stub", alias_normalized="ascorbic acid")
+
+    product = Product(
+        barcode="0000000000001",
+        product_name="Legacy Product Referencing The Stub",
+        brand="",
+        category="",
+        raw_ingredient_text="ascorbic acid",
+        ingredient_ids=stub.id,
+        health_score=50,
+        nova_group=1,
+        sugar_grams=0,
+        sodium_mg=0,
+        saturated_fat_grams=0,
+        allergens_detected="None",
+        source="label_scan",
+    )
+    db_session.add(product)
+    await db_session.flush()
+
+    later_observation = replace(create_synthetic_ingredient("Ascorbic Acid"), e_number="E300")
+    resolved = await ingredient_catalog.get_or_create_catalog_ingredient(db_session, later_observation)
+
+    assert resolved.id == curated.id  # official identifier still wins for FUTURE resolution
+
+    # The stub survives -- deleting it would leave `product` with a
+    # dangling ingredient reference.
+    still_there = await ingredient_repository.get_by_id(db_session, stub.id)
+    assert still_there is not None
+    assert await ingredient_repository.count(db_session) == 2
+
+    # But it is no longer reachable by name -- every future OCR
+    # observation of "ascorbic acid" converges on the curated row.
+    alias = await ingredient_alias_repository.get_by_normalized(db_session, "ascorbic acid")
+    assert alias.ingredient_id == curated.id
+
+    # `product`'s own ingredient reference is untouched -- still valid.
+    persisted_product = await db_session.get(Product, product.barcode)
+    assert persisted_product.ingredient_ids == stub.id
+
+
+@pytest.mark.asyncio
+async def test_official_identifier_match_with_no_prior_alias_conflict_is_unaffected(db_session):
+    """No conflict at all (the common case, already covered by
+    `test_local_cache_hit_by_e_number_reuses_the_curated_row_without_creating_one`)
+    must remain completely unaffected by the new reconciliation path --
+    it should never even be invoked."""
+    curated = _seeded_ingredient()
+    db_session.add(curated)
+    await db_session.flush()
+
+    synthetic = create_synthetic_ingredient("Citric Acid (E330)")
+    resolved = await ingredient_catalog.get_or_create_catalog_ingredient(db_session, synthetic)
+
+    assert resolved.id == curated.id
+    assert await ingredient_repository.count(db_session) == 1

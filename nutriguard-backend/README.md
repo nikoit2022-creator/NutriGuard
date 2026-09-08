@@ -12,6 +12,27 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V17 (PR #13 review round 2 -- canonical identity precedence,
+truthful per-field provenance):** Two further review blockers on the
+same branch, fixed without reopening V16's own scope: an official
+identifier (E-number/INS/CAS) match now always outranks a pre-existing
+alias owned by a weaker row, instead of the alias's existing owner
+silently overriding a stronger official-identifier resolution (new
+`ingredient_catalog._reconcile_official_identifier_conflict` --
+repoints every alias the loser owned onto the winner and deletes the
+loser only when that is provably safe: never curated/verified, never
+still referenced by a `Product`); and `merge_verified_fields`'s
+record-level `source`/`confidence` can no longer make an untouched
+field look like it came from a PARTIAL merge's incoming provider --
+new per-field provenance (`Ingredient.field_provenance_json`,
+`ingredient_catalog.resolve_field_source`/`get_field_source`, migration
+`a4b5c6d7e8f9`) tracks which source actually supplied each
+independently-merged scientific/regulatory field, and
+`efsaApprovalStatus`/`fdaApprovalStatus`/the numeric ADI fields (both
+`IngredientOut` and `food_analysis._ingredient_out_dict`) now gate on
+that per-field source rather than the row's bare record-level one. See
+deviation item 15 in section 6 for the full breakdown.
+
 **V16 (PR #13 review fixes -- data quality, canonical identity,
 provenance):** A post-merge review of V15/V14 found five further
 issues, all fixed on the same branch: synthetic ingredient ids are now
@@ -1125,6 +1146,161 @@ than silently resolved:
       `openapi.json` (nullable `isGluten`/etc. widen from `boolean` to
       `boolean | null`, `insNumberVerified` is a new field — no
       existing field removed or narrowed).
+
+15. **PR #13 review round 2: canonical identity precedence + truthful
+    per-field scientific/regulatory provenance.** Two further blockers
+    found on a second review pass over item 14, both fixed on the same
+    branch/PR:
+    - **Official identifier now always outranks a pre-existing alias.**
+      Scenario: an older UNVERIFIED synthetic row already owns the
+      "ascorbic acid" alias (an earlier scan that never caught the
+      E-number); a later observation supplies the E-number, which
+      resolves to a SEPARATE curated/verified row.
+      `get_or_create_catalog_ingredient` correctly looked the curated
+      row up via `get_by_official_identifier`, but
+      `_register_alias_and_resolve_canonical` then saw the alias's
+      EXISTING owner (the older, weaker stub) and returned THAT
+      instead — silently downgrading a curated/verified resolution to
+      an unverified one, exactly backwards from the documented
+      identity precedence (official identifier > alias > normalized
+      name). Fixed by a dedicated reconciliation path
+      (`ingredient_catalog._reconcile_official_identifier_conflict`),
+      only entered when the winning candidate was resolved via a real
+      official-identifier match: the official row is always returned;
+      every alias the loser owned (not just the one contested alias)
+      is repointed onto it, so every future lookup of any of those
+      names converges correctly too; the loser is deleted ONLY when
+      that is provably safe — never when it is itself
+      curated/`VERIFIED`, and never while any `Product.ingredient_ids`
+      still references its id (new `product_repository.
+      has_ingredient_reference`, boundary-safe against the comma-
+      separated column). When deletion isn't safe, the loser is simply
+      left in place — unreachable by name from then on, but still valid
+      for whatever product already references its id directly — which
+      is the deterministic behavior when both rows already have
+      product references: neither is touched or merged, only the alias
+      index converges. Covered by
+      `tests/integration/test_ingredient_catalog.py` (the exact
+      pre-existing-alias-then-E-number scenario, the curated-loser
+      case, and the existing-product-reference case) and
+      `tests/postgres/test_official_identifier_precedence_postgres.py`
+      (two real concurrent-session scenarios, run repeatedly against a
+      disposable Postgres 16 with no flakiness observed).
+    - **Truthful per-field scientific/regulatory provenance.**
+      `merge_verified_fields` always accepted a PARTIAL subset of
+      `_MERGEABLE_FIELDS` (e.g. a regulatory response updating only
+      `description`), but `Ingredient` stored just ONE record-level
+      `source`/`confidence`/timestamps for all of those columns
+      together — so a partial update could relabel an untouched field
+      (still, in truth, older/lower-trust content) as if the incoming
+      provider had supplied it too. Fixed with per-field provenance,
+      the "add per-field provenance for independently merged fields"
+      option (additive, nullable `Ingredient.field_provenance_json` --
+      migration `a4b5c6d7e8f9` -- a compact JSON object, one entry per
+      mergeable field `merge_verified_fields` has ever independently
+      written): the first partial merge on a row lazily backfills every
+      still-untracked field with the row's OWN pre-merge
+      source/confidence/timestamp before the record-level columns are
+      allowed to move on, so an untouched field keeps reporting its
+      real origin forever after. `ingredient_catalog.
+      resolve_field_source`/`get_field_source` are the only intended
+      readers; both `IngredientOut`'s `efsaApprovalStatus`/
+      `fdaApprovalStatus`/`adiMin...`/`adiMax...`/`adiSource` computed
+      fields and `food_analysis._ingredient_out_dict`'s hand-mirrored
+      equivalents now gate each field on ITS OWN resolved source
+      instead of the row's bare record-level `source` — a partial
+      regulatory refresh that only ever touched `description` can no
+      longer make an untouched, still-GEMINI-sourced `efsaStatus`/
+      `acceptableDailyIntake` surface as an authoritative approval/ADI.
+      `field_provenance_json` itself is never serialized on the wire
+      (internal only). Covered by
+      `tests/unit/test_ingredient_catalog_pure.py` (including the exact
+      "curated data + partial regulatory refresh" scenario, and a
+      second independent partial merge that must not steal a field the
+      first merge already attributed elsewhere),
+      `tests/unit/test_ingredient_schema_data_quality.py`, and
+      `tests/unit/test_food_analysis_ingredient_out_dict.py`.
+    - Also verified (no code change on this branch): the nullable
+      dietary-identity flags added in item 14
+      (`isGluten`/`isLactose`/`isVegan`/`isVegetarian`/`isHalal`/
+      `isKosher`) against the Android client's current API-contract
+      handling — see "Android nullable-dietary-flags contract check"
+      immediately below.
+    - All changes additive/backward-compatible; diffed against a
+      pinned-dependency (`requirements.txt`) regeneration of
+      `openapi.json` — only two computed-field descriptions changed
+      text (documenting the new per-field gating), no field/type/shape
+      changed.
+
+### Android nullable-dietary-flags contract check (PR #13 review round 2)
+
+Requested by the review: verify whether the Android client currently
+converts a `null` `isGluten`/`isLactose`/`isVegan`/`isVegetarian`/
+`isHalal`/`isKosher` (see item 14 above — these six became nullable in
+migration `f5a6b7c8d9e0`, additive/widening on the wire) back into a
+fabricated default, and identify the exact follow-up if so. **No
+Android source was modified to answer this** (out of scope for this
+backend-only branch — see CLAUDE.md section 11); this is a report only.
+
+**Finding: yes, it does.**
+
+- **Endpoint**: any response carrying an `ingredients[]` array with the
+  `IngredientOut` shape — `POST /api/v1/scan/label-image`,
+  `POST /api/v1/scan/barcode`, `GET /api/v1/products/{barcode}`,
+  `GET /api/v1/ingredients/{id}` (API Contract 5.4/7.x).
+- **Contract as specified vs. as actually implemented on the wire**:
+  the backend correctly sends real `null` for a genuinely-unknown flag
+  (item 14) — this is honored end-to-end on the network-parsing side
+  of the client too. `com.example.data.remote.dto.IngredientDto` (in
+  `android-app/app/src/main/java/com/example/data/remote/dto/
+  ScanLabelImageDtos.kt`, lines ~152–157) correctly declares all six as
+  nullable (`Boolean?`), and its manual `fromJson` (lines ~187–192)
+  correctly preserves a real JSON `null` as Kotlin `null` via
+  `if (json.has(...)) json.optBoolean(...) else null` — so nothing is
+  lost or silently coerced at the point the JSON is actually parsed.
+- **The actual mismatch**: `List<IngredientDto>.toEntities(idPrefix)`
+  (same file, lines ~276–312), which maps the parsed DTO into the
+  persisted Room entity `com.example.data.model.IngredientEntity`
+  (`android-app/app/src/main/java/com/example/data/model/
+  IngredientEntity.kt`, itself still declaring all six as
+  non-nullable `Boolean` with the same fabricated-looking defaults the
+  backend fix eliminated: `isGluten`/`isLactose` default `false`,
+  `isVegan`/`isVegetarian`/`isHalal`/`isKosher` default `true`),
+  converts the honest `null` right back into exactly that fabricated
+  default at lines 298–303:
+  `isGluten = ing.isGluten ?: false`, `isLactose = ing.isLactose ?: false`,
+  `isVegan = ing.isVegan ?: true`, `isVegetarian = ing.isVegetarian ?: true`,
+  `isHalal = ing.isHalal ?: true`, `isKosher = ing.isKosher ?: true`.
+  A `null` (genuinely unknown, e.g. every UNVERIFIED OCR/Gemini
+  ingredient this backend catalogs) is persisted to the local
+  `ingredients` table as a real, positive `true`/`false` certification
+  claim — the same class of fabrication item 14 exists to prevent, now
+  reintroduced one layer downstream, entirely inside Android.
+- **Current blast radius (checked, not assumed)**: today this is
+  latent, not yet user-visible. No Android UI component reads
+  `IngredientEntity.isGluten`/`isVegan`/etc. at all (`IngredientChip.kt`,
+  `IngredientDetailBottomSheet.kt`, `RecognizedIngredientCards.kt`, and
+  `RecognizedIngredientUiModel.kt` reference none of the six), and
+  neither `DietaryBadgesRow.kt` nor `PersonalizedWarningEngine.kt`
+  reads them either — both read the separate, PRODUCT-level
+  `ProductEntity.isGlutenFree`/`isVegan`/etc. fields instead (sourced
+  from the backend's own product-level fields, not aggregated from
+  per-ingredient flags anywhere in the Kotlin source). So the
+  fabricated per-ingredient value is currently inert — but it is real,
+  persisted, incorrect data sitting in the local DB, one `IngredientDao`
+  query away from silently backing a future per-ingredient dietary
+  badge or warning with zero real evidence.
+- **What would need to change, and where**: on the Android side only
+  (backend is already correct and unaffected) —
+  `IngredientEntity`'s six dietary-identity columns need to become
+  `Boolean?` (a Room schema migration, additive/nullable — the same
+  shape of change as this backend's own `f5a6b7c8d9e0`), and
+  `toEntities`'s six `?: false`/`?: true` fallbacks need to become a
+  straight pass-through (`ing.isGluten`, not `ing.isGluten ?: false`,
+  etc.) so a real `null` stays `null` all the way into the local DB.
+  This is Android-client work and is intentionally not made on this
+  backend-only branch (CLAUDE.md section 11) — flagged here for
+  AI Studio/Android ownership.
 
 No other ambiguities were found that required deviating from the
 contract; where the contract was silent on an implementation detail

@@ -59,12 +59,22 @@ async def insert_new(db: AsyncSession, ingredient: Ingredient) -> Ingredient | N
 
 async def delete(db: AsyncSession, ingredient: Ingredient) -> None:
     """Removes a single ingredient row within the caller's own
-    transaction (no independent commit). Used only for a genuinely
-    orphaned row this same session just inserted and immediately lost a
-    canonical-alias race for -- see
-    `ingredient_catalog._register_alias_and_resolve_canonical` -- never
-    for a row that predates this call/might already be relied on
-    elsewhere."""
+    transaction (no independent commit). No safety checks of its own --
+    every caller is responsible for having already proven deletion is
+    safe BEFORE calling this. Two callers today, both in
+    `ingredient_catalog`:
+      * `_register_alias_and_resolve_canonical` -- a genuinely orphaned
+        row THIS SAME session just inserted and immediately lost a
+        canonical-alias race for (`owns_row=True`); never a row that
+        predates that call.
+      * `_reconcile_official_identifier_conflict` (PR #13 review:
+        "canonical identity precedence") -- a PRE-EXISTING row that
+        lost an alias conflict to a stronger official-identifier match,
+        deleted only after that caller has independently confirmed it
+        is neither curated/verified data nor still referenced by any
+        `Product` (see that function's own docstring for the full
+        safety argument -- deliberately not duplicated here, since this
+        function itself enforces none of it)."""
     await db.delete(ingredient)
     await db.flush()
 

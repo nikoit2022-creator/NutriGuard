@@ -178,6 +178,47 @@ def test_unverified_curated_source_never_surfaces_as_an_authoritative_approval()
     assert dumped["adiMinMgPerKgBwPerDay"] is None
 
 
+def test_untouched_field_with_explicit_lower_trust_provenance_is_never_gated_authoritative():
+    """The scenario `merge_verified_fields` actually produces once a row
+    has been through at least one partial merge: an untouched field
+    keeps an EXPLICIT provenance entry naming its own real (non-trusted)
+    source, even though the record-level `source`/`verificationStatus`
+    now read REGULATORY_LOOKUP/VERIFIED. That explicit entry must win --
+    `efsaApprovalStatus`/`adiMin...` must stay ungated for THIS field."""
+    import json
+
+    field_provenance_json = json.dumps(
+        {
+            "description": {"source": "REGULATORY_LOOKUP", "confidence": 0.9, "retrievedAt": "2026-01-01T00:00:00+00:00"},
+            "efsa_status": {"source": "GEMINI", "confidence": 0.8, "retrievedAt": "2025-01-01T00:00:00+00:00"},
+            "acceptable_daily_intake": {
+                "source": "GEMINI", "confidence": 0.8, "retrievedAt": "2025-01-01T00:00:00+00:00"
+            },
+        }
+    )
+    out = IngredientOut(
+        **_curated_kwargs(
+            verification_status=IngredientVerificationStatus.VERIFIED,
+            source=IngredientSource.REGULATORY_LOOKUP,
+            field_provenance_json=field_provenance_json,
+        )
+    )
+    dumped = out.model_dump(by_alias=True)
+
+    # The one field a REGULATORY_LOOKUP call genuinely touched IS gated.
+    # (`description` isn't itself gated -- only EFSA/FDA/ADI are -- this
+    # just documents the setup is realistic.)
+    assert dumped["description"] == "High-intensity artificial sweetener."
+
+    # `efsaStatus`/`acceptableDailyIntake` are still, in truth, GEMINI
+    # content -- never gated as an authoritative regulatory claim, no
+    # matter what the record-level `source`/`verificationStatus` say.
+    assert dumped["efsaApprovalStatus"] == "NO_INFORMATION"
+    assert dumped["adiMinMgPerKgBwPerDay"] is None
+    assert dumped["adiMaxMgPerKgBwPerDay"] is None
+    assert dumped["adiSource"] is None
+
+
 def test_regulatory_lookup_sourced_verified_data_is_authoritative():
     """The other trusted source (task requirement 4): a VERIFIED,
     REGULATORY_LOOKUP-sourced row is just as authoritative as a

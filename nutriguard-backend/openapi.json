@@ -1326,12 +1326,12 @@
           },
           "efsaApprovalStatus": {
             "$ref": "#/components/schemas/ApprovalStatus",
-            "description": "Task requirement 4: gated on the row's own trustworthiness,\nnot just its text -- `NO_INFORMATION` unless this row is\n`VERIFIED` and `CURATED_SEED`/`REGULATORY_LOOKUP`-sourced (see\n`ingredient_regulatory.derive_gated_approval_status`). A\nGemini/OCR-sourced `efsaStatus` string can never surface here as\na real approval, no matter what it says.",
+            "description": "Task requirement 4: gated on the row's own trustworthiness,\nnot just its text -- `NO_INFORMATION` unless this row is\n`VERIFIED` and `CURATED_SEED`/`REGULATORY_LOOKUP`-sourced (see\n`ingredient_regulatory.derive_gated_approval_status`). A\nGemini/OCR-sourced `efsaStatus` string can never surface here as\na real approval, no matter what it says. Gated on `efsaStatus`'s\nOWN true source (PR #13 review fix), not blindly this row's\nrecord-level `source` -- see `resolve_field_source`: a partial\nmerge that only ever touched some OTHER field must never make\nan untouched `efsaStatus` look regulatory-confirmed.",
             "readOnly": true
           },
           "fdaApprovalStatus": {
             "$ref": "#/components/schemas/ApprovalStatus",
-            "description": "See `efsa_approval_status` above -- identical gating.",
+            "description": "See `efsa_approval_status` above -- identical gating, on\n`fdaStatus`'s own true source.",
             "readOnly": true
           },
           "adiMinMgPerKgBwPerDay": {

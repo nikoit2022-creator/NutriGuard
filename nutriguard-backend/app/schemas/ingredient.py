@@ -1,10 +1,11 @@
 from datetime import datetime, timedelta, timezone
 
-from pydantic import computed_field, field_serializer
+from pydantic import Field, computed_field, field_serializer
 
 from app.core.config import settings
 from app.models.enums import ApprovalStatus, IngredientSource, IngredientVerificationStatus, RiskLevel
 from app.schemas.common import ORMModel
+from app.services.ingredient_catalog import resolve_field_source
 from app.services.ingredient_regulatory import (
     derive_gated_adi_range_mg_per_kg_bw_per_day,
     derive_gated_approval_status,
@@ -63,11 +64,17 @@ class IngredientOut(ORMModel):
     risk_assessment_available: bool = True
 
     # --- Provenance (persistent ingredient knowledge cache, requirement 3) ---
-    # Record-level, not per-field -- see `app.models.ingredient.Ingredient`'s
-    # class docstring for why. `source`/`verificationStatus` are always
-    # populated by a real `Ingredient` row; `retrievedAt`/`lastVerifiedAt`
-    # are epoch-millisecond timestamps (matching this API's existing
+    # Record-level -- see `app.models.ingredient.Ingredient`'s class
+    # docstring for why these four remain the honest picture for a row
+    # that has never been through a *partial* scientific/regulatory
+    # merge. `source`/`verificationStatus` are always populated by a
+    # real `Ingredient` row; `retrievedAt`/`lastVerifiedAt` are
+    # epoch-millisecond timestamps (matching this API's existing
     # `timestamp`/`scannedAt` convention) or `null` when not yet set.
+    # Once a row HAS been through a partial merge, per-field gating
+    # below (`efsaApprovalStatus`/`fdaApprovalStatus`/`adiMin...`/
+    # `adiMax...`) resolves that specific field's own true source
+    # instead -- see `field_provenance_json`/`resolve_field_source`.
     verification_status: IngredientVerificationStatus = IngredientVerificationStatus.VERIFIED
     source: IngredientSource | None = None
     source_record_id: str | None = None
@@ -76,6 +83,14 @@ class IngredientOut(ORMModel):
     last_verified_at: datetime | None = None
     confidence: float | None = None
     schema_version: int | None = None
+    # Internal only -- never serialized (`exclude=True`). Backs the
+    # per-field source resolution below (PR #13 review fix:
+    # "scientific/regulatory provenance truthful") -- a partial merge
+    # must never make an untouched field's approval/ADI gating look
+    # like it came from whatever source most recently touched a
+    # DIFFERENT field on this row. See
+    # `app.services.ingredient_catalog.resolve_field_source`.
+    field_provenance_json: str | None = Field(default=None, exclude=True, repr=False)
 
     # `None` -- not True, not False -- whenever this specific status is
     # genuinely unknown (always the case for an UNVERIFIED OCR/Gemini
@@ -137,31 +152,44 @@ class IngredientOut(ORMModel):
         `VERIFIED` and `CURATED_SEED`/`REGULATORY_LOOKUP`-sourced (see
         `ingredient_regulatory.derive_gated_approval_status`). A
         Gemini/OCR-sourced `efsaStatus` string can never surface here as
-        a real approval, no matter what it says."""
+        a real approval, no matter what it says. Gated on `efsaStatus`'s
+        OWN true source (PR #13 review fix), not blindly this row's
+        record-level `source` -- see `resolve_field_source`: a partial
+        merge that only ever touched some OTHER field must never make
+        an untouched `efsaStatus` look regulatory-confirmed."""
         return derive_gated_approval_status(
-            self.efsa_status, verification_status=self.verification_status, source=self.source
+            self.efsa_status,
+            verification_status=self.verification_status,
+            source=resolve_field_source(self.field_provenance_json, "efsa_status", fallback=self.source),
         )
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def fda_approval_status(self) -> ApprovalStatus:
-        """See `efsa_approval_status` above -- identical gating."""
+        """See `efsa_approval_status` above -- identical gating, on
+        `fdaStatus`'s own true source."""
         return derive_gated_approval_status(
-            self.fda_status, verification_status=self.verification_status, source=self.source
+            self.fda_status,
+            verification_status=self.verification_status,
+            source=resolve_field_source(self.field_provenance_json, "fda_status", fallback=self.source),
         )
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def adi_min_mg_per_kg_bw_per_day(self) -> float | None:
         return derive_gated_adi_range_mg_per_kg_bw_per_day(
-            self.acceptable_daily_intake, verification_status=self.verification_status, source=self.source
+            self.acceptable_daily_intake,
+            verification_status=self.verification_status,
+            source=resolve_field_source(self.field_provenance_json, "acceptable_daily_intake", fallback=self.source),
         )[0]
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def adi_max_mg_per_kg_bw_per_day(self) -> float | None:
         return derive_gated_adi_range_mg_per_kg_bw_per_day(
-            self.acceptable_daily_intake, verification_status=self.verification_status, source=self.source
+            self.acceptable_daily_intake,
+            verification_status=self.verification_status,
+            source=resolve_field_source(self.field_provenance_json, "acceptable_daily_intake", fallback=self.source),
         )[1]
 
     @computed_field  # type: ignore[prop-decorator]
@@ -171,7 +199,9 @@ class IngredientOut(ORMModel):
         ever populated alongside an actual parsed, GATED number (see
         `adi_min_mg_per_kg_bw_per_day`)."""
         min_value, _ = derive_gated_adi_range_mg_per_kg_bw_per_day(
-            self.acceptable_daily_intake, verification_status=self.verification_status, source=self.source
+            self.acceptable_daily_intake,
+            verification_status=self.verification_status,
+            source=resolve_field_source(self.field_provenance_json, "acceptable_daily_intake", fallback=self.source),
         )
         if min_value is None:
             return None
