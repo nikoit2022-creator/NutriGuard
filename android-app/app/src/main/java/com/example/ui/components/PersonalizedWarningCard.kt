@@ -2,7 +2,6 @@ package com.example.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,10 +42,9 @@ fun PersonalizedWarningCard(
 ) {
     if (warnings.isEmpty()) return
 
-    val isDark = isSystemInDarkTheme()
     val hasHighSeverity = warnings.any { it.severity == WarningSeverity.HIGH }
     val cardAccent = if (hasHighSeverity) RiskRed else RiskOrange
-    val cardBg = if (isDark) cardAccent.copy(alpha = 0.12f) else cardAccent.copy(alpha = 0.06f)
+    val cardBg = cardAccent.copy(alpha = 0.06f)
 
     Card(
         modifier = modifier.fillMaxWidth(),

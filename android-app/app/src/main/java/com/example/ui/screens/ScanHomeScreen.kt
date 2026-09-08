@@ -72,7 +72,6 @@ import com.example.data.model.IngredientEntity
 import com.example.data.remote.dto.cleanOrNull
 import com.example.ui.components.IngredientDetailBottomSheet
 import com.example.ui.components.RecognizedIngredientsSection
-import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.NutriGuardScannerTheme
 import com.example.ui.theme.NutriGuardSpacing
@@ -693,7 +692,7 @@ fun ScanHomeScreen(
                                     },
                                     enabled = !isSearchingBarcode,
                                     shape = RoundedCornerShape(NutriGuardRadius.small),
-                                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                                    colors = ButtonDefaults.buttonColors(containerColor = ScannerViolet)
                                 ) {
                                     Text("Lookup")
                                 }
@@ -733,7 +732,7 @@ fun ScanHomeScreen(
                                 enabled = !isSearchingBarcode,
                                 modifier = Modifier.align(Alignment.End),
                                 shape = RoundedCornerShape(NutriGuardRadius.small),
-                                colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                                colors = ButtonDefaults.buttonColors(containerColor = ScannerViolet)
                             ) {
                                 Text("Analyze Text")
                             }
@@ -895,7 +894,7 @@ private fun BarcodeSearchingCard(isAnalyzingPhoto: Boolean) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             CircularProgressIndicator(
-                color = EmeraldPrimary,
+                color = ScannerViolet,
                 strokeWidth = 2.5.dp,
                 modifier = Modifier.size(22.dp)
             )
@@ -1152,7 +1151,7 @@ private fun LabelScanRequiredCard(
                     onClick = onScanLabel,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(NutriGuardRadius.small),
-                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                    colors = ButtonDefaults.buttonColors(containerColor = ScannerViolet)
                 ) {
                     Icon(
                         imageVector = Icons.Default.DocumentScanner,
@@ -1230,7 +1229,7 @@ private fun BarcodeLookupFailedCard(
                     onClick = onRetry,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(NutriGuardRadius.small),
-                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                    colors = ButtonDefaults.buttonColors(containerColor = ScannerViolet)
                 ) {
                     Text("Retry", fontSize = 13.sp)
                 }
