@@ -12,6 +12,127 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V18 (PR #13 review round 3 -- ambiguous-alias safety, field-specific
+risk/citation provenance):** Two further review blockers on the same
+branch: `_reconcile_official_identifier_conflict` (V17) used to
+repoint EVERY alias away from the alias-owning "loser" before checking
+whether it was actually a disposable duplicate — corrupting a
+legitimate, coincidentally-shared alias between two independently
+VERIFIED/curated rows with different official identifiers. Aliases are
+now only ever transferred when the loser is UNAMBIGUOUSLY a weaker
+duplicate (still `UNVERIFIED`, still `OCR_HEURISTIC`, no official
+identifier of its own — `_is_provably_weaker_duplicate`); otherwise
+the alias table is left completely untouched (ambiguity preserved, not
+silently resolved), while the official identifier still wins for the
+current observation. Separately, `merge_verified_fields` used to
+promote record-level `verification_status=VERIFIED` and
+`risk_assessment_available=True` for ANY trusted merge regardless of
+which field(s) it actually touched — a partial regulatory update of
+only `description`/`efsa_status` could make an untouched, never-
+confirmed `risk_level` start influencing the Health Score.
+`risk_assessment_available` is now recomputed every call from
+`risk_level`'s own resolved per-field provenance
+(`is_field_trustworthy`, reusing V17's `field_provenance_json`); it
+must be genuinely earned, not inherited from a sibling field's
+confirmation. `riskRationale`/`adiSource` (both `IngredientOut` and
+`food_analysis._ingredient_out_dict`) are now additionally gated on
+`evidence_level`'s/`references`' OWN trusted provenance respectively,
+on top of the already-field-specific `risk_level`/
+`acceptable_daily_intake` gates. Also corrected a round-2 documentation
+error: the Android `IngredientDto.fromJson` JSON-parsing layer itself
+already loses a real `null` (`org.json.JSONObject.has()` is `true` for
+an explicit JSON `null`, not just a present key) — round 2's write-up
+had incorrectly cleared this layer. See deviation item 16 in section 6
+for the full breakdown, and the Android nullable-dietary-flags write-up
+below it for the corrected two-layer finding.
+
+**V17 (PR #13 review round 2 -- canonical identity precedence,
+truthful per-field provenance):** Two further review blockers on the
+same branch, fixed without reopening V16's own scope: an official
+identifier (E-number/INS/CAS) match now always outranks a pre-existing
+alias owned by a weaker row, instead of the alias's existing owner
+silently overriding a stronger official-identifier resolution (new
+`ingredient_catalog._reconcile_official_identifier_conflict` --
+repoints every alias the loser owned onto the winner and deletes the
+loser only when that is provably safe: never curated/verified, never
+still referenced by a `Product`); and `merge_verified_fields`'s
+record-level `source`/`confidence` can no longer make an untouched
+field look like it came from a PARTIAL merge's incoming provider --
+new per-field provenance (`Ingredient.field_provenance_json`,
+`ingredient_catalog.resolve_field_source`/`get_field_source`, migration
+`a4b5c6d7e8f9`) tracks which source actually supplied each
+independently-merged scientific/regulatory field, and
+`efsaApprovalStatus`/`fdaApprovalStatus`/the numeric ADI fields (both
+`IngredientOut` and `food_analysis._ingredient_out_dict`) now gate on
+that per-field source rather than the row's bare record-level one. See
+deviation item 15 in section 6 for the full breakdown.
+
+**V16 (PR #13 review fixes -- data quality, canonical identity,
+provenance):** A post-merge review of V15/V14 found five further
+issues, all fixed on the same branch: synthetic ingredient ids are now
+length-bounded (never exceed `Ingredient.id`'s real `String(64)`);
+`is_vegan`/`is_vegetarian`/`is_halal`/`is_kosher`/`is_gluten`/
+`is_lactose` on an UNVERIFIED OCR/Gemini ingredient are now nullable
+and never default to a fabricated True/False claim, `allergens` no
+longer persists the literal string `"None"` as proof of no allergens,
+and `bad_for_*` no longer infers a medical flag from an ingredient-name
+keyword; two concurrent scans proposing different candidate ids for the
+same normalized alias now converge on one canonical row instead of
+leaving an orphan duplicate; `efsaApprovalStatus`/`fdaApprovalStatus`/
+the numeric ADI fields are now gated on the row being both `VERIFIED`
+and `CURATED_SEED`/`REGULATORY_LOOKUP`-sourced (Gemini/OCR data can no
+longer surface as an authoritative regulatory approval), and the new
+`insNumberVerified` field makes explicit that `insNumber` is always a
+mechanical derivation, never an independently-verified identifier; and
+the regulatory-data refresh/merge rules now let a trusted source
+revalidate stale data (even with unchanged values/confidence, advancing
+verification timestamps), never erase a meaningful value with a
+blank/placeholder partial response, and no longer unconditionally
+reject a `REGULATORY_LOOKUP` revalidating a stale `CURATED_SEED` row.
+See deviation item 14 in section 6 for the full breakdown. Migration
+`f5a6b7c8d9e0`.
+
+**V15 (persistent ingredient knowledge cache):** An OCR/Gemini-observed
+ingredient with no scientific-database match used to be recreated from
+scratch, in memory only, on every single scan/read — never a real,
+queryable, reusable row. `ingredients` (plus a new `ingredient_aliases`
+index table) is now the one persistent catalog for BOTH curated and
+OCR-observed data: local-first resolution by official identifier (an
+E-number) then by a known name/spelling/Bulgarian alias before ever
+creating a new minimal `UNVERIFIED` record (race-safe — concurrent
+scans of the same new ingredient converge on one row, never a
+duplicate); `IngredientEntity` gains additive provenance fields
+(`verificationStatus`, `source`, `sourceRecordId`/`sourceUrl`,
+`retrievedAt`/`lastVerifiedAt`, `confidence`, `schemaVersion`,
+`needsRefresh`) plus `insNumber`/`casNumber`; the Health Score's
+existing "unconfirmed risk never counts" rule (V14) is preserved
+end-to-end; and `Product`'s existing id-only relationship to
+`ingredients` means an update to a canonical ingredient is immediately
+visible to every product that references it, with zero duplication.
+See section 13 for the full design writeup, and deviation item 13 in
+section 6 for the one (additive) behavior change this causes.
+Migration `e4f5a6b7c8d9`.
+
+**V14 (data-quality fix: honest scientific ingredient profiles):** An
+OCR-only ("synthetic") ingredient — a label token with no scientific-
+database match — used to be filled with fabricated generic
+scientific/regulatory placeholder text (e.g. "Normalized Food
+Component", "Extracted via OCR", "Standard ingredient.", "Standard
+Food Additive/Ingredient", "Recognized Ingredient") and an inferred
+`riskLevel` guessed from keywords in the OCR name, both of which looked
+like real curated data on the wire and could silently move the Health
+Score. OCR is provenance, not scientific evidence. See deviation item
+12 in section 6 for the full breakdown: every such field is now
+honestly empty instead of fabricated, `riskLevel` for a synthetic
+ingredient is always the neutral `SAFE` placeholder rather than a
+keyword guess, and `IngredientEntity` gains additive fields
+(`riskAssessmentAvailable`, `riskRationale`, `efsaApprovalStatus`,
+`fdaApprovalStatus`, `adiMinMgPerKgBwPerDay`, `adiMaxMgPerKgBwPerDay`,
+`adiSource`) so an updated client can tell a real assessment apart from
+an absent one — and the Health Score itself now excludes any
+ingredient with no real assessment from its risk-level deductions.
+Migration `d3e4f5a6b7c8`.
+
 **V13 (product change: ingredient-recognition success vs. health-score
 readiness):** `POST /scan/label-image`, `POST /scan/ocr-text`, and
 their barcode-linked variants used to treat FULL verification
@@ -489,19 +610,25 @@ snapshot is included at `openapi.json` for convenience/diffing).
 | `users` | Logical account (1:1 with a device today; supports multiple devices for future real login) |
 | `devices` | Registered client devices, keyed by client-generated `device_id` |
 | `refresh_tokens` | Persisted refresh-token registry (`jti`), enabling rotation and revocation |
-| `ingredients` | Scientific ingredient database — mirrors `IngredientEntity` exactly |
+| `ingredients` | The one persistent, reusable ingredient catalog — mirrors `IngredientEntity` (plus additive canonical-identity/provenance columns, see section 13) — every curated/seeded entry AND every OCR/Gemini-observed ingredient with no curated match (an `UNVERIFIED` minimal record, see section 13) |
+| `ingredient_aliases` | Reverse-lookup index from any known name/spelling variant (English, Bulgarian, OCR/spelling variant) to its one canonical `ingredients` row — see section 13 |
 | `products` | Analyzed products — mirrors `ProductEntity` exactly, including a denormalized `ingredient_ids` text column (see section 6), plus additive discovery-provenance columns (see section 10.4) not part of the public API contract |
 | `scan_history` | Per-user scan log — mirrors `ScanHistoryEntity` |
 | `user_health_profiles` | One row per user — mirrors `UserHealthProfile` |
 | `product_sources` | One row per (barcode, provider) external discovery — see section 10.4 |
 
 Indexes: `ingredients(common_name)`, `ingredients(e_number)`,
+`ingredients(normalized_name)`, `ingredients(ins_number)` (unique),
+`ingredients(cas_number)` (unique),
+`ingredient_aliases(ingredient_id)`, `ingredient_aliases(alias_normalized)`
+(unique — the actual identity-resolution lookup key, see section 13),
 `products(product_name)`, `products(brand)`, `devices(device_id)`,
 `refresh_tokens(jti)`, `scan_history(user_id)`, `scan_history(scanned_at)`,
 `product_sources(barcode)`
 — covering every lookup path used by the endpoints (barcode PK lookup,
-ingredient search/E-number lookup, product search, per-user history
-ordered by recency, per-barcode provenance lookup).
+ingredient search/E-number lookup, alias-based canonical-identity
+resolution, product search, per-user history ordered by recency,
+per-barcode provenance lookup).
 
 ## 6. Deviations from the API Contract (documented, not silent)
 
@@ -842,6 +969,483 @@ than silently resolved:
     See section 11.14 for the full design writeup and
     `tests/integration/test_ingredient_recognition_success.py` for the
     end-to-end regression coverage.
+
+12. **An OCR-only ("synthetic") ingredient no longer reports fabricated
+    scientific/regulatory data, and `IngredientEntity` gains additive
+    data-quality fields (backend-ingredient-profile-data-quality
+    task).** `ocr_normalizer.create_synthetic_ingredient` used to fill
+    every scientific/regulatory field for an ingredient with no
+    scientific-database match with a generic placeholder string
+    ("Normalized Food Component", "Ingredient extracted via OCR label
+    scan.", "Standard ingredient.", "Extracted via OCR", "Subject to
+    standard local food safety regulations.", "Standard Food
+    Additive/Ingredient", "Recognized Ingredient", "Standard dietary
+    intake", "See individual sensitivity profile", "NutriGuard OCR &
+    Scientific Pipeline") and inferred `riskLevel`
+    (SAFE/POTENTIAL_CONCERN/HIGH_CONCERN) from keyword matches in the
+    OCR name alone. OCR is provenance, not scientific evidence: these
+    strings looked like real curated data on the wire but were never
+    verified, and the inferred risk level silently moved the Health
+    Score for ingredients nobody had actually assessed. This has been
+    changed:
+    - Every one of those fields (`description`, `purposeInFood`,
+      `healthConcerns`, `evidenceLevel`, `countriesRestrictedOrBanned`,
+      `efsaStatus`, `fdaStatus`, `acceptableDailyIntake`,
+      `sideEffects`, `references`, `scientificName` when no genuine
+      E-number is present) is now the honest empty string for a
+      synthetic ingredient — the same "no data" representation the
+      contract already used for these always-required-non-null string
+      fields, never `null` (which would break an existing non-null
+      Kotlin `String` field).
+    - `riskLevel` for a synthetic ingredient is always the neutral
+      `SAFE` placeholder, never inferred from a keyword in the OCR
+      name.
+    - **Additive fields on `IngredientEntity`** (old fields unchanged,
+      new fields only): `riskAssessmentAvailable: boolean` (`false` for
+      every synthetic ingredient, `true` for every real curated/seeded
+      row) and `riskRationale: string | null` tell an updated client
+      whether `riskLevel` is a real assessment at all, without
+      requiring it to guess from the text fields. The Health Score
+      calculation (`food_analysis._score_and_warnings`) now excludes
+      any ingredient with `riskAssessmentAvailable=false` from its
+      risk-level deductions entirely — an unconfirmed ingredient can no
+      longer move the score in either direction.
+    - **Structured, additive EFSA/FDA/ADI fields**, derived
+      conservatively and deterministically from the existing free-text
+      fields (`app/services/ingredient_regulatory.py`), never stored
+      redundantly so they can never drift out of sync with the text
+      they were derived from: `efsaApprovalStatus`/`fdaApprovalStatus`
+      (`APPROVED` / `NOT_APPROVED` / `NO_INFORMATION` — never inferred
+      as `APPROVED` from vague wording like "recognized" or
+      "regulated", only from an authority explicitly saying so), and
+      `adiMinMgPerKgBwPerDay`/`adiMaxMgPerKgBwPerDay`/`adiSource`
+      (parsed only from an unambiguous "`<value> mg/kg bw`" or
+      "`<min> - <max> mg/kg bw`" expression in `acceptableDailyIntake`
+      — a percentage-of-calories guideline or a vague qualifier like
+      "Not specified"/"No limit" is real data but not a number, and is
+      never guessed into one; `adiSource` is only ever populated
+      alongside an actual parsed number, reusing the ingredient's own
+      `references` citation).
+    - The four curated seed entries whose `countriesRestrictedOrBanned`
+      was the literal placeholder string `"None"` (`whole_oat_flour`,
+      `stevia_extract`, `e322_soy_lecithin`, `e415_xanthan_gum`) were
+      normalized to the empty string — `"None"`/`"None reported"` is
+      not a verified list of countries, it just looked like one.
+    - Migration `d3e4f5a6b7c8` adds `ingredients.risk_assessment_available`
+      (`NOT NULL DEFAULT true`) — correct for every existing row AT THAT
+      POINT IN THE MIGRATION CHAIN, since only curated/seeded data was
+      persisted to this table until the very next migration
+      (`e4f5a6b7c8d9`, see section 13) made a synthetic ingredient a
+      real, reusable, persisted row too.
+    - `bad_for*`/`allergens` heuristics on a synthetic ingredient were
+      UNCHANGED by this original task (out of scope at the time — they
+      feed the separate, pre-existing Personalized Warning Engine, not
+      a scientific claim about the ingredient itself), but a keyword-
+      based `bad_for_*` guess (e.g. "sugar" → `badForDiabetes=true`)
+      and the literal string `"None"` as `allergens` both turned out to
+      be exactly the same class of fabrication this task exists to
+      remove — see item 14 below (PR #13 review) for the actual fix.
+    - All changes are additive/widening only — diffed against
+      `openapi.json`. Covered by `tests/unit/test_ocr_normalizer.py`,
+      `tests/unit/test_ingredient_regulatory.py`,
+      `tests/unit/test_ingredient_schema_data_quality.py`,
+      `tests/unit/test_food_analysis_risk_scoring.py`, and
+      `tests/integration/test_barcode_contract_change.py`.
+
+13. **`GET /api/v1/ingredients/{id}` for a `synth_...` id now returns
+    `200` with a minimal `UNVERIFIED` record instead of `404`, once
+    that ingredient has actually been observed by a scan** (persistent-
+    ingredient-knowledge-cache task, see section 13). Previously a
+    synthetic ingredient was reconstructed in memory on every product
+    read and never persisted to the `ingredients` table at all, so a
+    direct lookup by its id always `404`d. It is now a real, reusable
+    catalog row (get-or-create, race-safe — section 13.4), which is the
+    entire point of the change (multiple products reusing ONE record
+    instead of each re-deriving their own unpersisted stand-in) — the
+    side effect is that a direct `GET` on that id also now succeeds.
+    Additive/backward-compatible: a previously-404 case becomes 200; no
+    previously-200 response's shape changed. See section 13.7.
+
+14. **PR #13 review fixes to the persistent ingredient knowledge cache
+    (data quality + canonical identity + provenance).** A post-merge
+    review of the `backend-ingredient-profile-data-quality` /
+    `persistent-ingredient-knowledge-cache` work found five further
+    issues; all fixed on the same branch/PR:
+    - **Synthetic ingredient ids are now length-bounded.**
+      `ocr_normalizer._synthetic_id` used to build an id from an
+      unbounded, lightly-sanitized slug of the raw OCR name — a long or
+      heavily-punctuated real label name could exceed
+      `Ingredient.id`'s real `String(64)` column and fail the insert
+      outright. The id is now always `synth_` + a truncated readable
+      slug + a 12-hex-char content hash of the FULL name (or just the
+      hash when the name has no ASCII-alphanumeric characters at all),
+      always ≤ 64 characters, still fully deterministic (same name →
+      same id). `reconstruct_synthetic_ingredient` (id-only recovery
+      when the original OCR text is unavailable) was updated to strip
+      the hash suffix rather than ever displaying it, while remaining
+      tolerant of ids persisted under the OLD (unbounded) scheme.
+      Covered by `tests/unit/test_ocr_normalizer.py` (long ASCII,
+      Bulgarian/Unicode, punctuation-heavy, colliding-prefix names) and
+      `tests/postgres/test_synthetic_ingredient_id_postgres.py` (a real
+      Postgres insert, since SQLite does not enforce `VARCHAR` length
+      at all).
+    - **An UNVERIFIED OCR/Gemini ingredient no longer fabricates a
+      dietary-identity claim.** `is_vegan`/`is_vegetarian`/`is_halal`/
+      `is_kosher` used to default to `true` and `is_gluten`/
+      `is_lactose` to `false` for every synthetic ingredient — every one
+      of those is a real, positive certification/safety claim with zero
+      evidence behind it. All six are now `bool | null` (migration
+      `f5a6b7c8d9e0`, additive/nullable — no existing curated value is
+      touched); `null` means genuinely unknown. The literal string
+      `"None"` used to be written as `allergens` for "no keyword
+      matched" — read back, that looks like a verified clean bill of
+      health rather than "not stated"; the negative case is now the
+      empty string. `bad_for_diabetes`/`bad_for_hypertension`/
+      `bad_for_high_cholesterol` no longer infer `true` from a
+      "sugar"/"sodium"/"palm" (etc.) substring in the raw OCR name — a
+      bare name substring is not a clinical assessment, and a wrong
+      guess used to drive a real HIGH-severity Personalized Warning
+      Engine entry for a condition nobody actually evaluated (see the
+      updated `tests/integration/test_barcode_contract_change.py::
+      test_warnings_generated_for_real_product_after_enabling_profile_flag`).
+      None of these six nullable fields, nor `bad_for_*`, are read by
+      any product-level dietary-suitability/warning/Health-Score
+      computation today (`Product.is_vegan`/etc. and the Health Score
+      are driven entirely by other data — see `app/services/
+      warning_engine.py`'s own module docstring and `app/services/
+      food_analysis.py`'s `_score_and_warnings`), so this is a pure
+      data-quality fix with no behavioral change to scoring/warnings.
+      Covered by `tests/unit/test_ocr_normalizer.py`,
+      `tests/unit/test_ingredient_schema_data_quality.py`.
+    - **Canonical alias convergence.** Two concurrent scans proposing
+      DIFFERENT candidate ingredient ids that both normalize to the SAME
+      alias text (no shared E-number) used to each keep their own
+      candidate as canonical, ignoring `ingredient_alias_repository.
+      get_or_create`'s own returned (possibly different) alias owner —
+      leaving two `Ingredient` rows for one real-world ingredient.
+      `ingredient_catalog._register_alias_and_resolve_canonical` now
+      resolves both callers to the SAME canonical row and deletes a
+      just-inserted, now-orphaned loser row in the same transaction (a
+      row this call did not itself just create — e.g. one resolved via
+      E-number — is never deleted, only ever re-pointed-to). Covered by
+      a real Postgres regression test using two different ids with NO
+      E-number involved:
+      `tests/postgres/test_ingredient_alias_convergence_postgres.py`.
+    - **Gated EFSA/FDA approval status and numeric ADI.**
+      `efsaApprovalStatus`/`fdaApprovalStatus`/`adiMinMgPerKgBwPerDay`/
+      `adiMaxMgPerKgBwPerDay`/`adiSource` used to be derived from the
+      row's free text alone, regardless of source — a Gemini-parsed
+      label quoting "EU Approved" verbatim, or an OCR token, could
+      surface as an authoritative regulatory approval. They are now
+      gated (`ingredient_regulatory.derive_gated_approval_status`/
+      `derive_gated_adi_range_mg_per_kg_bw_per_day`): `NO_INFORMATION`/
+      `null` unless the row is both `VERIFIED` and `CURATED_SEED`/
+      `REGULATORY_LOOKUP`-sourced. Also added (same review): `insNumber`
+      is, for a curated seed row exactly like an OCR one, always a
+      MECHANICAL derivation from `eNumber` (true for MOST, not all,
+      shared food additives), never independently confirmed against the
+      Codex Alimentarius INS register — the new additive
+      `insNumberVerified: boolean` field (always `false` today) makes
+      that explicit rather than letting `insNumber`'s mere presence
+      imply a confidence it doesn't have. Covered by
+      `tests/unit/test_ingredient_regulatory.py`,
+      `tests/unit/test_ingredient_schema_data_quality.py`.
+    - **Corrected refresh/merge rules for the regulatory data cache.**
+      `ingredient_catalog.merge_verified_fields` used to (a) reject a
+      trusted provider revalidating STALE data whenever field values
+      were unchanged and confidence was unchanged (the tie-breaker
+      demanded a STRICTLY higher confidence even for a pure
+      revalidation), (b) never advance `last_verified_at` for such a
+      revalidation, (c) apply an incoming blank/`null`/placeholder field
+      value even when it would blank out a meaningful existing value,
+      and (d) unconditionally reject a `REGULATORY_LOOKUP` (row rank 90)
+      revalidating a `CURATED_SEED` row (rank 100) even once that row
+      had gone stale — a real contradiction, since a curated row IS
+      allowed to go stale, but nothing could ever revalidate it once it
+      did. All four are fixed: once an existing `VERIFIED` row is
+      actually stale AND both the incoming and existing sources are
+      `CURATED_SEED`/`REGULATORY_LOOKUP` ("trusted"), a same-or-lower-
+      rank resupply now succeeds and advances verification timestamps;
+      a blank/placeholder incoming value is always skipped, never
+      applied; and the row's own `source`/`confidence` are only moved
+      to the incoming (possibly lower-ranked) source when the CONTENT
+      genuinely changed too — an honest per-field-provenance call
+      (never claim a source that didn't actually supply the current
+      values), while `_MERGEABLE_FIELDS` writes remain atomic exactly as
+      before. A non-trusted source (`GEMINI`/`OCR_HEURISTIC`) still
+      cannot touch a stale `VERIFIED` row at all — staleness only opens
+      the door between the two regulatory-grade sources. Covered by
+      `tests/unit/test_ingredient_catalog_pure.py`.
+    - All changes additive/backward-compatible; diffed against
+      `openapi.json` (nullable `isGluten`/etc. widen from `boolean` to
+      `boolean | null`, `insNumberVerified` is a new field — no
+      existing field removed or narrowed).
+
+15. **PR #13 review round 2: canonical identity precedence + truthful
+    per-field scientific/regulatory provenance.** Two further blockers
+    found on a second review pass over item 14, both fixed on the same
+    branch/PR:
+    - **Official identifier now always outranks a pre-existing alias.**
+      Scenario: an older UNVERIFIED synthetic row already owns the
+      "ascorbic acid" alias (an earlier scan that never caught the
+      E-number); a later observation supplies the E-number, which
+      resolves to a SEPARATE curated/verified row.
+      `get_or_create_catalog_ingredient` correctly looked the curated
+      row up via `get_by_official_identifier`, but
+      `_register_alias_and_resolve_canonical` then saw the alias's
+      EXISTING owner (the older, weaker stub) and returned THAT
+      instead — silently downgrading a curated/verified resolution to
+      an unverified one, exactly backwards from the documented
+      identity precedence (official identifier > alias > normalized
+      name). Fixed by a dedicated reconciliation path
+      (`ingredient_catalog._reconcile_official_identifier_conflict`),
+      only entered when the winning candidate was resolved via a real
+      official-identifier match: the official row is always returned;
+      every alias the loser owned (not just the one contested alias)
+      is repointed onto it, so every future lookup of any of those
+      names converges correctly too; the loser is deleted ONLY when
+      that is provably safe — never when it is itself
+      curated/`VERIFIED`, and never while any `Product.ingredient_ids`
+      still references its id (new `product_repository.
+      has_ingredient_reference`, boundary-safe against the comma-
+      separated column). When deletion isn't safe, the loser is simply
+      left in place — unreachable by name from then on, but still valid
+      for whatever product already references its id directly — which
+      is the deterministic behavior when both rows already have
+      product references: neither is touched or merged, only the alias
+      index converges. Covered by
+      `tests/integration/test_ingredient_catalog.py` (the exact
+      pre-existing-alias-then-E-number scenario, the curated-loser
+      case, and the existing-product-reference case) and
+      `tests/postgres/test_official_identifier_precedence_postgres.py`
+      (two real concurrent-session scenarios, run repeatedly against a
+      disposable Postgres 16 with no flakiness observed).
+    - **Truthful per-field scientific/regulatory provenance.**
+      `merge_verified_fields` always accepted a PARTIAL subset of
+      `_MERGEABLE_FIELDS` (e.g. a regulatory response updating only
+      `description`), but `Ingredient` stored just ONE record-level
+      `source`/`confidence`/timestamps for all of those columns
+      together — so a partial update could relabel an untouched field
+      (still, in truth, older/lower-trust content) as if the incoming
+      provider had supplied it too. Fixed with per-field provenance,
+      the "add per-field provenance for independently merged fields"
+      option (additive, nullable `Ingredient.field_provenance_json` --
+      migration `a4b5c6d7e8f9` -- a compact JSON object, one entry per
+      mergeable field `merge_verified_fields` has ever independently
+      written): the first partial merge on a row lazily backfills every
+      still-untracked field with the row's OWN pre-merge
+      source/confidence/timestamp before the record-level columns are
+      allowed to move on, so an untouched field keeps reporting its
+      real origin forever after. `ingredient_catalog.
+      resolve_field_source`/`get_field_source` are the only intended
+      readers; both `IngredientOut`'s `efsaApprovalStatus`/
+      `fdaApprovalStatus`/`adiMin...`/`adiMax...`/`adiSource` computed
+      fields and `food_analysis._ingredient_out_dict`'s hand-mirrored
+      equivalents now gate each field on ITS OWN resolved source
+      instead of the row's bare record-level `source` — a partial
+      regulatory refresh that only ever touched `description` can no
+      longer make an untouched, still-GEMINI-sourced `efsaStatus`/
+      `acceptableDailyIntake` surface as an authoritative approval/ADI.
+      `field_provenance_json` itself is never serialized on the wire
+      (internal only). Covered by
+      `tests/unit/test_ingredient_catalog_pure.py` (including the exact
+      "curated data + partial regulatory refresh" scenario, and a
+      second independent partial merge that must not steal a field the
+      first merge already attributed elsewhere),
+      `tests/unit/test_ingredient_schema_data_quality.py`, and
+      `tests/unit/test_food_analysis_ingredient_out_dict.py`.
+    - Also verified (no code change on this branch): the nullable
+      dietary-identity flags added in item 14
+      (`isGluten`/`isLactose`/`isVegan`/`isVegetarian`/`isHalal`/
+      `isKosher`) against the Android client's current API-contract
+      handling — see "Android nullable-dietary-flags contract check"
+      immediately below.
+    - All changes additive/backward-compatible; diffed against a
+      pinned-dependency (`requirements.txt`) regeneration of
+      `openapi.json` — only two computed-field descriptions changed
+      text (documenting the new per-field gating), no field/type/shape
+      changed.
+
+16. **PR #13 review round 3: ambiguous-alias safety + field-specific
+    risk/citation provenance.** Two further blockers found on a third
+    review pass over items 14/15, both fixed on the same branch/PR:
+    - **Never blindly transfer aliases away from a curated/verified (or
+      otherwise non-disposable) row.** `_reconcile_official_identifier_conflict`
+      (item 15) repointed EVERY alias `alias_owner` held onto the
+      winning `official` row BEFORE checking whether `alias_owner` was
+      actually a disposable duplicate — so two DISTINCT, independently
+      VERIFIED/curated additives with DIFFERENT E-numbers that happen
+      to also share a generic normalized alias (a real, if unfortunate,
+      curated-data scenario) could have that shared alias silently
+      reassigned just because ONE of them was resolved via its own
+      official identifier in some later observation. Fixed with a new
+      gate, `_is_provably_weaker_duplicate`: aliases are transferred
+      ONLY when the loser is unambiguously disposable — still
+      `UNVERIFIED`, still `OCR_HEURISTIC`-sourced, AND carrying no
+      `e_number`/`ins_number`/`cas_number` of its own (an UNVERIFIED row
+      that already picked up its OWN distinct identifier via
+      `_fill_missing_identity_fields` is a genuinely different
+      ingredient, not a duplicate, either). Otherwise the alias table is
+      left completely untouched — ambiguity is preserved, never
+      silently "resolved" by whichever official-identifier match
+      happened to arrive later — while the official identifier still
+      wins for the CURRENT observation (the product being analyzed
+      right now still correctly references the right row). Covered by
+      `tests/integration/test_ingredient_catalog.py` (a curated/
+      verified loser whose alias must survive untouched; two distinct
+      VERIFIED rows sharing a generic alias; an UNVERIFIED loser that
+      already carries its own distinct identifier) and
+      `tests/postgres/test_official_identifier_precedence_postgres.py`
+      (concurrent reconciliation across all four scenarios — a
+      provably-weak duplicate, two ambiguous verified rows, a
+      product-referenced loser, and a genuinely-new-name three-way race
+      — run repeatedly against a disposable Postgres 16 with no
+      flakiness observed).
+    - **Risk assessment and citation provenance made field-specific.**
+      `merge_verified_fields` used to promote record-level
+      `verification_status=VERIFIED` AND `risk_assessment_available=True`
+      for ANY trusted (`CURATED_SEED`/`REGULATORY_LOOKUP`) merge,
+      regardless of which field(s) it actually supplied — a partial
+      regulatory update of only `description` or `efsa_status` could
+      make an untouched, never-actually-confirmed `risk_level` start
+      influencing the Health Score
+      (`food_analysis._score_and_warnings`, which gates an ingredient's
+      contribution purely on the stored `risk_assessment_available`
+      column). `risk_assessment_available` is now recomputed on every
+      `merge_verified_fields` call from `risk_level`'s OWN resolved
+      per-field provenance (`ingredient_catalog.is_field_trustworthy`,
+      built on item 15's `field_provenance_json`/`resolve_field_source`)
+      rather than unconditionally set — a field must be genuinely
+      touched by a trusted source to count, never merely inherit trust
+      from a sibling field the same call happened to also update. Since
+      `food_analysis._score_and_warnings` and `IngredientOut`'s plain
+      `riskAssessmentAvailable` pass-through both already read this one
+      stored column directly, fixing the write path alone correctly
+      fixes both the API response AND the Health Score in one place —
+      no separate read-time gating needed there. `riskRationale` (both
+      `IngredientOut` and `food_analysis._ingredient_out_dict`) is now
+      ALSO gated on `evidence_level` having its own trusted provenance,
+      on top of the existing `risk_assessment_available` gate — a
+      trusted, confirmed `risk_level` paired with still-untrusted
+      `evidence_level` text no longer presents that text as if it were
+      also confirmed. `adiSource` is now ALSO gated on `references`
+      having compatible trusted provenance, on top of the existing
+      gated ADI-number check — a genuinely regulatory-confirmed ADI
+      figure paired with an untouched, still-untrusted `references`
+      string no longer presents that citation as if it backed this
+      specific number. EFSA/FDA/ADI-number gating (item 15) is
+      unaffected and remains exactly as field-specific as before.
+      Covered by `tests/unit/test_ingredient_catalog_pure.py` (partial
+      merges touching `risk_level` vs. not, in both orders, and a
+      later unrelated partial merge that must not revoke an already-
+      earned `risk_assessment_available`),
+      `tests/unit/test_ingredient_schema_data_quality.py`,
+      `tests/unit/test_food_analysis_ingredient_out_dict.py`, and
+      `tests/unit/test_food_analysis_risk_scoring.py` (an end-to-end
+      test running the REAL `merge_verified_fields` write path into
+      `_score_and_warnings`, proving a partial `description`-only
+      regulatory merge never lets a stale HIGH_CONCERN `risk_level`
+      deduct from the Health Score).
+    - Also corrected a round-2 documentation error (no code change):
+      the Android JSON-parsing layer itself (not just the later
+      `toEntities()` mapping) already loses a real `null` for these six
+      flags — see the corrected "Android nullable-dietary-flags
+      contract check" write-up immediately below.
+    - All changes additive/backward-compatible, pure logic changes with
+      NO schema/migration impact; diffed against a pinned-dependency
+      (`requirements.txt`) regeneration of `openapi.json` — only two
+      computed-field descriptions changed text (documenting the new
+      `riskRationale`/`adiSource` gating), no field/type/shape changed.
+
+### Android nullable-dietary-flags contract check (PR #13 review rounds 2 + 3)
+
+Requested by the review: verify whether the Android client currently
+converts a `null` `isGluten`/`isLactose`/`isVegan`/`isVegetarian`/
+`isHalal`/`isKosher` (see item 14 above — these six became nullable in
+migration `f5a6b7c8d9e0`, additive/widening on the wire) back into a
+fabricated default, and identify the exact follow-up if so. **No
+Android source was modified to answer this** (out of scope for this
+backend-only branch — see CLAUDE.md section 11); this is a report only.
+
+**Finding: yes, it does — at TWO layers, not one.** Round 2's write-up
+below incorrectly cleared the JSON-parsing layer; round 3's review
+caught the actual bug there and it is corrected here.
+
+- **Endpoint**: any response carrying an `ingredients[]` array with the
+  `IngredientOut` shape — `POST /api/v1/scan/label-image`,
+  `POST /api/v1/scan/barcode`, `GET /api/v1/products/{barcode}`,
+  `GET /api/v1/ingredients/{id}` (API Contract 5.4/7.x).
+- **Layer 1 — JSON parsing itself already loses `null` (round 3
+  correction).** `com.example.data.remote.dto.IngredientDto.fromJson`
+  (`android-app/app/src/main/java/com/example/data/remote/dto/
+  ScanLabelImageDtos.kt`, lines ~187–192) reads:
+  `if (json.has("isGluten")) json.optBoolean("isGluten") else null`
+  (and identically for the other five). `org.json.JSONObject.has(name)`
+  returns `true` whenever the key is PRESENT, even when its value is a
+  real JSON `null` (`org.json` represents an explicit JSON `null` as
+  the `JSONObject.NULL` sentinel object, not a Java `null` — `has()`
+  only checks for the key's absence, not its value). So for a genuine
+  `"isGluten": null` in the response, `json.has("isGluten")` is `true`,
+  the `else null` branch is never taken, and `json.optBoolean("isGluten")`
+  is called instead — which cannot coerce `JSONObject.NULL` to a
+  boolean and silently returns its default, `false`. The real `null`
+  is lost right here, before `IngredientDto` (which correctly declares
+  all six as nullable `Boolean?`, lines ~152–157) ever gets to hold it
+  — `IngredientDto.isGluten` ends up `false`, not `null`, for a
+  genuinely-unknown flag. The correct check is `!json.isNull("isGluten")`
+  (which — unlike `has()` — is `true` only when the key exists AND its
+  value is not JSON `null`, covering both "missing" and "explicit null"
+  in one condition), not `has()`.
+- **Layer 2 — `toEntities()` then ALSO fabricates a default on top**
+  (round 2 finding, still accurate on its own terms once layer 1 is
+  fixed). `List<IngredientDto>.toEntities(idPrefix)` (same file, lines
+  ~276–312) maps the (layer-1-broken) DTO into the persisted Room
+  entity `com.example.data.model.IngredientEntity`
+  (`android-app/app/src/main/java/com/example/data/model/
+  IngredientEntity.kt`, itself still declaring all six as
+  non-nullable `Boolean` with the same fabricated-looking defaults the
+  backend fix eliminated: `isGluten`/`isLactose` default `false`,
+  `isVegan`/`isVegetarian`/`isHalal`/`isKosher` default `true`), at
+  lines 298–303: `isGluten = ing.isGluten ?: false`,
+  `isLactose = ing.isLactose ?: false`, `isVegan = ing.isVegan ?: true`,
+  `isVegetarian = ing.isVegetarian ?: true`, `isHalal = ing.isHalal ?: true`,
+  `isKosher = ing.isKosher ?: true`. Even AFTER layer 1 is fixed and
+  `IngredientDto` correctly holds a real Kotlin `null`, this second
+  layer would independently re-fabricate the exact same default —
+  fixing only layer 1 is not sufficient; both must be fixed together.
+- **Current blast radius (checked, not assumed)**: today this is
+  latent, not yet user-visible. No Android UI component reads
+  `IngredientEntity.isGluten`/`isVegan`/etc. at all (`IngredientChip.kt`,
+  `IngredientDetailBottomSheet.kt`, `RecognizedIngredientCards.kt`, and
+  `RecognizedIngredientUiModel.kt` reference none of the six), and
+  neither `DietaryBadgesRow.kt` nor `PersonalizedWarningEngine.kt`
+  reads them either — both read the separate, PRODUCT-level
+  `ProductEntity.isGlutenFree`/`isVegan`/etc. fields instead (sourced
+  from the backend's own product-level fields, not aggregated from
+  per-ingredient flags anywhere in the Kotlin source). So the
+  fabricated per-ingredient value is currently inert — but it is real,
+  persisted, incorrect data sitting in the local DB, one `IngredientDao`
+  query away from silently backing a future per-ingredient dietary
+  badge or warning with zero real evidence.
+- **What would need to change, and where — both layers, on the Android
+  side only** (backend is already correct and unaffected):
+  1. `IngredientDto.fromJson`: replace each `if (json.has(field)) ...`
+     guard with `if (!json.isNull(field)) json.optBoolean(field) else null`
+     (or equivalently keep `has()` but also require `!json.isNull(field)`)
+     for all six flags, so a real JSON `null` is actually preserved as
+     Kotlin `null` at the point of parsing.
+  2. `IngredientEntity`'s six dietary-identity columns need to become
+     `Boolean?` (a Room schema migration, additive/nullable — the same
+     shape of change as this backend's own `f5a6b7c8d9e0`) so the
+     Room/domain representation is even CAPABLE of retaining UNKNOWN,
+     and `toEntities`'s six `?: false`/`?: true` fallbacks need to
+     become a straight pass-through (`ing.isGluten`, not
+     `ing.isGluten ?: false`, etc.) so a real `null` — now correctly
+     surviving layer 1 — stays `null` all the way into the local DB.
+  Neither fix alone is sufficient; the future Android task must land
+  both together. This is Android-client work and is intentionally not
+  made on this backend-only branch (CLAUDE.md section 11) — flagged
+  here for AI Studio/Android ownership.
 
 No other ambiguities were found that required deviating from the
 contract; where the contract was silent on an implementation detail
@@ -2055,11 +2659,13 @@ test and must be rerun on the deployment VM before rollout.
 app/
 ├── api/v1/            # FastAPI routers (one file per resource)
 ├── core/               # config, security (JWT), exceptions, logging, rate limiting
-├── models/             # SQLAlchemy ORM models (includes product_source.py)
+├── models/             # SQLAlchemy ORM models (includes product_source.py, ingredient_alias.py)
 ├── schemas/             # Pydantic request/response schemas (camelCase)
-├── repositories/        # DB access layer (no business logic; includes product_source_repository.py)
+├── repositories/        # DB access layer (no business logic; includes product_source_repository.py,
+│                         #   ingredient_alias_repository.py)
 ├── services/            # business logic: health score, warnings, OCR, fallback analysis, orchestration,
-│                         #   barcode_validation.py, barcode_discovery.py, barcode_text_safety.py
+│                         #   barcode_validation.py, barcode_discovery.py, barcode_text_safety.py,
+│                         #   ingredient_catalog.py, ingredient_normalization.py, ingredient_regulatory.py
 ├── integrations/        # GeminiService, and barcode_providers/ (Open Food Facts, GS1, UPCitemdb adapters)
 ├── database/             # engine/session/declarative base
 ├── seed/                 # scientific ingredient seed data + loader
@@ -2073,3 +2679,181 @@ scripts/
 └── extract_kotlin_ingredients.py   # one-off tool used to generate app/seed/ingredients_seed.json from the original Kotlin source
 docker-compose.yml / docker-compose.prod.yml / Dockerfile / docker/entrypoint.sh
 ```
+
+## 13. Persistent ingredient knowledge cache
+
+Task: "persistent ingredient knowledge cache". Builds directly on
+section 6 item 12's data-quality fix (no fabricated scientific claims
+for an OCR-only ingredient) by making the SAME `ingredients` table the
+one, reusable, persistent catalog for those ingredients too, instead of
+recreating an unpersisted in-memory stand-in on every single scan.
+
+### 13.1 Local-first resolution
+
+`app.services.ingredient_catalog.get_or_create_catalog_ingredient` is
+called (via `materialize_ingredients`) right after ingredient matching,
+at every scan pipeline (`analyze_ocr_text`, `analyze_ocr_text_with_barcode`,
+`analyze_label_image`, `analyze_label_image_with_barcode`, and the
+barcode-discovery bridge), for every token that had no curated-database
+match:
+
+1. **Official identifier first** — an E-number literally present in
+   the OCR text (`ingredient_repository.get_by_official_identifier`)
+   always wins. This step also registers the CURRENTLY observed display
+   text as a new alias of the row it found (if it doesn't already have
+   one), so a later, blurrier scan of the same name that doesn't also
+   catch the E-number still resolves directly via step 2.
+2. **Known alias** — any previously-learned English/Bulgarian/spelling/
+   OCR-variant name (`ingredient_alias_repository.get_by_normalized`,
+   keyed on `app.services.ingredient_normalization.normalize_ingredient_name`).
+3. **Otherwise**: get-or-create a minimal row (race-safe, see 13.4) and
+   register this name as its first alias, so the next occurrence of
+   this exact ingredient — from this request or a concurrent one —
+   resolves via step 2 instead of creating another row.
+
+No external ingredient-lookup API exists in this codebase today
+(Gemini is used only for whole-label extraction, never a per-ingredient
+regulatory lookup) — steps 1-3 above are the entire "external source or
+model" call this task's requirement 1 describes; a future integration
+of a real one has a ready seam (`IngredientSource.REGULATORY_LOOKUP`,
+`IngredientVerificationStatus.LIMITED_DATA`, `merge_verified_fields`,
+`is_within_negative_cache_window` — all real, fully tested, simply
+unused by any current caller with non-empty data, since OCR/Gemini
+today produce no scientific claims by design).
+
+### 13.2 Canonical identity
+
+`Ingredient` gained `normalized_name` (canonical, comparable form of
+`common_name`), `ins_number` (Codex Alimentarius INS code — derived
+from a genuine E-number when one exists, e.g. `E951` → INS `951`,
+never fabricated; see `ingredient_catalog.derive_ins_number_from_e_number`),
+and `cas_number` (CAS registry number — column present, not populated
+for the curated seed data in this change; a wrong CAS number would be
+exactly the kind of fabricated identifier this project's data-quality
+work exists to prevent). `IngredientAlias` (new table, see section 5)
+is the actual many-to-one identity index: one canonical `ingredients`
+row, any number of alias rows pointing at it, `alias_normalized`
+globally UNIQUE so a normalized name can never ambiguously resolve to
+two different ingredients. The raw `synth_...` id/hash
+(`ocr_normalizer.create_synthetic_ingredient`) is NEVER treated as
+proof of identity — it is only ever a primary key to look an
+ALREADY-established row back up; the alias/identifier resolution above
+is always what decides two mentions are the same ingredient.
+
+`app/seed/load_seed.py` registers each curated row's own name as its
+first alias, plus a small, explicit, hand-verified set of additional
+variants (`_EXTRA_ALIASES`) migrating the existing (unchanged, still
+used for its own original matching-time-substitution purpose)
+`label_language._BULGARIAN_INGREDIENT_ALIASES` dict into persistent,
+queryable rows for the curated ingredients it already covered
+(Aspartame/`аспартам`/`Aspartam`, Sodium Nitrite/`натриев нитрит`,
+HFCS/`HFCS`, MSG/`MSG`).
+
+### 13.3 Provenance, verification status, and the regulatory/scientific cache TTL
+
+Record-level provenance (not per-field — see `Ingredient`'s class
+docstring for why: every field on a row was written together, from one
+source, at one point in time; there is no per-field mixed-provenance
+case in this codebase to track). New additive `IngredientEntity`
+fields: `verificationStatus` (`VERIFIED`/`LIMITED_DATA`/`UNVERIFIED`),
+`source` (`CURATED_SEED`/`REGULATORY_LOOKUP`/`GEMINI`/`OCR_HEURISTIC`),
+`sourceRecordId`, `sourceUrl`, `retrievedAt`/`lastVerifiedAt` (epoch
+milliseconds, matching this API's existing `timestamp`/`scannedAt`
+convention), `confidence`, `schemaVersion`, and a computed
+`needsRefresh` (`true` once a VERIFIED row's `lastVerifiedAt` is older
+than `INGREDIENT_VERIFIED_DATA_TTL_SECONDS`, default ~6 months — never
+blocks a scan, the last known value is still served immediately, only
+flagged for a future refresh). `INGREDIENT_NEGATIVE_CACHE_TTL_SECONDS`
+(default 24h) gates `ingredient_catalog.is_within_negative_cache_window`
+for a not-yet-VERIFIED row — the point a future real revalidation
+attempt would check before spending a network call on an already-fresh
+negative result.
+
+`ingredient_catalog.merge_verified_fields` is the confidence/source-
+priority-gated merge ("lower-quality OCR/Gemini data must never
+overwrite curated or regulatory information", `SOURCE_PRIORITY`:
+CURATED_SEED > REGULATORY_LOOKUP > GEMINI > OCR_HEURISTIC, confidence
+as the same-rank tie-breaker) — fully tested
+(`tests/unit/test_ingredient_catalog_pure.py`), ready for the future
+integration described in 13.1. Verification promotion within it is
+deliberately conservative: only a REGULATORY_LOOKUP (or CURATED_SEED)
+source may promote a row all the way to `VERIFIED` (and set
+`riskAssessmentAvailable`, which is what actually lets `riskLevel`
+influence the Health Score); a GEMINI-sourced merge — real content, not
+yet human/regulatory-confirmed — promotes only to `LIMITED_DATA`,
+never `VERIFIED`. What DOES run live today:
+`ingredient_catalog._fill_missing_identity_fields` fills (never
+overwrites) a currently-null `e_number`/`ins_number` on an existing row
+— curated or not — whenever the E-number-hit resolution path (13.1
+step 1) finds one the stored row doesn't have yet, or when a later
+observation of the same alias supplies one
+the earlier observation's OCR text didn't contain.
+
+### 13.4 Concurrency
+
+`ingredient_repository.insert_new`/`ingredient_alias_repository.get_or_create`
+use the exact SAVEPOINT (`begin_nested`) get-or-create pattern already
+established by `product_repository.insert_new`/
+`product_source_repository.record_discovery` — a primary-key or unique-
+alias conflict only undoes that one row's insert, never any other work
+already flushed earlier in the same transaction; the loser re-fetches
+and reuses the winner's row rather than erroring or duplicating. Two
+distinct real-Postgres-conflict shapes are covered, both proven
+against a genuine, disposable, concurrent-session PostgreSQL 16
+instance during the pre-PR verification pass (see
+`docs/CODEX_HANDOFF.md`):
+`tests/postgres/test_ingredient_catalog_concurrency_postgres.py::test_concurrent_resolution_of_the_same_new_ingredient_converges_on_one_row`
+(same normalized text/id colliding on the `ingredients.id` primary
+key) and `::test_concurrent_resolution_of_the_same_new_e_number_from_different_display_names_converges`
+(two DIFFERENT display names sharing the same genuine E-number,
+colliding on the UNIQUE `e_number` column instead — a distinct
+conflict shape the id/alias-only re-fetch fallback originally missed;
+`get_or_create_catalog_ingredient` now also re-checks by official
+identifier before concluding a conflict is unrecoverable — see the
+verification pass for the full root-cause writeup).
+
+### 13.5 Product relationships
+
+Unchanged by this task, and already correct: `Product.ingredient_ids`
+has always stored ids only (comma-separated), never a copy of the
+scientific profile, and `food_analysis.fetch_ingredients_for_product`
+already re-reads live `Ingredient` rows on every request. This task's
+job was making sure a given normalized name/identifier always resolves
+to the SAME id — once it does, "one canonical ingredient linked to
+multiple products, with an update visible to all of them on their next
+retrieval" already falls out of the existing design for free. See
+`tests/integration/test_ingredient_knowledge_cache_end_to_end.py`.
+
+### 13.6 ADI and privacy
+
+Unaffected/unchanged: `IngredientOut.adiMinMgPerKgBwPerDay`/
+`adiMaxMgPerKgBwPerDay` (section 6 item 12) are still derived at
+presentation time from the canonical row's own `acceptableDailyIntake`
+text, never stored per-product; nothing in this task's new columns
+ever holds an image, a full model prompt/response, a user id, or a
+health profile — only ingredient name/identifier text and the
+provenance metadata in 13.3.
+
+### 13.7 A previously-404 lookup now returns real (if minimal) data
+
+Because an OCR-only ingredient is now a real, persisted row instead of
+an unpersisted in-memory reconstruction, `GET /api/v1/ingredients/{id}`
+for a `synth_...` id that has actually been observed by a scan now
+returns `200` with a minimal `UNVERIFIED` record instead of `404` —
+this is additive/backward-compatible (a previously-404 case becomes
+200; no previously-200 response's shape changed) but is called out
+explicitly per the project's contract-deviation convention (section 6).
+
+### 13.8 Tests
+
+`tests/unit/test_ingredient_normalization.py` (pure text normalization),
+`tests/unit/test_ingredient_catalog_pure.py` (INS derivation, staleness/
+negative-cache TTL, confidence-gated merge), `tests/unit/test_ingredient_knowledge_cache_migration.py`,
+`tests/integration/test_ingredient_catalog.py` (local-first resolution,
+E-number/alias/Bulgarian dedup, race-safe insert), `tests/integration/test_load_seed.py`
+(seed-time provenance + alias registration, idempotency),
+`tests/integration/test_ingredient_knowledge_cache_end_to_end.py`
+(one canonical ingredient across two real products, an update visible
+on next retrieval, `needsRefresh` fresh vs. expired), and
+`tests/postgres/test_ingredient_catalog_concurrency_postgres.py`
+(opt-in, real concurrent-session PostgreSQL).

@@ -12,6 +12,58 @@ async def get_by_barcode(db: AsyncSession, barcode: str) -> Product | None:
     return result.scalar_one_or_none()
 
 
+_LIKE_ESCAPE_CHAR = "\\"
+
+
+def _escape_like(value: str) -> str:
+    """Escapes `%`/`_`/the escape char itself so `value` is matched as a
+    LITERAL substring by a `LIKE ... ESCAPE '\\'` pattern -- SQL `LIKE`
+    otherwise treats a bare `_` as "any single character" and `%` as
+    "any run of characters", which real `Ingredient.id`s routinely
+    contain (e.g. "e300_ascorbic_acid"): an escaped `_id` could
+    otherwise wildcard-match a DIFFERENT id that merely has the same
+    length/shape (review fix -- the original unescaped version was not
+    actually boundary-safe as its own docstring claimed)."""
+    return (
+        value.replace(_LIKE_ESCAPE_CHAR, _LIKE_ESCAPE_CHAR * 2)
+        .replace("%", f"{_LIKE_ESCAPE_CHAR}%")
+        .replace("_", f"{_LIKE_ESCAPE_CHAR}_")
+    )
+
+
+async def has_ingredient_reference(db: AsyncSession, ingredient_id: str) -> bool:
+    """Whether any `Product.ingredient_ids` (a comma-separated list of
+    `Ingredient.id`s -- see `food_analysis._ingredient_ids_string`,
+    there is no FK/junction table) already includes this exact id --
+    used only to decide whether deleting a duplicate `Ingredient` row
+    is provably safe (see
+    `ingredient_catalog._reconcile_official_identifier_conflict`, PR
+    #13 review: "canonical identity precedence"). Boundary-safe -- never
+    a false positive from one id being a plain substring of another
+    (e.g. "e300" inside "e3001"), NOR from `LIKE`'s own `_`/`%`
+    wildcards matching an unrelated id that merely has the same
+    shape (`_escape_like`): matches `ingredient_id` as a whole,
+    LITERAL, comma-delimited token, not a bare substring or wildcard
+    pattern, exactly like a real reader of this column
+    (`food_analysis.fetch_ingredients_for_product`'s own `.split(",")`)
+    would."""
+    escaped = _escape_like(ingredient_id)
+    stmt = (
+        select(Product.barcode)
+        .where(
+            or_(
+                Product.ingredient_ids == ingredient_id,
+                Product.ingredient_ids.like(f"{escaped},%", escape=_LIKE_ESCAPE_CHAR),
+                Product.ingredient_ids.like(f"%,{escaped}", escape=_LIKE_ESCAPE_CHAR),
+                Product.ingredient_ids.like(f"%,{escaped},%", escape=_LIKE_ESCAPE_CHAR),
+            )
+        )
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none() is not None
+
+
 async def search(
     db: AsyncSession, *, query: str | None, page: int, page_size: int
 ) -> tuple[list[Product], int]:

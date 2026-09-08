@@ -196,11 +196,33 @@ async def test_concurrent_enrichment_of_the_same_existing_row_preserves_both_gro
     `for_update=True` row lock added to `get_by_barcode_or_aliases`
     (see `_finalize_barcode_enrichment`) serializes the two attempts, so
     whichever one commits second reads the first one's already-persisted
-    group rather than overwriting it. The FIRST attempt to commit still
-    correctly reports `labelScanRequired` (`ProductNotFoundError`) for
-    itself -- it only completed one group -- while the SECOND sees both
-    groups verified and returns normally. Neither call may silently lose
-    the other's evidence ("last write wins" on the whole row).
+    group rather than overwriting it. Neither call may silently lose the
+    other's evidence ("last write wins" on the whole row) -- exactly
+    ONE of the two always ends up seeing BOTH groups complete and
+    returns the real, fully-computed Health Score; the other's own
+    response legitimately depends on race timing (see below), but the
+    persisted row itself is always fully correct either way.
+
+    Verification-pass finding (see docs/CODEX_HANDOFF.md): an EARLIER
+    version of this test additionally asserted that the loser ALWAYS
+    gets `ProductNotFoundError` (`labelScanRequired`) for itself. That
+    was a stale assumption from before V13 (`_finalize_barcode_enrichment`'s
+    own "SUCCESS GATE (V13...)" comment block, README "V13" changelog
+    entry and section 11.14): the success gate is
+    `has_verified_ingredients` ALONE, not full verification -- so
+    whichever call supplies the INGREDIENTS group and happens to commit
+    FIRST (before the other side's row lock read) gets a normal `200`
+    with `healthScore: null`, not `labelScanRequired` -- while a call
+    that supplies only NUTRITION and commits first still correctly gets
+    `labelScanRequired` (nutrition alone was never part of the success
+    gate, V13 didn't change that side). Both orderings are legitimate
+    concurrent outcomes of the SAME row lock working correctly; 15
+    repeated live-Postgres runs during the verification pass confirmed
+    BOTH orderings occur (roughly 1-in-5 nutrition-commits-first here,
+    the rest ingredients-commits-first) while the FINAL persisted row
+    was IDENTICAL and fully correct in all 15/15 -- i.e. this was never
+    a lost/duplicated-evidence bug, only an incomplete test assertion
+    that didn't account for V13's asymmetric gate.
     """
     from sqlalchemy import func, select
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -304,17 +326,44 @@ async def test_concurrent_enrichment_of_the_same_existing_row_preserves_both_gro
         await session_a.close()
         await session_b.close()
 
-    # Exactly one of the two attempts completes the LAST remaining group
-    # and succeeds; the other only completed its own group and correctly
-    # still reports labelScanRequired for itself. Neither may raise
-    # anything else (a crash, a lock timeout/deadlock, an unrelated
-    # AppError).
+    # Neither call may raise anything but the one expected, legitimate
+    # exception (a crash, a lock timeout/deadlock, an unrelated AppError
+    # would all be real bugs).
     successes = [r for r in results if not isinstance(r, BaseException)]
     not_found = [r for r in results if isinstance(r, ProductNotFoundError)]
     other_errors = [r for r in results if isinstance(r, BaseException) and not isinstance(r, ProductNotFoundError)]
     assert not other_errors, f"unexpected exception(s): {other_errors!r}"
-    assert len(successes) == 1, f"expected exactly one successful call, got {results!r}"
-    assert len(not_found) == 1, f"expected exactly one labelScanRequired call, got {results!r}"
+
+    # The actual invariant the row lock guarantees (see this test's own
+    # docstring for the full citation/derivation): exactly ONE of the
+    # two calls always ends up seeing BOTH evidence groups complete and
+    # returns the real, fully-computed Health Score -- never both calls
+    # (evidence duplicated into two independent "final" reads) and
+    # never neither (evidence lost). This holds regardless of which
+    # side's transaction commits first.
+    real_score_successes = [r for r in successes if r["health_score"] is not None]
+    assert len(real_score_successes) == 1, (
+        f"expected exactly one call to see the real, fully-computed Health Score, got {results!r}"
+    )
+
+    # The OTHER call's own response legitimately depends on which
+    # evidence group it alone supplied and whether it committed first
+    # (V13's asymmetric success gate -- see this test's own docstring):
+    #   - if it's the INGREDIENTS-only side and commits first, ingredient
+    #     recognition succeeding alone is itself a normal 200 (V13) --
+    #     `healthScore: null`, not `labelScanRequired`.
+    #   - if it's the NUTRITION-only side and commits first, nutrition
+    #     alone never satisfied the success gate (V13 didn't change
+    #     that), so it correctly still reports `labelScanRequired`.
+    if len(successes) == 2:
+        null_score_successes = [r for r in successes if r["health_score"] is None]
+        assert len(null_score_successes) == 1, (
+            f"expected the other success's Health Score to be null (ingredients-only "
+            f"completion, V13), got {results!r}"
+        )
+        assert not not_found, f"expected no labelScanRequired call alongside two successes, got {results!r}"
+    else:
+        assert len(not_found) == 1, f"expected exactly one labelScanRequired call, got {results!r}"
 
     verify_session = session_factory()
     try:
