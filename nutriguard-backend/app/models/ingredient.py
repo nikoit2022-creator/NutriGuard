@@ -91,11 +91,22 @@ class Ingredient(Base):
     risk_level: Mapped[RiskLevel] = mapped_column(
         Enum(RiskLevel, name="risk_level", native_enum=True), nullable=False
     )
-    # True only when `verification_status == VERIFIED` (kept in sync at
-    # write time by `app.services.ingredient_catalog`/`app.seed.load_seed`
-    # -- not DB-computed) -- a genuinely unassessed ingredient (VERIFIED's
-    # negation) can never be confused with a real risk assessment on the
-    # wire (see `IngredientOut.risk_assessment_available`/`risk_rationale`).
+    # `verification_status == VERIFIED` is NECESSARY but, as of PR #13
+    # review round 3 ("risk assessment ... provenance field-specific"),
+    # no longer SUFFICIENT for this to be `True`: a VERIFIED row whose
+    # `risk_level` was never itself independently confirmed by a
+    # trusted source (e.g. only some OTHER field, like `description`,
+    # was ever actually regulatory-merged) correctly stays `False` even
+    # though `verification_status` reads VERIFIED -- see
+    # `app.services.ingredient_catalog.merge_verified_fields`'s write-
+    # time computation (`is_field_trustworthy(existing, "risk_level")`,
+    # kept in sync at write time -- not DB-computed) and
+    # `app.seed.load_seed`, which sets this directly (always `True`) for
+    # a curated row, whose fields are all written together atomically
+    # and are therefore never field-specifically distrusted. A
+    # genuinely unassessed ingredient (this column `False`) can never
+    # be confused with a real risk assessment on the wire (see
+    # `IngredientOut.risk_assessment_available`/`risk_rationale`).
     risk_assessment_available: Mapped[bool] = mapped_column(
         "risk_assessment_available", Boolean, nullable=False, default=True
     )

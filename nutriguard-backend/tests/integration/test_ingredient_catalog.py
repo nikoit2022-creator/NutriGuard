@@ -368,7 +368,10 @@ async def test_official_identifier_conflict_resolution_never_deletes_a_curated_o
     """Defense in depth: even if the ALIAS OWNER (the "losing" side of
     the conflict) is itself curated/verified, it must never be deleted
     -- only a genuinely disposable synthetic duplicate may ever be
-    removed."""
+    removed. PR #13 review round 3: it must ALSO never have its alias
+    silently repointed away -- a curated/verified row's own alias is
+    never proof it's a duplicate of something else, no matter what
+    later observation shares the same generic text."""
     official = _seeded_ingredient(
         id="e300_ascorbic_acid", common_name="L-Ascorbic Acid", normalized_name="l-ascorbic acid", e_number="E300"
     )
@@ -392,14 +395,114 @@ async def test_official_identifier_conflict_resolution_never_deletes_a_curated_o
     later_observation = replace(create_synthetic_ingredient("Ascorbic Acid"), e_number="E300")
     resolved = await ingredient_catalog.get_or_create_catalog_ingredient(db_session, later_observation)
 
+    # The official identifier still wins for THIS observation.
     assert resolved.id == official.id
     # `other_curated` is itself VERIFIED/CURATED_SEED -- never deleted,
-    # even though it lost the alias to `official`.
+    # even though a different observation's official identifier match
+    # collided with its alias.
     assert await ingredient_repository.get_by_id(db_session, other_curated.id) is not None
     assert await ingredient_repository.count(db_session) == 2
 
+    # The alias is left COMPLETELY untouched -- never silently
+    # repointed away from a curated/verified row. A later, bare-name
+    # (no identifier) lookup of "ascorbic acid" alone still
+    # deterministically resolves to whichever row already legitimately
+    # owned that ambiguous alias, exactly as before this observation.
     alias = await ingredient_alias_repository.get_by_normalized(db_session, "ascorbic acid")
-    assert alias.ingredient_id == official.id
+    assert alias.ingredient_id == other_curated.id
+
+
+@pytest.mark.asyncio
+async def test_two_distinct_verified_rows_sharing_a_generic_alias_preserve_the_ambiguity(db_session):
+    """The exact PR #13 review round 3 scenario: two DISTINCT, both
+    independently VERIFIED/curated additives with DIFFERENT E-numbers
+    happen to share a generic normalized alias text (e.g. both are also
+    known by the same family name). Resolving one via its own official
+    identifier must never silently reassign the shared alias away from
+    the other -- neither official identifier "proves" which one the
+    bare generic name really refers to."""
+    citric_acid = _seeded_ingredient(
+        id="e330_citric_acid_v2", common_name="Citric Acid", normalized_name="citric acid", e_number="E330"
+    )
+    sodium_citrate = _seeded_ingredient(
+        id="e331_sodium_citrate", common_name="Sodium Citrate", normalized_name="sodium citrate", e_number="E331"
+    )
+    db_session.add_all([citric_acid, sodium_citrate])
+    await db_session.flush()
+    # Both curated rows are also known, ambiguously, by the same
+    # generic family name -- a real (if unfortunate) curated-data
+    # scenario this reconciliation must never try to silently resolve.
+    await ingredient_alias_repository.get_or_create(
+        db_session,
+        ingredient_id=sodium_citrate.id,
+        alias_text="Citrate Acidity Regulator",
+        alias_normalized="citrate acidity regulator",
+        language=None,
+        source=IngredientSource.CURATED_SEED,
+    )
+
+    # A new observation supplies citric acid's OWN E-number but under
+    # the shared generic display text.
+    observation = replace(create_synthetic_ingredient("Citrate Acidity Regulator"), e_number="E330")
+    resolved = await ingredient_catalog.get_or_create_catalog_ingredient(db_session, observation)
+
+    # E330's own row wins for THIS observation.
+    assert resolved.id == citric_acid.id
+    # Both verified rows survive, untouched.
+    assert await ingredient_repository.get_by_id(db_session, sodium_citrate.id) is not None
+    assert await ingredient_repository.count(db_session) == 2
+    # The shared alias is NOT reassigned -- still ambiguously pointing
+    # at whichever row already legitimately owned it.
+    alias = await ingredient_alias_repository.get_by_normalized(db_session, "citrate acidity regulator")
+    assert alias.ingredient_id == sodium_citrate.id
+
+
+@pytest.mark.asyncio
+async def test_unverified_alias_owner_with_its_own_distinct_identifier_is_not_treated_as_a_duplicate(db_session):
+    """An UNVERIFIED row is only a "provable duplicate" when it has NO
+    official identifier of its own. One that already picked up its OWN
+    (different) E-number via an earlier partial observation is a
+    genuinely distinct, still-unverified ingredient -- not a disposable
+    stand-in for whatever a later, unrelated official-identifier match
+    happens to also normalize to the same generic alias text."""
+    official = _seeded_ingredient(
+        id="e300_ascorbic_acid", common_name="L-Ascorbic Acid", normalized_name="l-ascorbic acid", e_number="E300"
+    )
+    db_session.add(official)
+    await db_session.flush()
+
+    # An UNVERIFIED stub that already has ITS OWN distinct identifier.
+    stub_with_own_identifier = Ingredient(
+        id="synth_other_vitamin_stub",
+        common_name="Some Other Vitamin",
+        normalized_name="ascorbic acid",
+        e_number="E301",  # its own, different identifier
+        verification_status=IngredientVerificationStatus.UNVERIFIED,
+        source=IngredientSource.OCR_HEURISTIC,
+        confidence=0.2,
+        risk_level=RiskLevel.SAFE,
+        risk_assessment_available=False,
+    )
+    db_session.add(stub_with_own_identifier)
+    await db_session.flush()
+    await ingredient_alias_repository.get_or_create(
+        db_session,
+        ingredient_id=stub_with_own_identifier.id,
+        alias_text="Some Other Vitamin",
+        alias_normalized="ascorbic acid",
+        language=None,
+        source=IngredientSource.OCR_HEURISTIC,
+    )
+
+    later_observation = replace(create_synthetic_ingredient("Ascorbic Acid"), e_number="E300")
+    resolved = await ingredient_catalog.get_or_create_catalog_ingredient(db_session, later_observation)
+
+    assert resolved.id == official.id
+    # The stub has its own distinct identity -- never absorbed/deleted.
+    assert await ingredient_repository.get_by_id(db_session, stub_with_own_identifier.id) is not None
+    assert await ingredient_repository.count(db_session) == 2
+    alias = await ingredient_alias_repository.get_by_normalized(db_session, "ascorbic acid")
+    assert alias.ingredient_id == stub_with_own_identifier.id
 
 
 @pytest.mark.asyncio

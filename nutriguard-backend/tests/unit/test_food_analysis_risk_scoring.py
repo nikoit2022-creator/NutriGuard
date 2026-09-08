@@ -104,3 +104,41 @@ def test_mixed_assessed_and_unassessed_ingredients_only_count_the_assessed_one()
     )
 
     assert score == 88  # 100 - 12 (POTENTIAL_CONCERN only)
+
+
+# --- PR #13 review round 3: field-specific risk provenance, end to end -----
+
+
+def test_partial_merge_of_an_unrelated_field_never_lets_the_stale_risk_level_deduct():
+    """The exact review round-3 failure scenario, run through the REAL
+    `merge_verified_fields` write path (not a hand-set fixture): a
+    trusted REGULATORY_LOOKUP merge that only ever supplies
+    `description` must leave `risk_assessment_available` -- and
+    therefore the Health Score -- untouched, even though `risk_level`
+    itself still carries its old, HIGH_CONCERN GEMINI/OCR value and the
+    record now reads VERIFIED/REGULATORY_LOOKUP overall."""
+    from app.models.enums import IngredientSource
+    from app.services import ingredient_catalog
+
+    row = _FakeIngredient(
+        risk_level=RiskLevel.HIGH_CONCERN,
+        risk_assessment_available=False,
+    )
+    row.source = IngredientSource.OCR_HEURISTIC
+    row.confidence = 0.2
+    row.verification_status = None
+    row.retrieved_at = None
+    row.field_provenance_json = None
+    row.description = ""
+
+    changed = ingredient_catalog.merge_verified_fields(
+        row,
+        fields={"description": "A regulatory-lookup-confirmed description."},
+        source=IngredientSource.REGULATORY_LOOKUP,
+        confidence=0.9,
+    )
+    assert changed is True
+    assert row.risk_assessment_available is False  # never promoted by an unrelated field
+
+    score, _warnings = food_analysis._score_and_warnings(_product(), [row], _inert_profile())
+    assert score == 100  # HIGH_CONCERN never deducts -- risk_level was never actually confirmed

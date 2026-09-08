@@ -157,8 +157,57 @@ def test_higher_priority_source_may_overwrite_lower_priority_data():
     assert changed is True
     assert stub.description == "A regulatory-lookup-confirmed description."
     assert stub.verification_status == IngredientVerificationStatus.VERIFIED
-    assert stub.risk_assessment_available is True
+    # PR #13 review round 3: this call never touched `risk_level` --
+    # `risk_assessment_available` must stay field-specific, not flip
+    # True just because a DIFFERENT field was regulatory-confirmed.
+    assert stub.risk_assessment_available is False
     assert stub.last_verified_at is not None
+
+
+def test_risk_assessment_available_becomes_true_only_when_risk_level_itself_is_touched():
+    """The positive counterpart of the test above -- when the trusted
+    merge DOES include `risk_level`, `risk_assessment_available`
+    correctly becomes `True`."""
+    stub = _MergeableIngredient(source=IngredientSource.OCR_HEURISTIC, confidence=0.2)
+    changed = merge_verified_fields(
+        stub,
+        fields={
+            "description": "A regulatory-lookup-confirmed description.",
+            "risk_level": RiskLevel.POTENTIAL_CONCERN,
+        },
+        source=IngredientSource.REGULATORY_LOOKUP,
+        confidence=0.8,
+    )
+    assert changed is True
+    assert stub.verification_status == IngredientVerificationStatus.VERIFIED
+    assert stub.risk_assessment_available is True
+
+
+def test_risk_assessment_available_survives_a_later_unrelated_partial_merge():
+    """Once `risk_level` has genuinely earned trusted provenance, a
+    LATER partial merge touching some other field must not revoke it --
+    per-field provenance for `risk_level` is untouched by that later
+    call (task: "a regulatory update of only description or efsa_status
+    must not promote unrelated fields" -- the inverse must also hold:
+    it must not DEMOTE an already-earned one either)."""
+    stub = _MergeableIngredient(source=IngredientSource.OCR_HEURISTIC, confidence=0.2)
+    merge_verified_fields(
+        stub,
+        fields={"risk_level": RiskLevel.HIGH_CONCERN},
+        source=IngredientSource.REGULATORY_LOOKUP,
+        confidence=0.9,
+    )
+    assert stub.risk_assessment_available is True
+
+    merge_verified_fields(
+        stub,
+        fields={"efsa_status": "Authorized"},
+        source=IngredientSource.REGULATORY_LOOKUP,
+        confidence=0.95,
+    )
+    assert stub.risk_level == RiskLevel.HIGH_CONCERN
+    assert stub.risk_assessment_available is True
+    assert get_field_source(stub, "risk_level") == IngredientSource.REGULATORY_LOOKUP
 
 
 def test_same_source_lower_confidence_cannot_overwrite():
@@ -188,11 +237,13 @@ def test_regulatory_lookup_source_promotes_all_the_way_to_verified():
     stub = _MergeableIngredient(source=IngredientSource.OCR_HEURISTIC, confidence=0.2)
     merge_verified_fields(
         stub,
-        fields={"description": "A regulatory-lookup-confirmed description."},
+        fields={"description": "A regulatory-lookup-confirmed description.", "risk_level": RiskLevel.SAFE},
         source=IngredientSource.REGULATORY_LOOKUP,
         confidence=0.9,
     )
     assert stub.verification_status == IngredientVerificationStatus.VERIFIED
+    # `risk_level` was itself part of this trusted merge -- genuinely
+    # earned, not merely inherited from `description`'s promotion.
     assert stub.risk_assessment_available is True
 
 
@@ -505,10 +556,12 @@ def test_a_lower_ranked_partial_merge_that_is_rejected_leaves_provenance_untouch
     assert get_field_source(curated, "description") == IngredientSource.CURATED_SEED
 
 
-def test_stale_revalidation_with_no_touched_fields_does_not_write_field_provenance():
+def test_stale_revalidation_with_no_touched_fields_still_backfills_field_provenance():
     """A pure stale-revalidation call that supplies NO real (non-blank)
-    field values has nothing to attribute per-field -- it must not
-    write an empty/no-op `field_provenance_json` either."""
+    field values attributes nothing NEW per-field, but it MUST still
+    snapshot every field's pre-existing provenance (task/code-review
+    fix, see below) -- never skip the backfill just because nothing was
+    touched THIS call."""
     curated = _stale_curated()
     changed = merge_verified_fields(
         curated,
@@ -518,4 +571,41 @@ def test_stale_revalidation_with_no_touched_fields_does_not_write_field_provenan
         now=NOW,
     )
     assert changed is True  # stale revalidation still "succeeds"
-    assert curated.field_provenance_json is None
+    assert curated.field_provenance_json is not None
+    # Nothing was newly attributed -- every field's provenance reports
+    # its real (pre-call) origin, same as `curated.source` already was.
+    assert get_field_source(curated, "description") == IngredientSource.CURATED_SEED
+
+
+def test_empty_fields_stale_revalidation_backfills_before_record_level_source_can_move():
+    """Code-review fix (PR #13 review round 3 follow-up): skipping the
+    backfill whenever NO field was touched this call used to leave an
+    empty-`fields` stale-revalidation call free to move the row's
+    record-level `source` (same-or-higher incoming rank) WITHOUT ever
+    snapshotting what each field's real prior origin was -- so an
+    untouched field's `resolve_field_source` fallback would silently
+    drift to whatever the row's `source` moves to next, misattributing
+    content a DIFFERENT source actually supplied. Reproduced here: a
+    stale REGULATORY_LOOKUP row (rank 90), revalidated by CURATED_SEED
+    (rank 100 -- genuinely outranks it, so the record-level `source`
+    actually moves) with a completely EMPTY `fields` dict (a pure
+    "still current" ping, nothing supplied at all) -- `description`
+    (never independently merged, never touched by any call) must keep
+    reporting REGULATORY_LOOKUP -- its real origin -- never drift to
+    CURATED_SEED just because the record-level `source` column did."""
+    stale_regulatory = _stale_curated(source=IngredientSource.REGULATORY_LOOKUP, confidence=0.8)
+    assert stale_regulatory.field_provenance_json is None  # never independently merged before
+
+    changed = merge_verified_fields(
+        stale_regulatory,
+        fields={},  # nothing supplied at all -- a pure "still current" ping
+        source=IngredientSource.CURATED_SEED,
+        confidence=1.0,
+        now=NOW,
+    )
+    assert changed is True
+    assert stale_regulatory.source == IngredientSource.CURATED_SEED  # record-level DID move
+    # But `description`'s own real origin is still correctly reported
+    # as REGULATORY_LOOKUP -- backfilled from the row's source BEFORE
+    # the reassignment above, not silently inherited from it.
+    assert get_field_source(stale_regulatory, "description") == IngredientSource.REGULATORY_LOOKUP

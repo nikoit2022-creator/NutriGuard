@@ -219,6 +219,73 @@ def test_untouched_field_with_explicit_lower_trust_provenance_is_never_gated_aut
     assert dumped["adiSource"] is None
 
 
+def test_risk_rationale_ungated_when_evidence_level_lacks_trusted_provenance():
+    """PR #13 review round 3 ("risk assessment and citation provenance
+    field-specific"): even with `riskAssessmentAvailable=True` (i.e.
+    `riskLevel` itself is trusted) and an overall VERIFIED/
+    REGULATORY_LOOKUP row, `riskRationale` must stay hidden if
+    `evidenceLevel` -- the text it actually reuses -- has its OWN
+    untrusted (GEMINI) provenance."""
+    import json
+
+    field_provenance_json = json.dumps(
+        {
+            "risk_level": {
+                "source": "REGULATORY_LOOKUP", "confidence": 0.9, "retrievedAt": "2026-01-01T00:00:00+00:00"
+            },
+            "evidence_level": {"source": "GEMINI", "confidence": 0.8, "retrievedAt": "2025-01-01T00:00:00+00:00"},
+        }
+    )
+    out = IngredientOut(
+        **_curated_kwargs(
+            verification_status=IngredientVerificationStatus.VERIFIED,
+            source=IngredientSource.REGULATORY_LOOKUP,
+            risk_assessment_available=True,
+            field_provenance_json=field_provenance_json,
+        )
+    )
+    dumped = out.model_dump(by_alias=True)
+    assert dumped["riskRationale"] is None
+
+
+def test_risk_rationale_shown_when_both_risk_level_and_evidence_level_are_trusted():
+    out = IngredientOut(
+        **_curated_kwargs(
+            verification_status=IngredientVerificationStatus.VERIFIED,
+            source=IngredientSource.REGULATORY_LOOKUP,
+            risk_assessment_available=True,
+        )
+    )
+    dumped = out.model_dump(by_alias=True)
+    assert dumped["riskRationale"] == "Moderate Evidence"
+
+
+def test_adi_source_ungated_when_references_lacks_trusted_provenance():
+    """Same fix, for the ADI citation: a genuinely regulatory-confirmed
+    ADI number paired with an untouched, still-GEMINI `references`
+    string must not present that citation as if it backed the number."""
+    import json
+
+    field_provenance_json = json.dumps(
+        {
+            "acceptable_daily_intake": {
+                "source": "REGULATORY_LOOKUP", "confidence": 0.9, "retrievedAt": "2026-01-01T00:00:00+00:00"
+            },
+            "references": {"source": "GEMINI", "confidence": 0.8, "retrievedAt": "2025-01-01T00:00:00+00:00"},
+        }
+    )
+    out = IngredientOut(
+        **_curated_kwargs(
+            verification_status=IngredientVerificationStatus.VERIFIED,
+            source=IngredientSource.REGULATORY_LOOKUP,
+            field_provenance_json=field_provenance_json,
+        )
+    )
+    dumped = out.model_dump(by_alias=True)
+    assert dumped["adiMinMgPerKgBwPerDay"] == 0.0  # the ADI number itself IS gated authoritative
+    assert dumped["adiSource"] is None  # but its citation is not
+
+
 def test_regulatory_lookup_sourced_verified_data_is_authoritative():
     """The other trusted source (task requirement 4): a VERIFIED,
     REGULATORY_LOOKUP-sourced row is just as authoritative as a

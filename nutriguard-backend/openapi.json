@@ -1321,12 +1321,12 @@
               }
             ],
             "title": "Riskrationale",
-            "description": "Why `riskLevel` is what it is, reusing the ingredient's own\ncurated evidence-level text -- never a fabricated explanation.\n`None` whenever there is no real assessment to explain.",
+            "description": "Why `riskLevel` is what it is, reusing the ingredient's own\ncurated evidence-level text -- never a fabricated explanation.\n`None` whenever there is no real assessment to explain. PR #13\nreview round 3 (\"risk assessment ... provenance field-\nspecific\"): gated on BOTH `riskAssessmentAvailable` (itself\nnow field-specific to `riskLevel` -- see\n`ingredient_catalog.merge_verified_fields`) AND `evidenceLevel`\nhaving its OWN trusted provenance -- a trusted, confirmed\n`riskLevel` paired with still-untrusted `evidenceLevel` text\n(e.g. only `riskLevel` itself was ever independently merged)\nmust not present that text as if it were also confirmed.",
             "readOnly": true
           },
           "efsaApprovalStatus": {
             "$ref": "#/components/schemas/ApprovalStatus",
-            "description": "Task requirement 4: gated on the row's own trustworthiness,\nnot just its text -- `NO_INFORMATION` unless this row is\n`VERIFIED` and `CURATED_SEED`/`REGULATORY_LOOKUP`-sourced (see\n`ingredient_regulatory.derive_gated_approval_status`). A\nGemini/OCR-sourced `efsaStatus` string can never surface here as\na real approval, no matter what it says. Gated on `efsaStatus`'s\nOWN true source (PR #13 review fix), not blindly this row's\nrecord-level `source` -- see `resolve_field_source`: a partial\nmerge that only ever touched some OTHER field must never make\nan untouched `efsaStatus` look regulatory-confirmed.",
+            "description": "Task requirement 4: gated on the row's own trustworthiness,\nnot just its text -- `NO_INFORMATION` unless this row is\n`VERIFIED` and `CURATED_SEED`/`REGULATORY_LOOKUP`-sourced (see\n`ingredient_regulatory.derive_gated_approval_status`). A\nGemini/OCR-sourced `efsaStatus` string can never surface here as\na real approval, no matter what it says. Gated on `efsaStatus`'s\nOWN true source (PR #13 review fix), not blindly this row's\nrecord-level `source` -- see `resolve_parsed_field_source`: a\npartial merge that only ever touched some OTHER field must\nnever make an untouched `efsaStatus` look regulatory-confirmed.",
             "readOnly": true
           },
           "fdaApprovalStatus": {
@@ -1368,7 +1368,7 @@
               }
             ],
             "title": "Adisource",
-            "description": "The verified citation backing the numeric ADI range, only\never populated alongside an actual parsed, GATED number (see\n`adi_min_mg_per_kg_bw_per_day`).",
+            "description": "The verified citation backing the numeric ADI range, only\never populated alongside an actual parsed, GATED number (see\n`adi_min_mg_per_kg_bw_per_day`). PR #13 review round 3: also\ngated on `references` itself having COMPATIBLE trusted\nprovenance -- a genuinely regulatory-confirmed ADI number\npaired with an older/untouched, still-untrusted `references`\nstring (e.g. only `acceptableDailyIntake` was independently\nmerged, never `references`) must not present that citation as\nif it also backed this specific ADI figure.",
             "readOnly": true
           },
           "insNumberVerified": {

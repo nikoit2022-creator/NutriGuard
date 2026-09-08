@@ -64,6 +64,7 @@ from app.models.ingredient import Ingredient
 from app.repositories import ingredient_alias_repository, ingredient_repository, product_repository
 from app.services.barcode_text_safety import is_placeholder
 from app.services.ingredient_normalization import normalize_ingredient_name
+from app.services.ingredient_regulatory import is_authoritative_regulatory_source
 from app.services.ocr_normalizer import SyntheticIngredient
 
 # Higher number = higher priority = harder to overwrite. A curated/
@@ -174,12 +175,23 @@ def _is_blank_value(value: Any) -> bool:
     return False
 
 
-def _parse_field_provenance_json(raw: str | None) -> dict[str, dict[str, Any]]:
-    """Never raises on malformed/missing input -- a corrupt or absent
+def parse_field_provenance(raw: str | None) -> dict[str, dict[str, Any]]:
+    """Parses `Ingredient.field_provenance_json` ONCE into a plain dict.
+    Public -- a caller that needs MULTIPLE fields' sources for the SAME
+    row (`IngredientOut`'s several `@computed_field`s;
+    `food_analysis._ingredient_out_dict`'s equivalent hand-written
+    block) should call this once and pass the result to
+    `resolve_parsed_field_source` per field, rather than re-parsing the
+    same small JSON string once per field (code-review efficiency
+    fix -- `resolve_field_source` below still exists for a single-field
+    lookup and is built on these same two functions).
+
+    Never raises on malformed/missing input -- a corrupt or absent
     `field_provenance_json` degrades to "no per-field provenance
     recorded yet" (every field then correctly falls back to the row's
-    own record-level `source`, see `resolve_field_source`), never to an
-    error that would block reading an otherwise-valid `Ingredient` row."""
+    own record-level `source`, see `resolve_parsed_field_source`),
+    never to an error that would block reading an otherwise-valid
+    `Ingredient` row."""
     if not raw:
         return {}
     try:
@@ -194,7 +206,23 @@ def _dump_field_provenance(provenance: dict[str, dict[str, Any]]) -> str:
 
 
 def _load_field_provenance(existing: Any) -> dict[str, dict[str, Any]]:
-    return _parse_field_provenance_json(getattr(existing, "field_provenance_json", None))
+    return parse_field_provenance(getattr(existing, "field_provenance_json", None))
+
+
+def resolve_parsed_field_source(
+    provenance: dict[str, dict[str, Any]], field_name: str, *, fallback: IngredientSource
+) -> IngredientSource:
+    """`resolve_field_source`'s actual lookup, given an ALREADY-parsed
+    provenance dict (see `parse_field_provenance`) -- the low-level half
+    a multi-field caller should use directly to avoid re-parsing the
+    same JSON string once per field."""
+    entry = provenance.get(field_name)
+    if not entry:
+        return fallback
+    try:
+        return IngredientSource(entry["source"])
+    except (KeyError, ValueError):
+        return fallback
 
 
 def resolve_field_source(
@@ -219,14 +247,13 @@ def resolve_field_source(
     purpose -- doing so would relabel an untouched field as if the
     row's most recent partial merge had supplied it too, exactly the
     bug this function exists to close.
+
+    A single-field convenience wrapper around
+    `parse_field_provenance`/`resolve_parsed_field_source` -- a caller
+    resolving MULTIPLE fields for the SAME row should call those two
+    directly instead, parsing `field_provenance_json` only once.
     """
-    entry = _parse_field_provenance_json(field_provenance_json).get(field_name)
-    if not entry:
-        return fallback
-    try:
-        return IngredientSource(entry["source"])
-    except (KeyError, ValueError):
-        return fallback
+    return resolve_parsed_field_source(parse_field_provenance(field_provenance_json), field_name, fallback=fallback)
 
 
 def get_field_source(ingredient: Ingredient, field_name: str) -> IngredientSource:
@@ -234,6 +261,21 @@ def get_field_source(ingredient: Ingredient, field_name: str) -> IngredientSourc
     return resolve_field_source(
         ingredient.field_provenance_json, field_name, fallback=ingredient.source
     )
+
+
+def is_field_trustworthy(ingredient: Ingredient, field_name: str) -> bool:
+    """Whether `field_name`'s CURRENT value on `ingredient` has trusted,
+    VERIFIED provenance -- safe to present as an authoritative
+    scientific/regulatory claim (task: "risk assessment and citation
+    provenance field-specific", PR #13 review round 3). Reuses
+    `ingredient_regulatory.is_authoritative_regulatory_source`'s exact
+    two-part gate -- `verification_status == VERIFIED` AND the source
+    is one of `TRUSTED_INGREDIENT_SOURCES` -- but resolves that source
+    through `get_field_source` (this field's own true origin) rather
+    than the row's blanket record-level `source`, so a field a trusted
+    merge never actually touched can never inherit trust from a
+    DIFFERENT field the SAME call happened to update."""
+    return is_authoritative_regulatory_source(ingredient.verification_status, get_field_source(ingredient, field_name))
 
 
 def _backfill_field_provenance(existing: Any, *, now: datetime) -> dict[str, dict[str, Any]]:
@@ -371,12 +413,30 @@ def merge_verified_fields(
     # real, older origin even once a partial merge moves the record-
     # level columns -- see `Ingredient.field_provenance_json` and
     # `resolve_field_source`.
+    #
+    # Unconditional (PR #13 review round 3 follow-up): a
+    # stale-trusted-revalidation call may reach this point with
+    # `touched_fields` EMPTY (every supplied field was blank, or
+    # `fields={}` entirely -- a pure "still current as of now" ping,
+    # see the stale-revalidation docstring section above) and STILL go
+    # on to move `existing.source`/`confidence` below (same-or-higher
+    # rank). Backfilling/persisting only when `touched_fields` was
+    # non-empty left exactly that case's fields unprotected: with no
+    # snapshot ever taken, `resolve_field_source` would fall back to
+    # the row's OWN `source`, which the very next block is about to
+    # reassign to THIS call's (trusted) source -- silently making every
+    # untouched field look confirmed by this revalidation too, the
+    # exact bug this whole mechanism exists to prevent. Backfilling
+    # every time (not just when a field was touched) closes that gap:
+    # the snapshot is taken from the CURRENT, not-yet-reassigned
+    # `existing.source`, so it's always correct regardless of what
+    # happens below.
+    field_provenance = _backfill_field_provenance(existing, now=now)
     if touched_fields:
-        field_provenance = _backfill_field_provenance(existing, now=now)
         entry = {"source": source.value, "confidence": confidence, "retrievedAt": now.isoformat()}
         for field_name in touched_fields:
             field_provenance[field_name] = entry
-        existing.field_provenance_json = _dump_field_provenance(field_provenance)
+    existing.field_provenance_json = _dump_field_provenance(field_provenance)
 
     # Record-level provenance stays honest (task requirement 5): only
     # actually move `source`/`confidence` when the incoming contribution
@@ -394,22 +454,33 @@ def merge_verified_fields(
     # generated (GEMINI) claim is real data worth storing -- outranking
     # a bare OCR guess -- but it is NOT a human/regulatory confirmation.
     # Only a REGULATORY_LOOKUP (or CURATED_SEED) source may promote a
-    # row all the way to VERIFIED and set `risk_assessment_available`,
-    # which is what actually lets `riskLevel` start influencing the
-    # Health Score (see `food_analysis._score_and_warnings`) -- letting
-    # a GEMINI-sourced merge do that would silently let an AI-suggested
-    # risk assessment move the score, exactly what the data-quality task
-    # (commit 1d8c3d9) exists to prevent. A GEMINI-sourced merge instead
-    # promotes only to LIMITED_DATA -- real content, not yet confirmed.
-    # This branch is also what advances `last_verified_at` on a
-    # successful stale revalidation -- both `TRUSTED_INGREDIENT_SOURCES`
-    # members always satisfy this rank check.
+    # row's RECORD-level `verification_status` all the way to VERIFIED
+    # -- letting a GEMINI-sourced merge do that would silently let an
+    # AI-suggested claim look confirmed, exactly what the data-quality
+    # task (commit 1d8c3d9) exists to prevent. A GEMINI-sourced merge
+    # instead promotes only to LIMITED_DATA -- real content, not yet
+    # confirmed. This branch is also what advances `last_verified_at`
+    # on a successful stale revalidation -- both
+    # `TRUSTED_INGREDIENT_SOURCES` members always satisfy this rank
+    # check.
     if SOURCE_PRIORITY[source] >= SOURCE_PRIORITY[IngredientSource.REGULATORY_LOOKUP]:
         existing.verification_status = IngredientVerificationStatus.VERIFIED
         existing.last_verified_at = now
-        existing.risk_assessment_available = True
     elif source == IngredientSource.GEMINI:
         existing.verification_status = IngredientVerificationStatus.LIMITED_DATA
+    # PR #13 review round 3 ("risk assessment and citation provenance
+    # field-specific"): `risk_assessment_available` -- what actually
+    # lets `riskLevel` start influencing the Health Score (see
+    # `food_analysis._score_and_warnings`) -- must be field-specific,
+    # not a side effect of ANY trusted merge regardless of which
+    # field(s) it touched. Recomputed every call from `risk_level`'s
+    # OWN resolved provenance (`is_field_trustworthy`, using the
+    # `field_provenance_json` just written/backfilled above) rather
+    # than unconditionally set `True` here -- a regulatory update of
+    # only `description`/`efsa_status` must never promote `risk_level`
+    # by association just because they happened to arrive in the same
+    # call.
+    existing.risk_assessment_available = is_field_trustworthy(existing, "risk_level")
     return True
 
 
@@ -483,52 +554,100 @@ def _build_minimal_row(synthetic: SyntheticIngredient, normalized: str) -> Ingre
     )
 
 
+def _is_provably_weaker_duplicate(alias_owner: Ingredient) -> bool:
+    """True ONLY when `alias_owner` is UNAMBIGUOUSLY a disposable
+    synthetic duplicate that an official-identifier match may safely
+    absorb (PR #13 review round 3: "do not blindly transfer every
+    alias from an existing curated/verified alias owner"): still
+    `UNVERIFIED`, still `OCR_HEURISTIC`-sourced, AND carrying no
+    official identifier of its own. Any one of those failing means
+    `alias_owner` has its own independent, non-disposable identity --
+    curated/verified data is never assumed to be a duplicate of
+    something else no matter what alias it happens to share, and
+    neither is an UNVERIFIED row that has already picked up its OWN
+    distinct `e_number`/`ins_number`/`cas_number` via
+    `_fill_missing_identity_fields` (a genuinely different official
+    identifier than the one that won this conflict -- two real
+    ingredients, not a duplicate)."""
+    return (
+        alias_owner.verification_status == IngredientVerificationStatus.UNVERIFIED
+        and alias_owner.source == IngredientSource.OCR_HEURISTIC
+        and alias_owner.e_number is None
+        and alias_owner.ins_number is None
+        and alias_owner.cas_number is None
+    )
+
+
 async def _reconcile_official_identifier_conflict(
     db: AsyncSession, *, official: Ingredient, alias_owner: Ingredient
 ) -> Ingredient:
     """`official` was resolved via a genuine official identifier
     (E-number/INS/CAS) match -- the strongest canonical-identity proof
     this module has (task requirement 2). `alias_owner` is whatever
-    OLDER/weaker row currently owns the contested normalized-name
-    alias instead -- typically an earlier UNVERIFIED synthetic
-    observation that only ever saw a bare name, never the identifier.
-    PR #13 review fix ("canonical identity precedence"): an official
-    identifier must always outrank a normalized-name alias, so
-    `official` is ALWAYS the return value here, never `alias_owner` --
-    but getting that right must not lose data or silently discard a
-    row something else may depend on:
+    OTHER row currently owns the contested normalized-name alias
+    instead. PR #13 review fix ("canonical identity precedence"): an
+    official identifier must always outrank a normalized-name alias
+    FOR THE CURRENT OBSERVATION, so `official` is ALWAYS the return
+    value here, never `alias_owner` -- but a shared/generic alias text
+    is not, by itself, proof that `alias_owner` is a duplicate of
+    `official`, and getting THAT wrong is exactly the review-round-3
+    regression this function now guards against.
 
-      * every alias `alias_owner` owns (the contested one AND any other
-        name/spelling variant it accumulated) is repointed onto
-        `official`, so every future lookup of any of those names
-        converges on the actually-correct canonical row too, not just
-        the one contested alias -- this is the "preserve ... useful
-        aliases" half of the fix.
-      * `alias_owner` itself is deleted ONLY when that is PROVABLY
-        safe: never when it's curated/verified data (a real, reviewed
-        row is never silently discarded, regardless of any alias
-        conflict), and never while any `Product.ingredient_ids` still
-        references its id (deleting it would leave that product with a
-        dangling ingredient reference) -- this is the "preserve
-        existing product relationships" half. Both are conservative on
-        purpose: this reconciliation has no way to safely MERGE two
-        different products' ingredient lists, so it never attempts to.
-      * when deletion isn't safe, `alias_owner` is simply left in
-        place -- unreachable by name from now on (every alias points at
-        `official`), but still perfectly valid for whatever already
-        references its id directly. That is the deterministic outcome
-        when both rows already have product references: neither row is
-        touched or merged, only the alias index converges, so every
-        existing product keeps exactly the ingredient row it already
-        had.
+    Two genuinely different cases (`_is_provably_weaker_duplicate`):
+
+      * `alias_owner` is UNAMBIGUOUSLY a disposable synthetic
+        duplicate (still UNVERIFIED, still OCR_HEURISTIC, no official
+        identifier of its own) -- e.g. an earlier scan that only ever
+        saw a bare name, never an identifier. Safe to fully absorb:
+        every alias it owns (the contested one AND any other name/
+        spelling variant it accumulated) is repointed onto `official`,
+        so every future lookup of any of those names converges on the
+        actually-correct canonical row too. `alias_owner` itself is
+        then deleted ONLY when that is ALSO provably safe -- never
+        while any `Product.ingredient_ids` still references its id
+        (deleting it would leave that product with a dangling
+        ingredient reference; a redundant curated/verified re-check
+        stays here too, defense in depth, even though
+        `_is_provably_weaker_duplicate` already ruled that out). When
+        deletion isn't safe, `alias_owner` is simply left in place --
+        unreachable by name from now on, but still perfectly valid for
+        whatever already references its id directly. That is the
+        deterministic outcome for a referenced synthetic loser: neither
+        row is touched or merged, only the alias index converges.
+
+      * `alias_owner` is NOT provably a duplicate -- it is itself
+        curated/verified data, `LIMITED_DATA`, or an UNVERIFIED row
+        that already carries its OWN distinct official identifier. A
+        coincidentally-shared generic alias (e.g. two genuinely
+        different, independently VERIFIED additives that both happen
+        to also be known by the same generic family name, each with
+        its own DIFFERENT E-number) is never treated as proof they are
+        the same ingredient -- doing so would silently corrupt
+        `alias_owner`'s legitimate identity based on an unrelated
+        match. The alias table is left COMPLETELY untouched (no
+        repoint, no delete): `official` still wins for the current
+        observation (the product being analyzed right now correctly
+        references `official`'s id), but any THIRD, later lookup of
+        that same ambiguous alias text alone (no identifier attached)
+        deterministically continues to resolve to whichever row
+        already legitimately owned it -- exactly as ambiguous data
+        should behave: preserved, not silently overwritten by
+        pretending one later match settles it.
     """
     if alias_owner.id == official.id:
+        return official
+
+    if not _is_provably_weaker_duplicate(alias_owner):
         return official
 
     for other_alias in await ingredient_alias_repository.list_for_ingredient(db, alias_owner.id):
         other_alias.ingredient_id = official.id
     await db.flush()
 
+    # Defense in depth: `_is_provably_weaker_duplicate` above already
+    # guarantees this, but a row this consequential (an outright
+    # DELETE) is worth a second, independent check rather than relying
+    # on a single gate never regressing.
     is_curated_or_verified = (
         alias_owner.verification_status == IngredientVerificationStatus.VERIFIED
         or alias_owner.source == IngredientSource.CURATED_SEED

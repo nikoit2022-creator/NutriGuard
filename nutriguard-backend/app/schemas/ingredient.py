@@ -1,14 +1,16 @@
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
-from pydantic import Field, computed_field, field_serializer
+from pydantic import Field, PrivateAttr, computed_field, field_serializer
 
 from app.core.config import settings
 from app.models.enums import ApprovalStatus, IngredientSource, IngredientVerificationStatus, RiskLevel
 from app.schemas.common import ORMModel
-from app.services.ingredient_catalog import resolve_field_source
+from app.services.ingredient_catalog import parse_field_provenance, resolve_parsed_field_source
 from app.services.ingredient_regulatory import (
     derive_gated_adi_range_mg_per_kg_bw_per_day,
     derive_gated_approval_status,
+    is_authoritative_regulatory_source,
 )
 
 
@@ -61,6 +63,14 @@ class IngredientOut(ORMModel):
     # (see app.services.ocr_normalizer.SyntheticIngredient) -- `riskLevel`
     # above is then a safe, non-alarming placeholder (SAFE), never a
     # keyword guess, and callers must not treat it as an assessment.
+    # PR #13 review round 3: also field-specific for a row that HAS
+    # been through a partial scientific/regulatory merge -- `True` only
+    # when `riskLevel` itself (not some other field the same trusted
+    # merge happened to also touch) has trusted, VERIFIED provenance
+    # (see `ingredient_catalog.merge_verified_fields`'s write-time
+    # computation via `is_field_trustworthy`). This is also what
+    # `food_analysis._score_and_warnings` gates an ingredient's
+    # contribution to the Health Score on.
     risk_assessment_available: bool = True
 
     # --- Provenance (persistent ingredient knowledge cache, requirement 3) ---
@@ -74,7 +84,8 @@ class IngredientOut(ORMModel):
     # Once a row HAS been through a partial merge, per-field gating
     # below (`efsaApprovalStatus`/`fdaApprovalStatus`/`adiMin...`/
     # `adiMax...`) resolves that specific field's own true source
-    # instead -- see `field_provenance_json`/`resolve_field_source`.
+    # instead -- see `field_provenance_json`/`_field_provenance`/
+    # `resolve_parsed_field_source`.
     verification_status: IngredientVerificationStatus = IngredientVerificationStatus.VERIFIED
     source: IngredientSource | None = None
     source_record_id: str | None = None
@@ -88,9 +99,19 @@ class IngredientOut(ORMModel):
     # "scientific/regulatory provenance truthful") -- a partial merge
     # must never make an untouched field's approval/ADI gating look
     # like it came from whatever source most recently touched a
-    # DIFFERENT field on this row. See
-    # `app.services.ingredient_catalog.resolve_field_source`.
+    # DIFFERENT field on this row. See `_field_provenance` below and
+    # `app.services.ingredient_catalog.parse_field_provenance`.
     field_provenance_json: str | None = Field(default=None, exclude=True, repr=False)
+    # Private (not a schema field -- never validated/serialized): the
+    # ONE parse of `field_provenance_json`, computed once in
+    # `model_post_init` and reused by every `@computed_field` below
+    # that needs a per-field source (code-review efficiency fix -- this
+    # row's several EFSA/FDA/ADI/risk-rationale computed fields used to
+    # each independently re-parse the same small JSON string).
+    _field_provenance: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
+
+    def model_post_init(self, __context: Any) -> None:
+        self._field_provenance = parse_field_provenance(self.field_provenance_json)
 
     # `None` -- not True, not False -- whenever this specific status is
     # genuinely unknown (always the case for an UNVERIFIED OCR/Gemini
@@ -139,8 +160,19 @@ class IngredientOut(ORMModel):
     def risk_rationale(self) -> str | None:
         """Why `riskLevel` is what it is, reusing the ingredient's own
         curated evidence-level text -- never a fabricated explanation.
-        `None` whenever there is no real assessment to explain."""
+        `None` whenever there is no real assessment to explain. PR #13
+        review round 3 ("risk assessment ... provenance field-
+        specific"): gated on BOTH `riskAssessmentAvailable` (itself
+        now field-specific to `riskLevel` -- see
+        `ingredient_catalog.merge_verified_fields`) AND `evidenceLevel`
+        having its OWN trusted provenance -- a trusted, confirmed
+        `riskLevel` paired with still-untrusted `evidenceLevel` text
+        (e.g. only `riskLevel` itself was ever independently merged)
+        must not present that text as if it were also confirmed."""
         if not self.risk_assessment_available:
+            return None
+        evidence_source = resolve_parsed_field_source(self._field_provenance, "evidence_level", fallback=self.source)
+        if not is_authoritative_regulatory_source(self.verification_status, evidence_source):
             return None
         return self.evidence_level or None
 
@@ -154,13 +186,13 @@ class IngredientOut(ORMModel):
         Gemini/OCR-sourced `efsaStatus` string can never surface here as
         a real approval, no matter what it says. Gated on `efsaStatus`'s
         OWN true source (PR #13 review fix), not blindly this row's
-        record-level `source` -- see `resolve_field_source`: a partial
-        merge that only ever touched some OTHER field must never make
-        an untouched `efsaStatus` look regulatory-confirmed."""
+        record-level `source` -- see `resolve_parsed_field_source`: a
+        partial merge that only ever touched some OTHER field must
+        never make an untouched `efsaStatus` look regulatory-confirmed."""
         return derive_gated_approval_status(
             self.efsa_status,
             verification_status=self.verification_status,
-            source=resolve_field_source(self.field_provenance_json, "efsa_status", fallback=self.source),
+            source=resolve_parsed_field_source(self._field_provenance, "efsa_status", fallback=self.source),
         )
 
     @computed_field  # type: ignore[prop-decorator]
@@ -171,7 +203,7 @@ class IngredientOut(ORMModel):
         return derive_gated_approval_status(
             self.fda_status,
             verification_status=self.verification_status,
-            source=resolve_field_source(self.field_provenance_json, "fda_status", fallback=self.source),
+            source=resolve_parsed_field_source(self._field_provenance, "fda_status", fallback=self.source),
         )
 
     @computed_field  # type: ignore[prop-decorator]
@@ -180,7 +212,7 @@ class IngredientOut(ORMModel):
         return derive_gated_adi_range_mg_per_kg_bw_per_day(
             self.acceptable_daily_intake,
             verification_status=self.verification_status,
-            source=resolve_field_source(self.field_provenance_json, "acceptable_daily_intake", fallback=self.source),
+            source=resolve_parsed_field_source(self._field_provenance, "acceptable_daily_intake", fallback=self.source),
         )[0]
 
     @computed_field  # type: ignore[prop-decorator]
@@ -189,7 +221,7 @@ class IngredientOut(ORMModel):
         return derive_gated_adi_range_mg_per_kg_bw_per_day(
             self.acceptable_daily_intake,
             verification_status=self.verification_status,
-            source=resolve_field_source(self.field_provenance_json, "acceptable_daily_intake", fallback=self.source),
+            source=resolve_parsed_field_source(self._field_provenance, "acceptable_daily_intake", fallback=self.source),
         )[1]
 
     @computed_field  # type: ignore[prop-decorator]
@@ -197,13 +229,22 @@ class IngredientOut(ORMModel):
     def adi_source(self) -> str | None:
         """The verified citation backing the numeric ADI range, only
         ever populated alongside an actual parsed, GATED number (see
-        `adi_min_mg_per_kg_bw_per_day`)."""
+        `adi_min_mg_per_kg_bw_per_day`). PR #13 review round 3: also
+        gated on `references` itself having COMPATIBLE trusted
+        provenance -- a genuinely regulatory-confirmed ADI number
+        paired with an older/untouched, still-untrusted `references`
+        string (e.g. only `acceptableDailyIntake` was independently
+        merged, never `references`) must not present that citation as
+        if it also backed this specific ADI figure."""
         min_value, _ = derive_gated_adi_range_mg_per_kg_bw_per_day(
             self.acceptable_daily_intake,
             verification_status=self.verification_status,
-            source=resolve_field_source(self.field_provenance_json, "acceptable_daily_intake", fallback=self.source),
+            source=resolve_parsed_field_source(self._field_provenance, "acceptable_daily_intake", fallback=self.source),
         )
         if min_value is None:
+            return None
+        references_source = resolve_parsed_field_source(self._field_provenance, "references", fallback=self.source)
+        if not is_authoritative_regulatory_source(self.verification_status, references_source):
             return None
         return self.references or None
 

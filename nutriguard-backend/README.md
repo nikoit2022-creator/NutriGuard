@@ -12,6 +12,40 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V18 (PR #13 review round 3 -- ambiguous-alias safety, field-specific
+risk/citation provenance):** Two further review blockers on the same
+branch: `_reconcile_official_identifier_conflict` (V17) used to
+repoint EVERY alias away from the alias-owning "loser" before checking
+whether it was actually a disposable duplicate — corrupting a
+legitimate, coincidentally-shared alias between two independently
+VERIFIED/curated rows with different official identifiers. Aliases are
+now only ever transferred when the loser is UNAMBIGUOUSLY a weaker
+duplicate (still `UNVERIFIED`, still `OCR_HEURISTIC`, no official
+identifier of its own — `_is_provably_weaker_duplicate`); otherwise
+the alias table is left completely untouched (ambiguity preserved, not
+silently resolved), while the official identifier still wins for the
+current observation. Separately, `merge_verified_fields` used to
+promote record-level `verification_status=VERIFIED` and
+`risk_assessment_available=True` for ANY trusted merge regardless of
+which field(s) it actually touched — a partial regulatory update of
+only `description`/`efsa_status` could make an untouched, never-
+confirmed `risk_level` start influencing the Health Score.
+`risk_assessment_available` is now recomputed every call from
+`risk_level`'s own resolved per-field provenance
+(`is_field_trustworthy`, reusing V17's `field_provenance_json`); it
+must be genuinely earned, not inherited from a sibling field's
+confirmation. `riskRationale`/`adiSource` (both `IngredientOut` and
+`food_analysis._ingredient_out_dict`) are now additionally gated on
+`evidence_level`'s/`references`' OWN trusted provenance respectively,
+on top of the already-field-specific `risk_level`/
+`acceptable_daily_intake` gates. Also corrected a round-2 documentation
+error: the Android `IngredientDto.fromJson` JSON-parsing layer itself
+already loses a real `null` (`org.json.JSONObject.has()` is `true` for
+an explicit JSON `null`, not just a present key) — round 2's write-up
+had incorrectly cleared this layer. See deviation item 16 in section 6
+for the full breakdown, and the Android nullable-dietary-flags write-up
+below it for the corrected two-layer finding.
+
 **V17 (PR #13 review round 2 -- canonical identity precedence,
 truthful per-field provenance):** Two further review blockers on the
 same branch, fixed without reopening V16's own scope: an official
@@ -1232,7 +1266,98 @@ than silently resolved:
       text (documenting the new per-field gating), no field/type/shape
       changed.
 
-### Android nullable-dietary-flags contract check (PR #13 review round 2)
+16. **PR #13 review round 3: ambiguous-alias safety + field-specific
+    risk/citation provenance.** Two further blockers found on a third
+    review pass over items 14/15, both fixed on the same branch/PR:
+    - **Never blindly transfer aliases away from a curated/verified (or
+      otherwise non-disposable) row.** `_reconcile_official_identifier_conflict`
+      (item 15) repointed EVERY alias `alias_owner` held onto the
+      winning `official` row BEFORE checking whether `alias_owner` was
+      actually a disposable duplicate — so two DISTINCT, independently
+      VERIFIED/curated additives with DIFFERENT E-numbers that happen
+      to also share a generic normalized alias (a real, if unfortunate,
+      curated-data scenario) could have that shared alias silently
+      reassigned just because ONE of them was resolved via its own
+      official identifier in some later observation. Fixed with a new
+      gate, `_is_provably_weaker_duplicate`: aliases are transferred
+      ONLY when the loser is unambiguously disposable — still
+      `UNVERIFIED`, still `OCR_HEURISTIC`-sourced, AND carrying no
+      `e_number`/`ins_number`/`cas_number` of its own (an UNVERIFIED row
+      that already picked up its OWN distinct identifier via
+      `_fill_missing_identity_fields` is a genuinely different
+      ingredient, not a duplicate, either). Otherwise the alias table is
+      left completely untouched — ambiguity is preserved, never
+      silently "resolved" by whichever official-identifier match
+      happened to arrive later — while the official identifier still
+      wins for the CURRENT observation (the product being analyzed
+      right now still correctly references the right row). Covered by
+      `tests/integration/test_ingredient_catalog.py` (a curated/
+      verified loser whose alias must survive untouched; two distinct
+      VERIFIED rows sharing a generic alias; an UNVERIFIED loser that
+      already carries its own distinct identifier) and
+      `tests/postgres/test_official_identifier_precedence_postgres.py`
+      (concurrent reconciliation across all four scenarios — a
+      provably-weak duplicate, two ambiguous verified rows, a
+      product-referenced loser, and a genuinely-new-name three-way race
+      — run repeatedly against a disposable Postgres 16 with no
+      flakiness observed).
+    - **Risk assessment and citation provenance made field-specific.**
+      `merge_verified_fields` used to promote record-level
+      `verification_status=VERIFIED` AND `risk_assessment_available=True`
+      for ANY trusted (`CURATED_SEED`/`REGULATORY_LOOKUP`) merge,
+      regardless of which field(s) it actually supplied — a partial
+      regulatory update of only `description` or `efsa_status` could
+      make an untouched, never-actually-confirmed `risk_level` start
+      influencing the Health Score
+      (`food_analysis._score_and_warnings`, which gates an ingredient's
+      contribution purely on the stored `risk_assessment_available`
+      column). `risk_assessment_available` is now recomputed on every
+      `merge_verified_fields` call from `risk_level`'s OWN resolved
+      per-field provenance (`ingredient_catalog.is_field_trustworthy`,
+      built on item 15's `field_provenance_json`/`resolve_field_source`)
+      rather than unconditionally set — a field must be genuinely
+      touched by a trusted source to count, never merely inherit trust
+      from a sibling field the same call happened to also update. Since
+      `food_analysis._score_and_warnings` and `IngredientOut`'s plain
+      `riskAssessmentAvailable` pass-through both already read this one
+      stored column directly, fixing the write path alone correctly
+      fixes both the API response AND the Health Score in one place —
+      no separate read-time gating needed there. `riskRationale` (both
+      `IngredientOut` and `food_analysis._ingredient_out_dict`) is now
+      ALSO gated on `evidence_level` having its own trusted provenance,
+      on top of the existing `risk_assessment_available` gate — a
+      trusted, confirmed `risk_level` paired with still-untrusted
+      `evidence_level` text no longer presents that text as if it were
+      also confirmed. `adiSource` is now ALSO gated on `references`
+      having compatible trusted provenance, on top of the existing
+      gated ADI-number check — a genuinely regulatory-confirmed ADI
+      figure paired with an untouched, still-untrusted `references`
+      string no longer presents that citation as if it backed this
+      specific number. EFSA/FDA/ADI-number gating (item 15) is
+      unaffected and remains exactly as field-specific as before.
+      Covered by `tests/unit/test_ingredient_catalog_pure.py` (partial
+      merges touching `risk_level` vs. not, in both orders, and a
+      later unrelated partial merge that must not revoke an already-
+      earned `risk_assessment_available`),
+      `tests/unit/test_ingredient_schema_data_quality.py`,
+      `tests/unit/test_food_analysis_ingredient_out_dict.py`, and
+      `tests/unit/test_food_analysis_risk_scoring.py` (an end-to-end
+      test running the REAL `merge_verified_fields` write path into
+      `_score_and_warnings`, proving a partial `description`-only
+      regulatory merge never lets a stale HIGH_CONCERN `risk_level`
+      deduct from the Health Score).
+    - Also corrected a round-2 documentation error (no code change):
+      the Android JSON-parsing layer itself (not just the later
+      `toEntities()` mapping) already loses a real `null` for these six
+      flags — see the corrected "Android nullable-dietary-flags
+      contract check" write-up immediately below.
+    - All changes additive/backward-compatible, pure logic changes with
+      NO schema/migration impact; diffed against a pinned-dependency
+      (`requirements.txt`) regeneration of `openapi.json` — only two
+      computed-field descriptions changed text (documenting the new
+      `riskRationale`/`adiSource` gating), no field/type/shape changed.
+
+### Android nullable-dietary-flags contract check (PR #13 review rounds 2 + 3)
 
 Requested by the review: verify whether the Android client currently
 converts a `null` `isGluten`/`isLactose`/`isVegan`/`isVegetarian`/
@@ -1242,40 +1367,52 @@ fabricated default, and identify the exact follow-up if so. **No
 Android source was modified to answer this** (out of scope for this
 backend-only branch — see CLAUDE.md section 11); this is a report only.
 
-**Finding: yes, it does.**
+**Finding: yes, it does — at TWO layers, not one.** Round 2's write-up
+below incorrectly cleared the JSON-parsing layer; round 3's review
+caught the actual bug there and it is corrected here.
 
 - **Endpoint**: any response carrying an `ingredients[]` array with the
   `IngredientOut` shape — `POST /api/v1/scan/label-image`,
   `POST /api/v1/scan/barcode`, `GET /api/v1/products/{barcode}`,
   `GET /api/v1/ingredients/{id}` (API Contract 5.4/7.x).
-- **Contract as specified vs. as actually implemented on the wire**:
-  the backend correctly sends real `null` for a genuinely-unknown flag
-  (item 14) — this is honored end-to-end on the network-parsing side
-  of the client too. `com.example.data.remote.dto.IngredientDto` (in
-  `android-app/app/src/main/java/com/example/data/remote/dto/
-  ScanLabelImageDtos.kt`, lines ~152–157) correctly declares all six as
-  nullable (`Boolean?`), and its manual `fromJson` (lines ~187–192)
-  correctly preserves a real JSON `null` as Kotlin `null` via
-  `if (json.has(...)) json.optBoolean(...) else null` — so nothing is
-  lost or silently coerced at the point the JSON is actually parsed.
-- **The actual mismatch**: `List<IngredientDto>.toEntities(idPrefix)`
-  (same file, lines ~276–312), which maps the parsed DTO into the
-  persisted Room entity `com.example.data.model.IngredientEntity`
+- **Layer 1 — JSON parsing itself already loses `null` (round 3
+  correction).** `com.example.data.remote.dto.IngredientDto.fromJson`
+  (`android-app/app/src/main/java/com/example/data/remote/dto/
+  ScanLabelImageDtos.kt`, lines ~187–192) reads:
+  `if (json.has("isGluten")) json.optBoolean("isGluten") else null`
+  (and identically for the other five). `org.json.JSONObject.has(name)`
+  returns `true` whenever the key is PRESENT, even when its value is a
+  real JSON `null` (`org.json` represents an explicit JSON `null` as
+  the `JSONObject.NULL` sentinel object, not a Java `null` — `has()`
+  only checks for the key's absence, not its value). So for a genuine
+  `"isGluten": null` in the response, `json.has("isGluten")` is `true`,
+  the `else null` branch is never taken, and `json.optBoolean("isGluten")`
+  is called instead — which cannot coerce `JSONObject.NULL` to a
+  boolean and silently returns its default, `false`. The real `null`
+  is lost right here, before `IngredientDto` (which correctly declares
+  all six as nullable `Boolean?`, lines ~152–157) ever gets to hold it
+  — `IngredientDto.isGluten` ends up `false`, not `null`, for a
+  genuinely-unknown flag. The correct check is `!json.isNull("isGluten")`
+  (which — unlike `has()` — is `true` only when the key exists AND its
+  value is not JSON `null`, covering both "missing" and "explicit null"
+  in one condition), not `has()`.
+- **Layer 2 — `toEntities()` then ALSO fabricates a default on top**
+  (round 2 finding, still accurate on its own terms once layer 1 is
+  fixed). `List<IngredientDto>.toEntities(idPrefix)` (same file, lines
+  ~276–312) maps the (layer-1-broken) DTO into the persisted Room
+  entity `com.example.data.model.IngredientEntity`
   (`android-app/app/src/main/java/com/example/data/model/
   IngredientEntity.kt`, itself still declaring all six as
   non-nullable `Boolean` with the same fabricated-looking defaults the
   backend fix eliminated: `isGluten`/`isLactose` default `false`,
-  `isVegan`/`isVegetarian`/`isHalal`/`isKosher` default `true`),
-  converts the honest `null` right back into exactly that fabricated
-  default at lines 298–303:
-  `isGluten = ing.isGluten ?: false`, `isLactose = ing.isLactose ?: false`,
-  `isVegan = ing.isVegan ?: true`, `isVegetarian = ing.isVegetarian ?: true`,
-  `isHalal = ing.isHalal ?: true`, `isKosher = ing.isKosher ?: true`.
-  A `null` (genuinely unknown, e.g. every UNVERIFIED OCR/Gemini
-  ingredient this backend catalogs) is persisted to the local
-  `ingredients` table as a real, positive `true`/`false` certification
-  claim — the same class of fabrication item 14 exists to prevent, now
-  reintroduced one layer downstream, entirely inside Android.
+  `isVegan`/`isVegetarian`/`isHalal`/`isKosher` default `true`), at
+  lines 298–303: `isGluten = ing.isGluten ?: false`,
+  `isLactose = ing.isLactose ?: false`, `isVegan = ing.isVegan ?: true`,
+  `isVegetarian = ing.isVegetarian ?: true`, `isHalal = ing.isHalal ?: true`,
+  `isKosher = ing.isKosher ?: true`. Even AFTER layer 1 is fixed and
+  `IngredientDto` correctly holds a real Kotlin `null`, this second
+  layer would independently re-fabricate the exact same default —
+  fixing only layer 1 is not sufficient; both must be fixed together.
 - **Current blast radius (checked, not assumed)**: today this is
   latent, not yet user-visible. No Android UI component reads
   `IngredientEntity.isGluten`/`isVegan`/etc. at all (`IngredientChip.kt`,
@@ -1290,17 +1427,25 @@ backend-only branch — see CLAUDE.md section 11); this is a report only.
   persisted, incorrect data sitting in the local DB, one `IngredientDao`
   query away from silently backing a future per-ingredient dietary
   badge or warning with zero real evidence.
-- **What would need to change, and where**: on the Android side only
-  (backend is already correct and unaffected) —
-  `IngredientEntity`'s six dietary-identity columns need to become
-  `Boolean?` (a Room schema migration, additive/nullable — the same
-  shape of change as this backend's own `f5a6b7c8d9e0`), and
-  `toEntities`'s six `?: false`/`?: true` fallbacks need to become a
-  straight pass-through (`ing.isGluten`, not `ing.isGluten ?: false`,
-  etc.) so a real `null` stays `null` all the way into the local DB.
-  This is Android-client work and is intentionally not made on this
-  backend-only branch (CLAUDE.md section 11) — flagged here for
-  AI Studio/Android ownership.
+- **What would need to change, and where — both layers, on the Android
+  side only** (backend is already correct and unaffected):
+  1. `IngredientDto.fromJson`: replace each `if (json.has(field)) ...`
+     guard with `if (!json.isNull(field)) json.optBoolean(field) else null`
+     (or equivalently keep `has()` but also require `!json.isNull(field)`)
+     for all six flags, so a real JSON `null` is actually preserved as
+     Kotlin `null` at the point of parsing.
+  2. `IngredientEntity`'s six dietary-identity columns need to become
+     `Boolean?` (a Room schema migration, additive/nullable — the same
+     shape of change as this backend's own `f5a6b7c8d9e0`) so the
+     Room/domain representation is even CAPABLE of retaining UNKNOWN,
+     and `toEntities`'s six `?: false`/`?: true` fallbacks need to
+     become a straight pass-through (`ing.isGluten`, not
+     `ing.isGluten ?: false`, etc.) so a real `null` — now correctly
+     surviving layer 1 — stays `null` all the way into the local DB.
+  Neither fix alone is sufficient; the future Android task must land
+  both together. This is Android-client work and is intentionally not
+  made on this backend-only branch (CLAUDE.md section 11) — flagged
+  here for AI Studio/Android ownership.
 
 No other ambiguities were found that required deviating from the
 contract; where the contract was silent on an implementation detail

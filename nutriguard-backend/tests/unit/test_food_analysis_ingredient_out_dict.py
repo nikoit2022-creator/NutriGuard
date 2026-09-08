@@ -93,3 +93,66 @@ def test_a_row_that_never_went_through_a_partial_merge_is_unaffected():
     assert result["efsaApprovalStatus"] == "APPROVED"
     assert result["adiMinMgPerKgBwPerDay"] == 0.0
     assert result["adiMaxMgPerKgBwPerDay"] == 40.0
+    assert result["riskRationale"] == "Moderate Evidence"
+    assert result["adiSource"] == "WHO IARC Monograph Vol 134 (2023)"
+
+
+# --- PR #13 review round 3: field-specific risk/citation provenance --------
+
+
+def test_risk_rationale_ungated_when_evidence_level_lacks_trusted_provenance():
+    """Mirrors the equivalent `IngredientOut` schema-level test: a
+    trusted, VERIFIED row with `riskAssessmentAvailable=True` (i.e.
+    `riskLevel` itself is trusted) must still hide `riskRationale` when
+    `evidenceLevel` -- the text it reuses -- has its own untrusted
+    (GEMINI) provenance."""
+    field_provenance_json = json.dumps(
+        {
+            "risk_level": {
+                "source": "REGULATORY_LOOKUP", "confidence": 0.9, "retrievedAt": "2026-01-01T00:00:00+00:00"
+            },
+            "evidence_level": {"source": "GEMINI", "confidence": 0.8, "retrievedAt": "2025-01-01T00:00:00+00:00"},
+        }
+    )
+    row = _curated_row(field_provenance_json=field_provenance_json)
+
+    result = _ingredient_out_dict(row)
+
+    assert result["riskRationale"] is None
+
+
+def test_adi_source_ungated_when_references_lacks_trusted_provenance():
+    field_provenance_json = json.dumps(
+        {
+            "acceptable_daily_intake": {
+                "source": "REGULATORY_LOOKUP", "confidence": 0.9, "retrievedAt": "2026-01-01T00:00:00+00:00"
+            },
+            "references": {"source": "GEMINI", "confidence": 0.8, "retrievedAt": "2025-01-01T00:00:00+00:00"},
+        }
+    )
+    row = _curated_row(field_provenance_json=field_provenance_json)
+
+    result = _ingredient_out_dict(row)
+
+    assert result["adiMinMgPerKgBwPerDay"] == 0.0
+    assert result["adiSource"] is None
+
+
+def test_risk_assessment_available_and_risk_rationale_false_for_an_untrusted_risk_level():
+    """The row-level `riskAssessmentAvailable` this function reads
+    (`getattr(ing, "risk_assessment_available", True)`) is now computed
+    field-specifically by `merge_verified_fields` itself -- this test
+    documents that this dict-mirror path correctly reflects a `False`
+    stored value (an untrusted `riskLevel`) by hiding `riskRationale`
+    too, regardless of `evidenceLevel`'s own provenance."""
+    row = _curated_row(
+        risk_assessment_available=False,
+        field_provenance_json=json.dumps(
+            {"evidence_level": {"source": "REGULATORY_LOOKUP", "confidence": 0.9, "retrievedAt": "2026-01-01T00:00:00+00:00"}}
+        ),
+    )
+
+    result = _ingredient_out_dict(row)
+
+    assert result["riskAssessmentAvailable"] is False
+    assert result["riskRationale"] is None

@@ -438,16 +438,36 @@ def _ingredient_out_dict(ing: Any) -> dict:
     # PR #13 review fix ("scientific/regulatory provenance truthful"):
     # gate each field on ITS OWN true source, not blindly this row's
     # record-level `source` -- a partial `merge_verified_fields` call
-    # that only ever touched one of these three fields must never make
-    # an untouched one look regulatory-confirmed too. See
-    # `ingredient_catalog.resolve_field_source`; falls back to `source`
-    # itself for a row that predates per-field tracking or a
+    # that only ever touched some of these five fields must never make
+    # an untouched one look regulatory-confirmed too. Parsed ONCE
+    # (code-review efficiency fix) via `ingredient_catalog.
+    # parse_field_provenance` and resolved per field with
+    # `resolve_parsed_field_source`, rather than re-parsing the same
+    # small JSON string once per field; falls back to `source` itself
+    # for a row that predates per-field tracking or a
     # `SyntheticIngredient` (has no `field_provenance_json` at all).
-    field_provenance_json = getattr(ing, "field_provenance_json", None)
-    efsa_source = ingredient_catalog.resolve_field_source(field_provenance_json, "efsa_status", fallback=source)
-    fda_source = ingredient_catalog.resolve_field_source(field_provenance_json, "fda_status", fallback=source)
-    adi_source_resolved = ingredient_catalog.resolve_field_source(
-        field_provenance_json, "acceptable_daily_intake", fallback=source
+    field_provenance = ingredient_catalog.parse_field_provenance(getattr(ing, "field_provenance_json", None))
+    efsa_source = ingredient_catalog.resolve_parsed_field_source(field_provenance, "efsa_status", fallback=source)
+    fda_source = ingredient_catalog.resolve_parsed_field_source(field_provenance, "fda_status", fallback=source)
+    adi_source_resolved = ingredient_catalog.resolve_parsed_field_source(
+        field_provenance, "acceptable_daily_intake", fallback=source
+    )
+    # PR #13 review round 3 ("risk assessment and citation provenance
+    # field-specific"): `riskRationale`/`adiSource` must not present
+    # `evidenceLevel`/`references` text as confirmed unless THAT
+    # specific field also has trusted provenance -- a trusted merge
+    # that only touched `riskLevel`/`acceptableDailyIntake` must not
+    # make an untouched `evidenceLevel`/`references` look confirmed by
+    # association.
+    evidence_level_source = ingredient_catalog.resolve_parsed_field_source(
+        field_provenance, "evidence_level", fallback=source
+    )
+    references_source = ingredient_catalog.resolve_parsed_field_source(field_provenance, "references", fallback=source)
+    evidence_level_trusted = ingredient_regulatory.is_authoritative_regulatory_source(
+        verification_status, evidence_level_source
+    )
+    references_trusted = ingredient_regulatory.is_authoritative_regulatory_source(
+        verification_status, references_source
     )
     # Task requirement 4: gated exactly like `IngredientOut`'s own
     # `efsaApprovalStatus`/`fdaApprovalStatus`/`adiMin.../adiMax...` --
@@ -488,7 +508,9 @@ def _ingredient_out_dict(ing: Any) -> dict:
         "references": ing.references,
         "riskLevel": risk_level.value if hasattr(risk_level, "value") else risk_level,
         "riskAssessmentAvailable": risk_assessment_available,
-        "riskRationale": (ing.evidence_level or None) if risk_assessment_available else None,
+        "riskRationale": (
+            (ing.evidence_level or None) if (risk_assessment_available and evidence_level_trusted) else None
+        ),
         "efsaApprovalStatus": ingredient_regulatory.derive_gated_approval_status(
             ing.efsa_status, verification_status=verification_status, source=efsa_source
         ).value,
@@ -497,7 +519,7 @@ def _ingredient_out_dict(ing: Any) -> dict:
         ).value,
         "adiMinMgPerKgBwPerDay": adi_min,
         "adiMaxMgPerKgBwPerDay": adi_max,
-        "adiSource": (ing.references or None) if adi_min is not None else None,
+        "adiSource": (ing.references or None) if (adi_min is not None and references_trusted) else None,
         "verificationStatus": (
             verification_status.value if hasattr(verification_status, "value") else verification_status
         ),
