@@ -6,8 +6,8 @@ from app.core.config import settings
 from app.models.enums import ApprovalStatus, IngredientSource, IngredientVerificationStatus, RiskLevel
 from app.schemas.common import ORMModel
 from app.services.ingredient_regulatory import (
-    derive_adi_range_mg_per_kg_bw_per_day,
-    derive_approval_status,
+    derive_gated_adi_range_mg_per_kg_bw_per_day,
+    derive_gated_approval_status,
 )
 
 
@@ -77,12 +77,18 @@ class IngredientOut(ORMModel):
     confidence: float | None = None
     schema_version: int | None = None
 
-    is_gluten: bool
-    is_lactose: bool
-    is_vegan: bool
-    is_vegetarian: bool
-    is_halal: bool
-    is_kosher: bool
+    # `None` -- not True, not False -- whenever this specific status is
+    # genuinely unknown (always the case for an UNVERIFIED OCR/Gemini
+    # observation; a curated/seeded row always states a real value).
+    # See task requirement 2: `False` would silently claim "confirmed
+    # gluten-/lactose-free" and `True` would silently claim "confirmed
+    # vegan/vegetarian/halal/kosher" with zero evidence behind either.
+    is_gluten: bool | None = None
+    is_lactose: bool | None = None
+    is_vegan: bool | None = None
+    is_vegetarian: bool | None = None
+    is_halal: bool | None = None
+    is_kosher: bool | None = None
 
     bad_for_diabetes: bool
     bad_for_hypertension: bool
@@ -126,32 +132,67 @@ class IngredientOut(ORMModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def efsa_approval_status(self) -> ApprovalStatus:
-        return derive_approval_status(self.efsa_status)
+        """Task requirement 4: gated on the row's own trustworthiness,
+        not just its text -- `NO_INFORMATION` unless this row is
+        `VERIFIED` and `CURATED_SEED`/`REGULATORY_LOOKUP`-sourced (see
+        `ingredient_regulatory.derive_gated_approval_status`). A
+        Gemini/OCR-sourced `efsaStatus` string can never surface here as
+        a real approval, no matter what it says."""
+        return derive_gated_approval_status(
+            self.efsa_status, verification_status=self.verification_status, source=self.source
+        )
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def fda_approval_status(self) -> ApprovalStatus:
-        return derive_approval_status(self.fda_status)
+        """See `efsa_approval_status` above -- identical gating."""
+        return derive_gated_approval_status(
+            self.fda_status, verification_status=self.verification_status, source=self.source
+        )
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def adi_min_mg_per_kg_bw_per_day(self) -> float | None:
-        return derive_adi_range_mg_per_kg_bw_per_day(self.acceptable_daily_intake)[0]
+        return derive_gated_adi_range_mg_per_kg_bw_per_day(
+            self.acceptable_daily_intake, verification_status=self.verification_status, source=self.source
+        )[0]
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def adi_max_mg_per_kg_bw_per_day(self) -> float | None:
-        return derive_adi_range_mg_per_kg_bw_per_day(self.acceptable_daily_intake)[1]
+        return derive_gated_adi_range_mg_per_kg_bw_per_day(
+            self.acceptable_daily_intake, verification_status=self.verification_status, source=self.source
+        )[1]
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def adi_source(self) -> str | None:
         """The verified citation backing the numeric ADI range, only
-        ever populated alongside an actual parsed number."""
-        min_value, _ = derive_adi_range_mg_per_kg_bw_per_day(self.acceptable_daily_intake)
+        ever populated alongside an actual parsed, GATED number (see
+        `adi_min_mg_per_kg_bw_per_day`)."""
+        min_value, _ = derive_gated_adi_range_mg_per_kg_bw_per_day(
+            self.acceptable_daily_intake, verification_status=self.verification_status, source=self.source
+        )
         if min_value is None:
             return None
         return self.references or None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def ins_number_verified(self) -> bool:
+        """Always `False` today (task: review of INS derivation
+        authoritativeness). `insNumber` -- for a curated seed row
+        exactly the same as for an OCR/Gemini row -- is always a
+        MECHANICAL derivation from `eNumber` (see
+        `ingredient_catalog.derive_ins_number_from_e_number`'s own
+        docstring: true for MOST, not all, shared food additives), never
+        independently confirmed against the Codex Alimentarius INS
+        register itself. This field exists so a client can tell the
+        difference between a truly independently-verified identifier and
+        a mechanically-derived one, rather than `insNumber`'s mere
+        presence implying a confidence it doesn't have -- reserved for a
+        future real INS-register lookup to flip to `True`."""
+        return False
 
 
 class IngredientCreate(ORMModel):

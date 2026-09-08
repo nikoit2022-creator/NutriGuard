@@ -224,3 +224,173 @@ def test_merge_ignores_fields_outside_the_mergeable_allowlist():
         confidence=1.0,
     )
     assert changed is False
+
+
+# --- PR #13 review fixes: stale-revalidation + blank-value protection -------
+
+
+def _stale_curated(**overrides) -> _MergeableIngredient:
+    old = NOW - timedelta(seconds=settings.INGREDIENT_VERIFIED_DATA_TTL_SECONDS + 1)
+    base = dict(
+        description="Real curated description.",
+        source=IngredientSource.CURATED_SEED,
+        confidence=1.0,
+        verification_status=IngredientVerificationStatus.VERIFIED,
+        last_verified_at=old,
+    )
+    base.update(overrides)
+    return _MergeableIngredient(**base)
+
+
+def test_same_rank_same_confidence_revalidation_of_stale_data_succeeds():
+    """Task requirement 5a: a trusted provider may revalidate STALE data
+    even with confidence unchanged and field values identical -- the OLD
+    rule (same rank requires a STRICTLY higher confidence) would reject
+    this outright, even though it's the exact same trusted source
+    simply confirming its own earlier answer is still correct."""
+    curated = _stale_curated()
+    changed = merge_verified_fields(
+        curated,
+        fields={"description": "Real curated description."},  # identical value
+        source=IngredientSource.CURATED_SEED,
+        confidence=1.0,  # identical confidence
+        now=NOW,
+    )
+    assert changed is True
+    assert curated.description == "Real curated description."
+    assert curated.source == IngredientSource.CURATED_SEED
+    assert curated.confidence == 1.0
+
+
+def test_stale_revalidation_advances_verification_timestamps():
+    """Task requirement 5b: a successful unchanged revalidation still
+    advances `last_verified_at`/`retrieved_at` -- "confirmed still
+    current as of now" is real provenance even with nothing to change."""
+    curated = _stale_curated()
+    old_last_verified_at = curated.last_verified_at
+    merge_verified_fields(
+        curated,
+        fields={"description": "Real curated description."},
+        source=IngredientSource.CURATED_SEED,
+        confidence=1.0,
+        now=NOW,
+    )
+    assert curated.last_verified_at == NOW
+    assert curated.last_verified_at != old_last_verified_at
+    assert curated.retrieved_at == NOW
+
+
+def test_regulatory_lookup_may_revalidate_a_stale_curated_row():
+    """Task requirement 5d: resolves the contradiction where a curated
+    row IS allowed to go stale, yet a REGULATORY_LOOKUP source (row-level
+    rank 90) could never revalidate a CURATED_SEED row (rank 100) even
+    though both are equally-trusted regulatory-grade sources -- the OLD
+    rank gate rejected this unconditionally. `source`/`confidence` stay
+    CURATED_SEED/1.0 (the row-level provenance is honest: nothing about
+    the CONTENT actually changed, so it must not claim REGULATORY_LOOKUP
+    now supplied it)."""
+    curated = _stale_curated()
+    changed = merge_verified_fields(
+        curated,
+        fields={"description": "Real curated description."},
+        source=IngredientSource.REGULATORY_LOOKUP,
+        confidence=0.8,  # lower confidence than the existing 1.0
+        now=NOW,
+    )
+    assert changed is True
+    assert curated.source == IngredientSource.CURATED_SEED  # unchanged -- honest provenance
+    assert curated.confidence == 1.0  # unchanged
+    assert curated.last_verified_at == NOW  # still advances
+
+
+def test_regulatory_lookup_revalidation_with_genuinely_new_content_updates_provenance():
+    """When a stale-revalidation source ALSO brings genuinely different
+    content, the row's provenance must honestly reflect that the new
+    values actually came from that (possibly lower-ranked) source --
+    never keep claiming the old, higher-ranked source for content it
+    didn't supply (task requirement 5e: honest per-field provenance)."""
+    curated = _stale_curated()
+    changed = merge_verified_fields(
+        curated,
+        fields={"description": "Updated by a fresh regulatory lookup."},
+        source=IngredientSource.REGULATORY_LOOKUP,
+        confidence=0.8,
+        now=NOW,
+    )
+    assert changed is True
+    assert curated.description == "Updated by a fresh regulatory lookup."
+    assert curated.source == IngredientSource.REGULATORY_LOOKUP
+    assert curated.confidence == 0.8
+
+
+def test_non_trusted_source_cannot_revalidate_a_stale_curated_row():
+    """Staleness only ever opens the door BETWEEN the two regulatory-
+    grade sources -- never down to GEMINI/OCR_HEURISTIC, no matter how
+    old the existing data is."""
+    curated = _stale_curated()
+    changed = merge_verified_fields(
+        curated,
+        fields={"description": "An AI guess."},
+        source=IngredientSource.GEMINI,
+        confidence=0.99,
+        now=NOW,
+    )
+    assert changed is False
+    assert curated.description == "Real curated description."
+
+
+def test_fresh_not_stale_data_still_requires_the_normal_rank_and_confidence_gate():
+    """The new stale-revalidation bypass must never apply to FRESH
+    (not-yet-stale) VERIFIED data -- the original protection (task
+    requirement 3) is completely unaffected for the common case."""
+    fresh_curated = _stale_curated(last_verified_at=NOW)  # NOT stale relative to `now=NOW`
+    changed = merge_verified_fields(
+        fresh_curated,
+        fields={"description": "Real curated description."},  # identical value
+        source=IngredientSource.CURATED_SEED,
+        confidence=1.0,  # identical confidence
+        now=NOW,
+    )
+    assert changed is False
+    assert fresh_curated.last_verified_at == NOW  # untouched, not re-set by this call
+
+
+def test_blank_incoming_value_never_erases_a_meaningful_existing_value():
+    """Task requirement 5c: a partial response's blank/null/placeholder
+    field must never erase a meaningful existing value."""
+    stub = _MergeableIngredient(
+        description="Meaningful curated description.",
+        health_concerns="Known real concern.",
+        source=IngredientSource.OCR_HEURISTIC,
+        confidence=0.2,
+    )
+    changed = merge_verified_fields(
+        stub,
+        fields={
+            "description": "",  # blank
+            "health_concerns": "N/A",  # placeholder
+            "purpose_in_food": "A genuinely new value.",  # real -- should still apply
+        },
+        source=IngredientSource.REGULATORY_LOOKUP,
+        confidence=0.9,
+    )
+    assert changed is True
+    assert stub.description == "Meaningful curated description."  # untouched
+    assert stub.health_concerns == "Known real concern."  # untouched
+    assert stub.purpose_in_food == "A genuinely new value."  # applied
+
+
+def test_none_incoming_value_never_erases_an_existing_optional_field():
+    stub = _MergeableIngredient(
+        who_iarc_classification="Group 2B - Possibly Carcinogenic",
+        source=IngredientSource.OCR_HEURISTIC,
+        confidence=0.2,
+    )
+    changed = merge_verified_fields(
+        stub,
+        fields={"who_iarc_classification": None, "description": "A genuinely new value."},
+        source=IngredientSource.REGULATORY_LOOKUP,
+        confidence=0.9,
+    )
+    assert changed is True
+    assert stub.who_iarc_classification == "Group 2B - Possibly Carcinogenic"

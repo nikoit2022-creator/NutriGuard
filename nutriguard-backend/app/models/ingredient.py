@@ -49,11 +49,18 @@ class Ingredient(Base):
     scientific_name: Mapped[str] = mapped_column("scientific_name", String(255), nullable=False, default="")
     e_number: Mapped[str | None] = mapped_column("e_number", String(16), unique=True, nullable=True, index=True)
     # International Numbering System code (Codex Alimentarius) -- for
-    # most food additives numerically identical to the E-number's own
-    # digits (the EU's E-number scheme is built on INS), so it is safe
-    # to derive from a genuine E-number rather than fabricated (see
-    # `ingredient_catalog.derive_ins_number_from_e_number`); left null
-    # rather than guessed when there is no E-number to derive it from.
+    # MOST food additives numerically identical to the E-number's own
+    # digits (the EU's E-number scheme is built on INS), so it is a
+    # reasonable, non-fabricated value to store rather than left blank
+    # (see `ingredient_catalog.derive_ins_number_from_e_number`); left
+    # null rather than guessed when there is no E-number to derive it
+    # from. "Most", not "all", is the honest claim here -- this is a
+    # MECHANICAL derivation, never independently verified against the
+    # Codex INS register itself, for curated seed rows exactly the same
+    # as for an OCR/Gemini row, so it is never presented on the wire as
+    # an independently-confirmed identifier with the same authority as
+    # `e_number` -- see `IngredientOut.ins_number_verified` (always
+    # `False` today; reserved for a future real INS-register lookup).
     ins_number: Mapped[str | None] = mapped_column("ins_number", String(16), unique=True, nullable=True, index=True)
     # Chemical Abstracts Service registry number. Structural support
     # only for now -- not populated for the curated seed data in this
@@ -95,13 +102,25 @@ class Ingredient(Base):
 
     # --- Verification status + provenance (persistent ingredient
     # knowledge cache -- see app.services.ingredient_catalog) ---
-    # Record-level provenance, not per-field: every scientific/
-    # regulatory field on a given row was written together, from one
-    # source, at one point in time (a bulk curated-seed load, or one
-    # OCR/Gemini observation) -- there is no per-field mixed-provenance
-    # case in this codebase to track, so one set of provenance columns
-    # per row is the accurate model, not an arbitrary simplification
-    # (mirrors `ProductSource`'s own per-record provenance design).
+    # Record-level provenance, not per-field, for the SCIENTIFIC/
+    # REGULATORY content columns specifically (`app.services.
+    # ingredient_catalog._MERGEABLE_FIELDS`: description, purpose,
+    # health concerns, EFSA/FDA status, ADI, risk level, ...): every one
+    # of those is written together, from one source, at one point in
+    # time, and `merge_verified_fields` enforces that atomically -- it
+    # only ever moves `source`/`confidence` when it is also the field
+    # values' own real origin, never leaving a row claiming a source for
+    # content that source didn't actually supply (mirrors `ProductSource`'s
+    # own per-record provenance design). The one deliberate, narrow
+    # exception is identity backfill (`_fill_missing_identity_fields`):
+    # a later, lower-trust observation may fill in a still-`None`
+    # `e_number`/`ins_number` on an existing row without moving
+    # `source`, since an identifier is not "scientific/regulatory
+    # content" in the same sense and that function only ever fills an
+    # empty slot, never overwrites one -- this one column pair is
+    # genuinely not represented by a single-source claim, which is why
+    # `ins_number` in particular is never presented as an independently-
+    # verified identifier on the wire (see `IngredientOut.ins_number_verified`).
     verification_status: Mapped[IngredientVerificationStatus] = mapped_column(
         "verification_status",
         Enum(IngredientVerificationStatus, name="ingredient_verification_status", native_enum=True),
@@ -126,12 +145,27 @@ class Ingredient(Base):
     confidence: Mapped[float] = mapped_column("confidence", Numeric(4, 3), nullable=False, default=0)
     schema_version: Mapped[int] = mapped_column("schema_version", Integer, nullable=False, default=1)
 
-    is_gluten: Mapped[bool] = mapped_column("is_gluten", Boolean, default=False)
-    is_lactose: Mapped[bool] = mapped_column("is_lactose", Boolean, default=False)
-    is_vegan: Mapped[bool] = mapped_column("is_vegan", Boolean, default=True)
-    is_vegetarian: Mapped[bool] = mapped_column("is_vegetarian", Boolean, default=True)
-    is_halal: Mapped[bool] = mapped_column("is_halal", Boolean, default=True)
-    is_kosher: Mapped[bool] = mapped_column("is_kosher", Boolean, default=True)
+    # Nullable (migration f5a6b7c8d9e0): `NULL` means genuinely unknown
+    # -- neither confirmed present nor confirmed absent. A curated/
+    # seeded row always states a real True/False here; an UNVERIFIED
+    # OCR/Gemini observation with no scientific-database match leaves
+    # these `NULL` rather than defaulting to a value that would silently
+    # read as a real (and, for the wrong direction, dangerous)
+    # certification claim -- see `app.services.ocr_normalizer.
+    # SyntheticIngredient` and task requirement 2 ("do not claim vegan/
+    # vegetarian/halal/kosher/gluten-free/lactose-free status when
+    # unknown"). `None` must never be treated as `False` by a caller
+    # deciding product dietary suitability, warnings, or the Health
+    # Score (none of those currently read these per-ingredient columns
+    # at all -- see `app.services.warning_engine`'s own module
+    # docstring -- but the nullability itself is what keeps that true
+    # for any future caller too).
+    is_gluten: Mapped[bool | None] = mapped_column("is_gluten", Boolean, nullable=True, default=None)
+    is_lactose: Mapped[bool | None] = mapped_column("is_lactose", Boolean, nullable=True, default=None)
+    is_vegan: Mapped[bool | None] = mapped_column("is_vegan", Boolean, nullable=True, default=None)
+    is_vegetarian: Mapped[bool | None] = mapped_column("is_vegetarian", Boolean, nullable=True, default=None)
+    is_halal: Mapped[bool | None] = mapped_column("is_halal", Boolean, nullable=True, default=None)
+    is_kosher: Mapped[bool | None] = mapped_column("is_kosher", Boolean, nullable=True, default=None)
 
     bad_for_diabetes: Mapped[bool] = mapped_column("bad_for_diabetes", Boolean, default=False)
     bad_for_hypertension: Mapped[bool] = mapped_column("bad_for_hypertension", Boolean, default=False)

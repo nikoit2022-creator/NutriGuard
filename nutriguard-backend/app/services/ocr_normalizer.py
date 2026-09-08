@@ -16,6 +16,17 @@ _BRACKET_OR_PERCENT = re.compile(r"\[.*?\]|\(.*?%\)")
 _NON_WORD_EDGES = re.compile(r"^\W+|\W+$")
 _E_NUMBER = re.compile(r"e[- ]?(\d{3,4}[a-z]?)", re.IGNORECASE)
 
+# `Ingredient.id` is `String(64)` (see app/models/ingredient.py) -- every
+# synthetic id generated below MUST fit inside that limit regardless of
+# how long or how heavily-punctuated the OCR name is, or the insert
+# fails outright for a real product's label. `_ID_PREFIX` + an
+# underscore + a `_HASH_LEN`-hex-char content hash is the fixed,
+# non-negotiable tail; whatever's left is the readable slug's budget.
+_ID_PREFIX = "synth_"
+_HASH_LEN = 12
+_MAX_ID_LEN = 64
+_MAX_SLUG_LEN = _MAX_ID_LEN - len(_ID_PREFIX) - _HASH_LEN - 1  # -1 for the slug/hash separator
+
 
 @dataclass(frozen=True)
 class NormalizedIngredientResult:
@@ -115,12 +126,22 @@ class SyntheticIngredient:
     # `food_analysis._score_and_warnings`, which excludes any
     # ingredient with this flag False from the Health Score).
     risk_assessment_available: bool = False
-    is_gluten: bool = False
-    is_lactose: bool = False
-    is_vegan: bool = True
-    is_vegetarian: bool = True
-    is_halal: bool = True
-    is_kosher: bool = True
+    # `None` -- not True, not False -- for every one of these six: OCR
+    # text alone never establishes whether an ingredient is gluten-/
+    # lactose-free, vegan, vegetarian, halal, or kosher. `False` would
+    # silently assert "confirmed free of gluten/lactose" (a dangerous
+    # false negative for someone relying on it) and `True` would
+    # silently assert "confirmed vegan/vegetarian/halal/kosher" (a
+    # fabricated certification with zero evidence behind it) -- see task
+    # requirement 2 ("genuinely minimal and non-fabricated"). `None`
+    # ("unknown") is the only honest value here, which is why these
+    # columns are nullable (see app/models/ingredient.py).
+    is_gluten: bool | None = None
+    is_lactose: bool | None = None
+    is_vegan: bool | None = None
+    is_vegetarian: bool | None = None
+    is_halal: bool | None = None
+    is_kosher: bool | None = None
     bad_for_diabetes: bool = False
     bad_for_hypertension: bool = False
     bad_for_kidney_disease: bool = False
@@ -128,6 +149,40 @@ class SyntheticIngredient:
     bad_for_pregnancy: bool = False
     bad_for_children: bool = False
     bad_for_high_cholesterol: bool = False
+
+
+def _synthetic_id(name: str) -> str:
+    """Deterministic, collision-resistant, length-bounded id for an
+    OCR-observed ingredient with no scientific-database match.
+
+    `Ingredient.id` is `String(64)` (see `app/models/ingredient.py`) --
+    this MUST never exceed 64 characters, no matter how long or
+    punctuation-heavy the raw OCR name is (task: "Bound every generated
+    synthetic ingredient ID to the database String(64) limit").
+
+    Two parts, both bounded:
+      - a short, readable slug (truncated ASCII letters/digits/
+        underscores from the name) -- purely for human debuggability
+        (log lines, DB browsing), NOT what guarantees uniqueness;
+      - a fixed-length content hash of the full, untruncated,
+        case-folded name -- THIS is what actually guarantees two
+        distinct names never collide: two long names sharing the same
+        first `_MAX_SLUG_LEN` characters, two names that differ only
+        after truncation, or two names that are entirely non-ASCII
+        (pure Cyrillic/Bulgarian text, where the slug is empty) all
+        still get different ids, because the hash covers the whole
+        name, not the truncated/possibly-empty slug.
+
+    Deterministic (same name -> same id, so a later scan of the same
+    OCR text reuses the same row -- see `ingredient_catalog`) and stable
+    across process restarts (no randomness, no dict/set iteration
+    order).
+    """
+    raw_slug = re.sub(r"[^a-z0-9_]", "", name.lower().replace(" ", "_"))
+    raw_slug = re.sub(r"_+", "_", raw_slug).strip("_")
+    slug = raw_slug[:_MAX_SLUG_LEN].strip("_")
+    content_hash = hashlib.sha1(name.strip().lower().encode("utf-8")).hexdigest()[:_HASH_LEN]
+    return f"{_ID_PREFIX}{slug}_{content_hash}" if slug else f"{_ID_PREFIX}{content_hash}"
 
 
 def create_synthetic_ingredient(name: str) -> SyntheticIngredient:
@@ -149,19 +204,8 @@ def create_synthetic_ingredient(name: str) -> SyntheticIngredient:
     e_match = _E_NUMBER.search(lower)
     formatted_e = ("E" + e_match.group(1).upper()) if e_match else None
 
-    slug = re.sub(r"[^a-z0-9_]", "", name.lower().replace(" ", "_"))
-    if not slug:
-        # A name with no ASCII-alphanumeric characters at all (e.g. a
-        # Cyrillic-only Bulgarian ingredient word that didn't match the
-        # scientific database -- see `app.services.label_language`)
-        # would otherwise collapse every such token to the same empty
-        # slug ("synth_"), silently colliding distinct ingredients into
-        # one id. Fall back to a short, stable content hash instead, so
-        # each distinct non-Latin name still gets its own id.
-        slug = hashlib.sha1(name.encode("utf-8")).hexdigest()[:10]
-
     return SyntheticIngredient(
-        id=f"synth_{slug}",
+        id=_synthetic_id(name),
         common_name=name[:1].upper() + name[1:] if name else name,
         scientific_name=formatted_e or "",
         e_number=formatted_e,
@@ -176,17 +220,33 @@ def create_synthetic_ingredient(name: str) -> SyntheticIngredient:
         who_iarc_classification=None,
         acceptable_daily_intake="",
         side_effects="",
+        # A positive match is real evidence straight from the label text
+        # itself, so it's kept -- but the absence of a match is NOT
+        # proof of "no allergens" (the OCR token is one ingredient name,
+        # not the full label, and this keyword list is tiny), so the
+        # negative case is left "" (unknown/not stated), never the
+        # literal string "None" masquerading as a verified clean bill of
+        # health (task requirement 2).
         allergens=(
             "Potential Allergen"
             if any(kw in lower for kw in ("milk", "whey", "soy", "wheat", "peanut"))
-            else "None"
+            else ""
         ),
         references="",
         risk_level=RiskLevel.SAFE,
         risk_assessment_available=False,
-        bad_for_diabetes=any(kw in lower for kw in ("sugar", "syrup", "dextrose")),
-        bad_for_hypertension=any(kw in lower for kw in ("sodium", "salt", "msg")),
-        bad_for_high_cholesterol=any(kw in lower for kw in ("palm", "fat", "hydrogenated")),
+        # `bad_for_*` used to be guessed from a handful of keywords in
+        # the raw OCR name (e.g. "sugar" -> bad_for_diabetes=True) --
+        # exactly the kind of fabricated medical inference task
+        # requirement 2 forbids: a bare ingredient-name substring is not
+        # a clinical assessment, and a wrongly-guessed True here drives
+        # a real HIGH-severity personalized warning (see
+        # `app.services.warning_engine`) for a condition that was never
+        # actually evaluated. Left at the dataclass's own safe default
+        # (False -- "not flagged", not "confirmed safe") for every
+        # unverified OCR observation; a real value is only ever set by a
+        # genuine regulatory/curated assessment (see
+        # `app.services.ingredient_catalog._build_minimal_row`).
     )
 
 
@@ -204,8 +264,24 @@ def reconstruct_synthetic_ingredient(ingredient_id: str, raw_text: str) -> Synth
         if candidate.id == ingredient_id:
             return candidate
 
-    slug = ingredient_id.removeprefix("synth_")
-    if slug and not re.fullmatch(r"[0-9a-f]{10}", slug):
+    # Current id shape (see `_synthetic_id`) is "<slug>_<hash>" or, when
+    # the name had no ASCII-alphanumeric characters at all, just
+    # "<hash>" -- strip the trailing content-hash segment so it's never
+    # shown to a user as part of a "readable" reconstructed name. Also
+    # tolerates the two OLDER id shapes this function already handled
+    # before ids were bounded/hashed (a bare slug with no hash suffix,
+    # and the previous 10-hex-char non-Latin-name fallback), for any id
+    # persisted before that fix.
+    body = ingredient_id.removeprefix(_ID_PREFIX)
+    hash_suffix = body[-_HASH_LEN:]
+    if len(body) > _HASH_LEN and body[-(_HASH_LEN + 1)] == "_" and re.fullmatch(r"[0-9a-f]+", hash_suffix):
+        slug = body[: -(_HASH_LEN + 1)]
+    elif len(body) in (_HASH_LEN, 10) and re.fullmatch(r"[0-9a-f]+", body):
+        slug = ""
+    else:
+        slug = body
+
+    if slug:
         readable = re.sub(r"_+", " ", slug).strip()
         if readable:
             return replace(create_synthetic_ingredient(readable), id=ingredient_id)

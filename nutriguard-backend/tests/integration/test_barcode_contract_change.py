@@ -210,12 +210,19 @@ async def test_warnings_generated_for_real_product_after_enabling_profile_flag(a
     warnings = resp.json()["warnings"]
     hypertension_warnings = [w for w in warnings if w["condition"] == "Hypertension"]
 
-    # Expect both the product-level sodium threshold warning (450mg > 400)
-    # AND the ingredient-flag warning (Sodium Nitrite -> bad_for_hypertension).
-    assert len(hypertension_warnings) == 2
-    severities = {w["severity"] for w in hypertension_warnings}
-    assert "MODERATE" in severities  # 450mg is > 400 but not > 800
-    assert "HIGH" in severities  # ingredient-flag warnings are always HIGH
+    # Only the product-level sodium threshold warning (450mg > 400) --
+    # "Sodium Nitrite" matches no curated row in this test's ingredient
+    # table (see TEST 4's comment above), so it's an OCR-only synthetic
+    # ingredient with NO real hypertension assessment (see
+    # `app.services.ocr_normalizer.create_synthetic_ingredient`:
+    # `bad_for_*` used to be guessed from a "sodium"/"salt"/"msg"
+    # keyword in the raw name -- exactly the fabricated medical
+    # inference the "backend-ingredient-profile-data-quality" task
+    # (PR #13 review) removes). An unconfirmed ingredient must never
+    # drive a real HIGH-severity personalized warning, so only the ONE
+    # genuine, nutrition-derived warning fires here.
+    assert len(hypertension_warnings) == 1
+    assert hypertension_warnings[0]["severity"] == "MODERATE"  # 450mg is > 400 but not > 800
 
 
 # TEST 6 -------------------------------------------------------------------------

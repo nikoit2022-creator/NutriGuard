@@ -9,10 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from app.models.enums import ApprovalStatus
+from app.models.enums import ApprovalStatus, IngredientSource, IngredientVerificationStatus
 from app.services.ingredient_regulatory import (
     derive_adi_range_mg_per_kg_bw_per_day,
     derive_approval_status,
+    derive_gated_adi_range_mg_per_kg_bw_per_day,
+    derive_gated_approval_status,
+    is_authoritative_regulatory_source,
 )
 
 SEED_FILE = Path(__file__).resolve().parents[2] / "app" / "seed" / "ingredients_seed.json"
@@ -105,3 +108,82 @@ def test_curated_seed_countries_field_never_uses_generic_none_placeholder():
     that had no real country-specific restriction."""
     for row in _seed_rows():
         assert row["countriesRestrictedOrBanned"].strip().lower() != "none"
+
+
+# --- derive_gated_approval_status / derive_gated_adi_range_mg_per_kg_bw_per_day
+# --- (PR #13 review, task requirement 4) ------------------------------------
+
+_APPROVED_TEXT = "Authorized (ADI 40 mg/kg bw/day)"
+_ADI_TEXT = "0 - 40 mg/kg bw/day"
+
+
+@pytest.mark.parametrize(
+    "verification_status,source,expected",
+    [
+        (IngredientVerificationStatus.VERIFIED, IngredientSource.CURATED_SEED, True),
+        (IngredientVerificationStatus.VERIFIED, IngredientSource.REGULATORY_LOOKUP, True),
+        (IngredientVerificationStatus.VERIFIED, IngredientSource.GEMINI, False),
+        (IngredientVerificationStatus.VERIFIED, IngredientSource.OCR_HEURISTIC, False),
+        (IngredientVerificationStatus.VERIFIED, None, False),
+        (IngredientVerificationStatus.LIMITED_DATA, IngredientSource.CURATED_SEED, False),
+        (IngredientVerificationStatus.UNVERIFIED, IngredientSource.CURATED_SEED, False),
+        (IngredientVerificationStatus.UNVERIFIED, IngredientSource.GEMINI, False),
+    ],
+)
+def test_is_authoritative_regulatory_source(verification_status, source, expected):
+    assert is_authoritative_regulatory_source(verification_status, source) == expected
+
+
+@pytest.mark.parametrize(
+    "source", [IngredientSource.CURATED_SEED, IngredientSource.REGULATORY_LOOKUP]
+)
+def test_gated_approval_status_passes_through_for_a_trusted_verified_row(source):
+    assert (
+        derive_gated_approval_status(_APPROVED_TEXT, verification_status=IngredientVerificationStatus.VERIFIED, source=source)
+        == ApprovalStatus.APPROVED
+    )
+    assert derive_gated_adi_range_mg_per_kg_bw_per_day(
+        _ADI_TEXT, verification_status=IngredientVerificationStatus.VERIFIED, source=source
+    ) == (0.0, 40.0)
+
+
+def test_gated_approval_status_is_no_information_for_a_gemini_sourced_row_even_with_approved_looking_text():
+    """Task requirement 4: Gemini/OCR data must never appear as a
+    regulatory approval or an authoritative ADI, no matter how
+    confident or well-formatted the text itself looks."""
+    assert (
+        derive_gated_approval_status(
+            _APPROVED_TEXT, verification_status=IngredientVerificationStatus.LIMITED_DATA, source=IngredientSource.GEMINI
+        )
+        == ApprovalStatus.NO_INFORMATION
+    )
+    assert derive_gated_adi_range_mg_per_kg_bw_per_day(
+        _ADI_TEXT, verification_status=IngredientVerificationStatus.LIMITED_DATA, source=IngredientSource.GEMINI
+    ) == (None, None)
+
+
+def test_gated_approval_status_is_no_information_for_an_ocr_sourced_row():
+    assert (
+        derive_gated_approval_status(
+            _APPROVED_TEXT,
+            verification_status=IngredientVerificationStatus.UNVERIFIED,
+            source=IngredientSource.OCR_HEURISTIC,
+        )
+        == ApprovalStatus.NO_INFORMATION
+    )
+    assert derive_gated_adi_range_mg_per_kg_bw_per_day(
+        _ADI_TEXT, verification_status=IngredientVerificationStatus.UNVERIFIED, source=IngredientSource.OCR_HEURISTIC
+    ) == (None, None)
+
+
+def test_gated_approval_status_requires_verified_not_just_a_trusted_source():
+    """A trusted `source` alone is not enough -- the row must also
+    actually be `VERIFIED` (task requirement 4)."""
+    assert (
+        derive_gated_approval_status(
+            _APPROVED_TEXT,
+            verification_status=IngredientVerificationStatus.LIMITED_DATA,
+            source=IngredientSource.CURATED_SEED,
+        )
+        == ApprovalStatus.NO_INFORMATION
+    )

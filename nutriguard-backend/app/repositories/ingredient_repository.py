@@ -57,6 +57,18 @@ async def insert_new(db: AsyncSession, ingredient: Ingredient) -> Ingredient | N
         return None
 
 
+async def delete(db: AsyncSession, ingredient: Ingredient) -> None:
+    """Removes a single ingredient row within the caller's own
+    transaction (no independent commit). Used only for a genuinely
+    orphaned row this same session just inserted and immediately lost a
+    canonical-alias race for -- see
+    `ingredient_catalog._register_alias_and_resolve_canonical` -- never
+    for a row that predates this call/might already be relied on
+    elsewhere."""
+    await db.delete(ingredient)
+    await db.flush()
+
+
 async def get_by_id_or_e_number(db: AsyncSession, identifier: str) -> Ingredient | None:
     """Mirrors IngredientDao.getIngredientByIdOrEnum: WHERE id = :id OR eNumber = :id"""
     stmt = select(Ingredient).where(

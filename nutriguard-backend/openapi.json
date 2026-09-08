@@ -1212,27 +1212,69 @@
             "title": "Schemaversion"
           },
           "isGluten": {
-            "type": "boolean",
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Isgluten"
           },
           "isLactose": {
-            "type": "boolean",
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Islactose"
           },
           "isVegan": {
-            "type": "boolean",
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Isvegan"
           },
           "isVegetarian": {
-            "type": "boolean",
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Isvegetarian"
           },
           "isHalal": {
-            "type": "boolean",
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Ishalal"
           },
           "isKosher": {
-            "type": "boolean",
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Iskosher"
           },
           "badForDiabetes": {
@@ -1284,10 +1326,12 @@
           },
           "efsaApprovalStatus": {
             "$ref": "#/components/schemas/ApprovalStatus",
+            "description": "Task requirement 4: gated on the row's own trustworthiness,\nnot just its text -- `NO_INFORMATION` unless this row is\n`VERIFIED` and `CURATED_SEED`/`REGULATORY_LOOKUP`-sourced (see\n`ingredient_regulatory.derive_gated_approval_status`). A\nGemini/OCR-sourced `efsaStatus` string can never surface here as\na real approval, no matter what it says.",
             "readOnly": true
           },
           "fdaApprovalStatus": {
             "$ref": "#/components/schemas/ApprovalStatus",
+            "description": "See `efsa_approval_status` above -- identical gating.",
             "readOnly": true
           },
           "adiMinMgPerKgBwPerDay": {
@@ -1324,7 +1368,13 @@
               }
             ],
             "title": "Adisource",
-            "description": "The verified citation backing the numeric ADI range, only\never populated alongside an actual parsed number.",
+            "description": "The verified citation backing the numeric ADI range, only\never populated alongside an actual parsed, GATED number (see\n`adi_min_mg_per_kg_bw_per_day`).",
+            "readOnly": true
+          },
+          "insNumberVerified": {
+            "type": "boolean",
+            "title": "Insnumberverified",
+            "description": "Always `False` today (task: review of INS derivation\nauthoritativeness). `insNumber` -- for a curated seed row\nexactly the same as for an OCR/Gemini row -- is always a\nMECHANICAL derivation from `eNumber` (see\n`ingredient_catalog.derive_ins_number_from_e_number`'s own\ndocstring: true for MOST, not all, shared food additives), never\nindependently confirmed against the Codex Alimentarius INS\nregister itself. This field exists so a client can tell the\ndifference between a truly independently-verified identifier and\na mechanically-derived one, rather than `insNumber`'s mere\npresence implying a confidence it doesn't have -- reserved for a\nfuture real INS-register lookup to flip to `True`.",
             "readOnly": true
           }
         },
@@ -1346,12 +1396,6 @@
           "allergens",
           "references",
           "riskLevel",
-          "isGluten",
-          "isLactose",
-          "isVegan",
-          "isVegetarian",
-          "isHalal",
-          "isKosher",
           "badForDiabetes",
           "badForHypertension",
           "badForKidneyDisease",
@@ -1365,7 +1409,8 @@
           "fdaApprovalStatus",
           "adiMinMgPerKgBwPerDay",
           "adiMaxMgPerKgBwPerDay",
-          "adiSource"
+          "adiSource",
+          "insNumberVerified"
         ],
         "title": "IngredientOut",
         "description": "Mirrors com.example.data.model.IngredientEntity exactly (API Contract 5.4),\nplus additive, backward-compatible data-quality fields (see the\n\"backend-ingredient-profile-data-quality\" task): the original\n`riskLevel`/`efsaStatus`/`fdaStatus`/`acceptableDailyIntake` text\nfields are preserved unchanged for existing clients; the new fields\nbelow let an updated client distinguish a genuine assessment from\nan absent one, without ever fabricating one."

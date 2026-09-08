@@ -5,6 +5,7 @@ from app.services.gemini_image_parser import (
     nutrition_fields_present,
     parse_gemini_image_json_result,
 )
+from app.services.ocr_normalizer import create_synthetic_ingredient
 
 
 def test_valid_json_uses_gemini_nutrition_and_flags_directly():
@@ -94,7 +95,8 @@ def test_unusable_structured_ingredients_fall_back_to_tokenizing_raw_text():
     result = parse_gemini_image_json_result(json.dumps(payload), [])
     assert result is not None
     _, ingredients = result
-    assert [ingredient.id for ingredient in ingredients] == ["synth_water", "synth_salt"]
+    expected_ids = [create_synthetic_ingredient("Water").id, create_synthetic_ingredient("Salt").id]
+    assert [ingredient.id for ingredient in ingredients] == expected_ids
 
 
 def test_missing_product_name_returns_none():

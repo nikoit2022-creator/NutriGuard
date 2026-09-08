@@ -53,9 +53,15 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.models.enums import IngredientSource, IngredientVerificationStatus, RiskLevel
+from app.models.enums import (
+    TRUSTED_INGREDIENT_SOURCES,
+    IngredientSource,
+    IngredientVerificationStatus,
+    RiskLevel,
+)
 from app.models.ingredient import Ingredient
 from app.repositories import ingredient_alias_repository, ingredient_repository
+from app.services.barcode_text_safety import is_placeholder
 from app.services.ingredient_normalization import normalize_ingredient_name
 from app.services.ocr_normalizer import SyntheticIngredient
 
@@ -152,46 +158,119 @@ _MERGEABLE_FIELDS = (
 )
 
 
+def _is_blank_value(value: Any) -> bool:
+    """True for `None`, `""`, or a placeholder string ("null", "n/a",
+    "unknown", ...) -- the same vocabulary `barcode_text_safety.
+    is_placeholder` already uses for `Product` fields. Task requirement
+    5: a partial response's blank/null/placeholder field must never
+    erase a meaningful existing value -- `merge_verified_fields` simply
+    skips such a field rather than ever writing it, regardless of what
+    the existing value already was."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return is_placeholder(value)
+    return False
+
+
 def merge_verified_fields(
     existing: Ingredient,
     *,
     fields: dict[str, Any],
     source: IngredientSource,
     confidence: float,
+    now: datetime | None = None,
 ) -> bool:
     """Apply `fields` (a subset of `_MERGEABLE_FIELDS`) onto `existing`
-    ONLY if `source`/`confidence` outrank what's already stored --
-    task requirement 3/5: lower-quality OCR/Gemini data must never
-    overwrite curated or regulatory information. Returns whether
-    anything was actually applied.
+    ONLY if `source`/`confidence` outrank what's already stored, OR this
+    is a trusted-source revalidation of stale data (see below) -- task
+    requirement 3/5: lower-quality OCR/Gemini data must never overwrite
+    curated or regulatory information. Returns whether anything was
+    actually applied (a genuine field change, OR a successful stale
+    revalidation with unchanged values -- see below).
 
     Priority is source-rank first (`SOURCE_PRIORITY`), `confidence` as
     the tie-breaker within the same source rank -- a same-source
     resupply with a HIGHER confidence than what's stored may refresh
     it (e.g. a regulatory lookup revalidating its own earlier, lower-
     confidence answer), but nothing may ever cross a higher rank
-    downward, regardless of confidence.
+    downward, regardless of confidence -- UNLESS this is a trusted-
+    source stale revalidation (below).
+
+    Trusted-source stale revalidation (task requirement 5): once a
+    VERIFIED row is actually stale (`is_stale`), the normal rank/
+    confidence gate above would otherwise create a real contradiction --
+    a curated row IS allowed to go stale, yet a `REGULATORY_LOOKUP`
+    (rank 90) could never revalidate a `CURATED_SEED` row (rank 100)
+    even though both are equally TRUSTED regulatory-grade sources (see
+    `app.models.enums.TRUSTED_INGREDIENT_SOURCES`), and even a
+    same-rank same-confidence resupply (e.g. `CURATED_SEED` confirming
+    its own earlier `CURATED_SEED` entry is still current) would be
+    rejected outright by the confidence tie-breaker. Neither is a
+    quality regression -- it's the SAME or an equally-trusted source
+    confirming the data is still correct. So: once `existing` is stale
+    AND both the incoming and existing sources are in
+    `TRUSTED_INGREDIENT_SOURCES`, the rank/confidence gate is bypassed
+    entirely, and:
+      - identical values still count as a SUCCESSFUL merge (this
+        function returns `True`) and advance `retrieved_at`/
+        `last_verified_at` -- "still current as of now" is real,
+        useful provenance even with nothing to change;
+      - the row's own `source`/`confidence` are only actually moved to
+        the (possibly lower-ranked) incoming source when incoming rank
+        is at least as high, OR the content genuinely changed (an
+        honest per-field-provenance call: if the values now on the row
+        literally came from the lower-ranked source, the row must say
+        so, never keep claiming the old, higher-ranked one) -- a pure
+        rank-preserving revalidation (no content change, lower rank)
+        leaves `source`/`confidence` untouched.
+    A non-trusted source (GEMINI, OCR_HEURISTIC) never gets any of this
+    -- staleness only ever opens the door between the two regulatory-
+    grade sources, never down to an AI/OCR guess, no matter how old the
+    existing data is.
     """
+    now = now or _utcnow()
     incoming_rank = SOURCE_PRIORITY[source]
     existing_rank = SOURCE_PRIORITY[existing.source]
-    if incoming_rank < existing_rank:
+
+    stale_trusted_revalidation = (
+        source in TRUSTED_INGREDIENT_SOURCES
+        and existing.source in TRUSTED_INGREDIENT_SOURCES
+        and is_stale(existing, now=now)
+    )
+
+    if incoming_rank < existing_rank and not stale_trusted_revalidation:
         return False
-    if incoming_rank == existing_rank and confidence <= float(existing.confidence):
+    if (
+        not stale_trusted_revalidation
+        and incoming_rank == existing_rank
+        and confidence <= float(existing.confidence)
+    ):
         return False
 
     changed = False
     for field_name, value in fields.items():
         if field_name not in _MERGEABLE_FIELDS:
             continue
+        if _is_blank_value(value):
+            continue
         if getattr(existing, field_name) != value:
             setattr(existing, field_name, value)
             changed = True
-    if not changed:
+
+    if not changed and not stale_trusted_revalidation:
         return False
 
-    existing.source = source
-    existing.confidence = confidence
-    existing.retrieved_at = _utcnow()
+    # Record-level provenance stays honest (task requirement 5): only
+    # actually move `source`/`confidence` when the incoming contribution
+    # is genuinely at least as authoritative, or it changed real content
+    # (see the stale-revalidation docstring section above) -- a pure
+    # "still current" revalidation from a lower-ranked trusted source
+    # leaves the row's recorded source/confidence exactly as they were.
+    if incoming_rank >= existing_rank or changed:
+        existing.source = source
+        existing.confidence = confidence
+    existing.retrieved_at = now
     # Verification promotion is deliberately conservative: an AI-
     # generated (GEMINI) claim is real data worth storing -- outranking
     # a bare OCR guess -- but it is NOT a human/regulatory confirmation.
@@ -203,9 +282,12 @@ def merge_verified_fields(
     # risk assessment move the score, exactly what the data-quality task
     # (commit 1d8c3d9) exists to prevent. A GEMINI-sourced merge instead
     # promotes only to LIMITED_DATA -- real content, not yet confirmed.
+    # This branch is also what advances `last_verified_at` on a
+    # successful stale revalidation -- both `TRUSTED_INGREDIENT_SOURCES`
+    # members always satisfy this rank check.
     if SOURCE_PRIORITY[source] >= SOURCE_PRIORITY[IngredientSource.REGULATORY_LOOKUP]:
         existing.verification_status = IngredientVerificationStatus.VERIFIED
-        existing.last_verified_at = _utcnow()
+        existing.last_verified_at = now
         existing.risk_assessment_available = True
     elif source == IngredientSource.GEMINI:
         existing.verification_status = IngredientVerificationStatus.LIMITED_DATA
@@ -282,6 +364,71 @@ def _build_minimal_row(synthetic: SyntheticIngredient, normalized: str) -> Ingre
     )
 
 
+async def _register_alias_and_resolve_canonical(
+    db: AsyncSession,
+    *,
+    candidate: Ingredient,
+    synthetic: SyntheticIngredient,
+    normalized: str,
+    owns_row: bool,
+) -> Ingredient:
+    """Register `synthetic.common_name` as an alias of `candidate` and
+    return whichever `Ingredient` row is ACTUALLY canonical for that
+    normalized text afterward (task requirement 3: "canonical alias
+    convergence"). Two concurrent calls that each propose a DIFFERENT
+    ingredient for the same normalized alias -- no shared E-number, so
+    the identifier lookup above can't converge them first -- must still
+    return exactly one canonical `Ingredient` between them, never two.
+
+    `ingredient_alias_repository.get_or_create` already returns the
+    EXISTING alias row unchanged when one was already created (by a
+    concurrent call) for this normalized text -- possibly pointing at a
+    DIFFERENT `ingredient_id` than `candidate`'s. Both call sites below
+    used to ignore that returned owner entirely and kept using their
+    own `candidate` regardless -- exactly the bug: the loser of the
+    alias race would return its own orphan row instead of the race's
+    actual winner, so two different `Ingredient` rows would end up
+    representing the same real-world ingredient, and two callers
+    (concurrent, or a later scan resolving via alias vs. one still
+    holding the loser's id) could disagree about which one is
+    canonical.
+
+    `owns_row=True` only for a row THIS call itself just INSERTed with
+    no primary-key conflict -- if it turns out to be the alias race's
+    loser, it is a genuine orphan (nothing will ever be told its id) and
+    is deleted here, in the SAME session/transaction, before anything
+    commits, so no duplicate row is left behind. `owns_row=False` for a
+    row this call merely RESOLVED to (an already-existing curated/
+    previously-cached row found via E-number, or a row re-fetched after
+    losing a primary-key conflict to a concurrent insert) -- never
+    deleted, since it existed before this call and may already be
+    relied on elsewhere.
+    """
+    alias = await ingredient_alias_repository.get_or_create(
+        db,
+        ingredient_id=candidate.id,
+        alias_text=synthetic.common_name,
+        alias_normalized=normalized,
+        language=None,
+        source=IngredientSource.OCR_HEURISTIC,
+    )
+    if alias.ingredient_id == candidate.id:
+        return candidate
+
+    canonical = await ingredient_repository.get_by_id(db, alias.ingredient_id)
+    if canonical is None:
+        # Unreachable in practice (the alias winner would have to be
+        # deleted between the get_or_create call above and this
+        # lookup) -- fall back to our own row rather than returning
+        # nothing; never delete `candidate` in this branch, since we
+        # could not actually confirm a winner to converge onto.
+        return candidate
+
+    if owns_row:
+        await ingredient_repository.delete(db, candidate)
+    return canonical
+
+
 async def get_or_create_catalog_ingredient(db: AsyncSession, synthetic: SyntheticIngredient) -> Ingredient:
     """Local-first canonical-identity resolution for one OCR-recognized
     token with no curated-database match (task requirements 1 + 2):
@@ -327,15 +474,9 @@ async def get_or_create_catalog_ingredient(db: AsyncSession, synthetic: Syntheti
         # (e.g. a blurrier crop) still resolves directly via alias
         # instead of needing another E-number-only lookup.
         _fill_missing_identity_fields(resolved, synthetic)
-        await ingredient_alias_repository.get_or_create(
-            db,
-            ingredient_id=resolved.id,
-            alias_text=synthetic.common_name,
-            alias_normalized=normalized,
-            language=None,
-            source=IngredientSource.OCR_HEURISTIC,
+        return await _register_alias_and_resolve_canonical(
+            db, candidate=resolved, synthetic=synthetic, normalized=normalized, owns_row=False
         )
-        return resolved
 
     # Genuinely new -- race-safe get-or-create. Two concurrent scans of
     # the same never-before-seen ingredient normally compute the SAME
@@ -352,6 +493,12 @@ async def get_or_create_catalog_ingredient(db: AsyncSession, synthetic: Syntheti
     # unrecoverable.
     row = _build_minimal_row(synthetic, normalized)
     inserted = await ingredient_repository.insert_new(db, row)
+    # Only `True` when OUR OWN insert above actually succeeded (no
+    # primary-key conflict) -- captured before any of the fallback
+    # re-fetches below can reassign `inserted` to a row this call did
+    # NOT create (see `_register_alias_and_resolve_canonical`'s
+    # `owns_row` docstring).
+    owns_row = inserted is not None
     if inserted is None:
         inserted = await ingredient_repository.get_by_id(db, synthetic.id)
     if inserted is None:
@@ -372,15 +519,9 @@ async def get_or_create_catalog_ingredient(db: AsyncSession, synthetic: Syntheti
     else:
         _fill_missing_identity_fields(inserted, synthetic)
 
-    await ingredient_alias_repository.get_or_create(
-        db,
-        ingredient_id=inserted.id,
-        alias_text=synthetic.common_name,
-        alias_normalized=normalized,
-        language=None,
-        source=IngredientSource.OCR_HEURISTIC,
+    return await _register_alias_and_resolve_canonical(
+        db, candidate=inserted, synthetic=synthetic, normalized=normalized, owns_row=owns_row
     )
-    return inserted
 
 
 async def materialize_ingredients(db: AsyncSession, ingredients: list[Any]) -> list[Any]:

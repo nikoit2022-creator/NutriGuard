@@ -12,6 +12,31 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V16 (PR #13 review fixes -- data quality, canonical identity,
+provenance):** A post-merge review of V15/V14 found five further
+issues, all fixed on the same branch: synthetic ingredient ids are now
+length-bounded (never exceed `Ingredient.id`'s real `String(64)`);
+`is_vegan`/`is_vegetarian`/`is_halal`/`is_kosher`/`is_gluten`/
+`is_lactose` on an UNVERIFIED OCR/Gemini ingredient are now nullable
+and never default to a fabricated True/False claim, `allergens` no
+longer persists the literal string `"None"` as proof of no allergens,
+and `bad_for_*` no longer infers a medical flag from an ingredient-name
+keyword; two concurrent scans proposing different candidate ids for the
+same normalized alias now converge on one canonical row instead of
+leaving an orphan duplicate; `efsaApprovalStatus`/`fdaApprovalStatus`/
+the numeric ADI fields are now gated on the row being both `VERIFIED`
+and `CURATED_SEED`/`REGULATORY_LOOKUP`-sourced (Gemini/OCR data can no
+longer surface as an authoritative regulatory approval), and the new
+`insNumberVerified` field makes explicit that `insNumber` is always a
+mechanical derivation, never an independently-verified identifier; and
+the regulatory-data refresh/merge rules now let a trusted source
+revalidate stale data (even with unchanged values/confidence, advancing
+verification timestamps), never erase a meaningful value with a
+blank/placeholder partial response, and no longer unconditionally
+reject a `REGULATORY_LOOKUP` revalidating a stale `CURATED_SEED` row.
+See deviation item 14 in section 6 for the full breakdown. Migration
+`f5a6b7c8d9e0`.
+
 **V15 (persistent ingredient knowledge cache):** An OCR/Gemini-observed
 ingredient with no scientific-database match used to be recreated from
 scratch, in memory only, on every single scan/read — never a real,
@@ -957,10 +982,14 @@ than silently resolved:
       persisted to this table until the very next migration
       (`e4f5a6b7c8d9`, see section 13) made a synthetic ingredient a
       real, reusable, persisted row too.
-    - `bad_for*`/`allergens` heuristics on a synthetic ingredient are
-      UNCHANGED (out of scope for this task — they feed the separate,
-      pre-existing Personalized Warning Engine, not a scientific
-      claim about the ingredient itself).
+    - `bad_for*`/`allergens` heuristics on a synthetic ingredient were
+      UNCHANGED by this original task (out of scope at the time — they
+      feed the separate, pre-existing Personalized Warning Engine, not
+      a scientific claim about the ingredient itself), but a keyword-
+      based `bad_for_*` guess (e.g. "sugar" → `badForDiabetes=true`)
+      and the literal string `"None"` as `allergens` both turned out to
+      be exactly the same class of fabrication this task exists to
+      remove — see item 14 below (PR #13 review) for the actual fix.
     - All changes are additive/widening only — diffed against
       `openapi.json`. Covered by `tests/unit/test_ocr_normalizer.py`,
       `tests/unit/test_ingredient_regulatory.py`,
@@ -981,6 +1010,121 @@ than silently resolved:
     side effect is that a direct `GET` on that id also now succeeds.
     Additive/backward-compatible: a previously-404 case becomes 200; no
     previously-200 response's shape changed. See section 13.7.
+
+14. **PR #13 review fixes to the persistent ingredient knowledge cache
+    (data quality + canonical identity + provenance).** A post-merge
+    review of the `backend-ingredient-profile-data-quality` /
+    `persistent-ingredient-knowledge-cache` work found five further
+    issues; all fixed on the same branch/PR:
+    - **Synthetic ingredient ids are now length-bounded.**
+      `ocr_normalizer._synthetic_id` used to build an id from an
+      unbounded, lightly-sanitized slug of the raw OCR name — a long or
+      heavily-punctuated real label name could exceed
+      `Ingredient.id`'s real `String(64)` column and fail the insert
+      outright. The id is now always `synth_` + a truncated readable
+      slug + a 12-hex-char content hash of the FULL name (or just the
+      hash when the name has no ASCII-alphanumeric characters at all),
+      always ≤ 64 characters, still fully deterministic (same name →
+      same id). `reconstruct_synthetic_ingredient` (id-only recovery
+      when the original OCR text is unavailable) was updated to strip
+      the hash suffix rather than ever displaying it, while remaining
+      tolerant of ids persisted under the OLD (unbounded) scheme.
+      Covered by `tests/unit/test_ocr_normalizer.py` (long ASCII,
+      Bulgarian/Unicode, punctuation-heavy, colliding-prefix names) and
+      `tests/postgres/test_synthetic_ingredient_id_postgres.py` (a real
+      Postgres insert, since SQLite does not enforce `VARCHAR` length
+      at all).
+    - **An UNVERIFIED OCR/Gemini ingredient no longer fabricates a
+      dietary-identity claim.** `is_vegan`/`is_vegetarian`/`is_halal`/
+      `is_kosher` used to default to `true` and `is_gluten`/
+      `is_lactose` to `false` for every synthetic ingredient — every one
+      of those is a real, positive certification/safety claim with zero
+      evidence behind it. All six are now `bool | null` (migration
+      `f5a6b7c8d9e0`, additive/nullable — no existing curated value is
+      touched); `null` means genuinely unknown. The literal string
+      `"None"` used to be written as `allergens` for "no keyword
+      matched" — read back, that looks like a verified clean bill of
+      health rather than "not stated"; the negative case is now the
+      empty string. `bad_for_diabetes`/`bad_for_hypertension`/
+      `bad_for_high_cholesterol` no longer infer `true` from a
+      "sugar"/"sodium"/"palm" (etc.) substring in the raw OCR name — a
+      bare name substring is not a clinical assessment, and a wrong
+      guess used to drive a real HIGH-severity Personalized Warning
+      Engine entry for a condition nobody actually evaluated (see the
+      updated `tests/integration/test_barcode_contract_change.py::
+      test_warnings_generated_for_real_product_after_enabling_profile_flag`).
+      None of these six nullable fields, nor `bad_for_*`, are read by
+      any product-level dietary-suitability/warning/Health-Score
+      computation today (`Product.is_vegan`/etc. and the Health Score
+      are driven entirely by other data — see `app/services/
+      warning_engine.py`'s own module docstring and `app/services/
+      food_analysis.py`'s `_score_and_warnings`), so this is a pure
+      data-quality fix with no behavioral change to scoring/warnings.
+      Covered by `tests/unit/test_ocr_normalizer.py`,
+      `tests/unit/test_ingredient_schema_data_quality.py`.
+    - **Canonical alias convergence.** Two concurrent scans proposing
+      DIFFERENT candidate ingredient ids that both normalize to the SAME
+      alias text (no shared E-number) used to each keep their own
+      candidate as canonical, ignoring `ingredient_alias_repository.
+      get_or_create`'s own returned (possibly different) alias owner —
+      leaving two `Ingredient` rows for one real-world ingredient.
+      `ingredient_catalog._register_alias_and_resolve_canonical` now
+      resolves both callers to the SAME canonical row and deletes a
+      just-inserted, now-orphaned loser row in the same transaction (a
+      row this call did not itself just create — e.g. one resolved via
+      E-number — is never deleted, only ever re-pointed-to). Covered by
+      a real Postgres regression test using two different ids with NO
+      E-number involved:
+      `tests/postgres/test_ingredient_alias_convergence_postgres.py`.
+    - **Gated EFSA/FDA approval status and numeric ADI.**
+      `efsaApprovalStatus`/`fdaApprovalStatus`/`adiMinMgPerKgBwPerDay`/
+      `adiMaxMgPerKgBwPerDay`/`adiSource` used to be derived from the
+      row's free text alone, regardless of source — a Gemini-parsed
+      label quoting "EU Approved" verbatim, or an OCR token, could
+      surface as an authoritative regulatory approval. They are now
+      gated (`ingredient_regulatory.derive_gated_approval_status`/
+      `derive_gated_adi_range_mg_per_kg_bw_per_day`): `NO_INFORMATION`/
+      `null` unless the row is both `VERIFIED` and `CURATED_SEED`/
+      `REGULATORY_LOOKUP`-sourced. Also added (same review): `insNumber`
+      is, for a curated seed row exactly like an OCR one, always a
+      MECHANICAL derivation from `eNumber` (true for MOST, not all,
+      shared food additives), never independently confirmed against the
+      Codex Alimentarius INS register — the new additive
+      `insNumberVerified: boolean` field (always `false` today) makes
+      that explicit rather than letting `insNumber`'s mere presence
+      imply a confidence it doesn't have. Covered by
+      `tests/unit/test_ingredient_regulatory.py`,
+      `tests/unit/test_ingredient_schema_data_quality.py`.
+    - **Corrected refresh/merge rules for the regulatory data cache.**
+      `ingredient_catalog.merge_verified_fields` used to (a) reject a
+      trusted provider revalidating STALE data whenever field values
+      were unchanged and confidence was unchanged (the tie-breaker
+      demanded a STRICTLY higher confidence even for a pure
+      revalidation), (b) never advance `last_verified_at` for such a
+      revalidation, (c) apply an incoming blank/`null`/placeholder field
+      value even when it would blank out a meaningful existing value,
+      and (d) unconditionally reject a `REGULATORY_LOOKUP` (row rank 90)
+      revalidating a `CURATED_SEED` row (rank 100) even once that row
+      had gone stale — a real contradiction, since a curated row IS
+      allowed to go stale, but nothing could ever revalidate it once it
+      did. All four are fixed: once an existing `VERIFIED` row is
+      actually stale AND both the incoming and existing sources are
+      `CURATED_SEED`/`REGULATORY_LOOKUP` ("trusted"), a same-or-lower-
+      rank resupply now succeeds and advances verification timestamps;
+      a blank/placeholder incoming value is always skipped, never
+      applied; and the row's own `source`/`confidence` are only moved
+      to the incoming (possibly lower-ranked) source when the CONTENT
+      genuinely changed too — an honest per-field-provenance call
+      (never claim a source that didn't actually supply the current
+      values), while `_MERGEABLE_FIELDS` writes remain atomic exactly as
+      before. A non-trusted source (`GEMINI`/`OCR_HEURISTIC`) still
+      cannot touch a stale `VERIFIED` row at all — staleness only opens
+      the door between the two regulatory-grade sources. Covered by
+      `tests/unit/test_ingredient_catalog_pure.py`.
+    - All changes additive/backward-compatible; diffed against
+      `openapi.json` (nullable `isGluten`/etc. widen from `boolean` to
+      `boolean | null`, `insNumberVerified` is a new field — no
+      existing field removed or narrowed).
 
 No other ambiguities were found that required deviating from the
 contract; where the contract was silent on an implementation detail

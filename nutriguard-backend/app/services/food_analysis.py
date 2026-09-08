@@ -423,21 +423,26 @@ def _ingredient_out_dict(ing: Any) -> dict:
     exact same attribute names. Field names/casing -- including the
     additive `riskAssessmentAvailable`/`riskRationale`/
     `efsaApprovalStatus`/`fdaApprovalStatus`/`adiMinMgPerKgBwPerDay`/
-    `adiMaxMgPerKgBwPerDay`/`adiSource` data-quality fields, derived via
-    `app.services.ingredient_regulatory` exactly like the schema's own
-    `@computed_field`s -- are kept in exact sync with `IngredientOut` so
-    a partial-analysis `ingredients` list
+    `adiMaxMgPerKgBwPerDay`/`adiSource`/`insNumberVerified` data-quality
+    fields, derived via `app.services.ingredient_regulatory` exactly
+    like the schema's own `@computed_field`s -- are kept in exact sync
+    with `IngredientOut` so a partial-analysis `ingredients` list
     (see `_label_scan_required_details`) can be rendered by the SAME
     Android model/adapter the normal success response's `ingredients`
     array already uses -- no new client-side type.
     """
     risk_level = ing.risk_level
     risk_assessment_available = getattr(ing, "risk_assessment_available", True)
-    adi_min, adi_max = ingredient_regulatory.derive_adi_range_mg_per_kg_bw_per_day(
-        ing.acceptable_daily_intake
-    )
     verification_status = getattr(ing, "verification_status", IngredientVerificationStatus.UNVERIFIED)
     source = getattr(ing, "source", None)
+    # Task requirement 4: gated exactly like `IngredientOut`'s own
+    # `efsaApprovalStatus`/`fdaApprovalStatus`/`adiMin.../adiMax...` --
+    # `NO_INFORMATION`/`None` unless this ingredient is VERIFIED and
+    # CURATED_SEED/REGULATORY_LOOKUP-sourced (see
+    # `ingredient_regulatory.derive_gated_approval_status`).
+    adi_min, adi_max = ingredient_regulatory.derive_gated_adi_range_mg_per_kg_bw_per_day(
+        ing.acceptable_daily_intake, verification_status=verification_status, source=source
+    )
     last_verified_at = getattr(ing, "last_verified_at", None)
     needs_refresh = False
     if verification_status == IngredientVerificationStatus.VERIFIED and last_verified_at is not None:
@@ -449,6 +454,10 @@ def _ingredient_out_dict(ing: Any) -> dict:
         "scientificName": ing.scientific_name,
         "eNumber": ing.e_number,
         "insNumber": getattr(ing, "ins_number", None),
+        # Always False -- see `IngredientOut.ins_number_verified`'s
+        # docstring: `insNumber` is always a mechanical derivation from
+        # `eNumber`, never independently confirmed.
+        "insNumberVerified": False,
         "casNumber": getattr(ing, "cas_number", None),
         "category": ing.category,
         "description": ing.description,
@@ -466,8 +475,12 @@ def _ingredient_out_dict(ing: Any) -> dict:
         "riskLevel": risk_level.value if hasattr(risk_level, "value") else risk_level,
         "riskAssessmentAvailable": risk_assessment_available,
         "riskRationale": (ing.evidence_level or None) if risk_assessment_available else None,
-        "efsaApprovalStatus": ingredient_regulatory.derive_approval_status(ing.efsa_status).value,
-        "fdaApprovalStatus": ingredient_regulatory.derive_approval_status(ing.fda_status).value,
+        "efsaApprovalStatus": ingredient_regulatory.derive_gated_approval_status(
+            ing.efsa_status, verification_status=verification_status, source=source
+        ).value,
+        "fdaApprovalStatus": ingredient_regulatory.derive_gated_approval_status(
+            ing.fda_status, verification_status=verification_status, source=source
+        ).value,
         "adiMinMgPerKgBwPerDay": adi_min,
         "adiMaxMgPerKgBwPerDay": adi_max,
         "adiSource": (ing.references or None) if adi_min is not None else None,

@@ -6,14 +6,19 @@ data that was never actually confirmed. Complements
 `test_ingredient_regulatory.py` (the pure derivation logic) and
 `test_ocr_normalizer.py` (the synthetic-ingredient construction).
 """
-from app.models.enums import RiskLevel
+from app.models.enums import IngredientSource, IngredientVerificationStatus, RiskLevel
 from app.schemas.ingredient import IngredientOut
 from app.services.ocr_normalizer import create_synthetic_ingredient
 
 
 def _curated_kwargs(**overrides) -> dict:
     """A complete, curated (Ingredient-row-shaped) IngredientOut payload
-    -- mirrors a real seeded scientific entry, e.g. aspartame."""
+    -- mirrors a real seeded scientific entry, e.g. aspartame. Explicit
+    `source`/`verificationStatus` (task requirement 4: EFSA/FDA
+    approval and ADI are only ever gated TRUE for a `VERIFIED`,
+    `CURATED_SEED`/`REGULATORY_LOOKUP`-sourced row -- a real curated
+    seed row states both explicitly, never relying on the schema's own
+    defaults)."""
     base = dict(
         id="e951_aspartame",
         common_name="Aspartame",
@@ -34,6 +39,8 @@ def _curated_kwargs(**overrides) -> dict:
         references="WHO IARC Monograph Vol 134 (2023)",
         risk_level=RiskLevel.POTENTIAL_CONCERN,
         risk_assessment_available=True,
+        verification_status=IngredientVerificationStatus.VERIFIED,
+        source=IngredientSource.CURATED_SEED,
         is_gluten=False,
         is_lactose=False,
         is_vegan=True,
@@ -123,4 +130,110 @@ def test_ingredient_out_field_set_is_purely_additive():
         "sourceUrl", "retrievedAt", "lastVerifiedAt", "confidence", "schemaVersion",
         "needsRefresh",
     }
-    assert dumped.keys() == original_camel_fields | data_quality_task_fields | knowledge_cache_task_fields
+    # PR #13 review fixes: `insNumberVerified` (see `ingredient_regulatory`
+    # module docstring -- INS is only ever mechanically derived, never an
+    # independently-verified identifier).
+    review_fix_fields = {"insNumberVerified"}
+    assert (
+        dumped.keys()
+        == original_camel_fields | data_quality_task_fields | knowledge_cache_task_fields | review_fix_fields
+    )
+
+
+# --- Gated EFSA/FDA/ADI (PR #13 review: requirement 4) ----------------------
+
+
+def test_gemini_sourced_data_never_surfaces_as_an_authoritative_approval_or_adi():
+    """A Gemini-parsed label can quote real-looking regulatory text
+    ("Authorized", "0 - 40 mg/kg bw/day") verbatim from a label or its
+    own training data -- that must never be presented as an actual
+    EFSA/FDA approval or an authoritative ADI, since Gemini is not a
+    regulatory authority (task requirement 4)."""
+    out = IngredientOut(
+        **_curated_kwargs(
+            verification_status=IngredientVerificationStatus.LIMITED_DATA,
+            source=IngredientSource.GEMINI,
+        )
+    )
+    dumped = out.model_dump(by_alias=True)
+    assert dumped["efsaApprovalStatus"] == "NO_INFORMATION"
+    assert dumped["fdaApprovalStatus"] == "NO_INFORMATION"
+    assert dumped["adiMinMgPerKgBwPerDay"] is None
+    assert dumped["adiMaxMgPerKgBwPerDay"] is None
+    assert dumped["adiSource"] is None
+
+
+def test_unverified_curated_source_never_surfaces_as_an_authoritative_approval():
+    """`source=CURATED_SEED` alone is not enough -- the row must ALSO be
+    `VERIFIED` (task requirement 4); a not-yet-verified row of an
+    otherwise-trusted source still gets `NO_INFORMATION`/`None`."""
+    out = IngredientOut(
+        **_curated_kwargs(
+            verification_status=IngredientVerificationStatus.UNVERIFIED,
+            source=IngredientSource.CURATED_SEED,
+        )
+    )
+    dumped = out.model_dump(by_alias=True)
+    assert dumped["efsaApprovalStatus"] == "NO_INFORMATION"
+    assert dumped["adiMinMgPerKgBwPerDay"] is None
+
+
+def test_regulatory_lookup_sourced_verified_data_is_authoritative():
+    """The other trusted source (task requirement 4): a VERIFIED,
+    REGULATORY_LOOKUP-sourced row is just as authoritative as a
+    CURATED_SEED one."""
+    out = IngredientOut(
+        **_curated_kwargs(
+            verification_status=IngredientVerificationStatus.VERIFIED,
+            source=IngredientSource.REGULATORY_LOOKUP,
+        )
+    )
+    dumped = out.model_dump(by_alias=True)
+    assert dumped["efsaApprovalStatus"] == "APPROVED"
+    assert dumped["adiMinMgPerKgBwPerDay"] == 0.0
+
+
+def test_ins_number_is_never_presented_as_independently_verified():
+    """See `ingredient_regulatory` module docstring / `IngredientOut.
+    ins_number_verified`: always `False` today, for a curated row
+    exactly like an OCR one -- INS is always mechanically derived from
+    `eNumber`, never independently confirmed."""
+    curated_out = IngredientOut(**_curated_kwargs(ins_number="951"))
+    assert curated_out.model_dump(by_alias=True)["insNumberVerified"] is False
+
+
+# --- Nullable dietary-identity flags (PR #13 review: requirement 2) --------
+
+
+def test_unassessed_synthetic_ingredient_never_claims_a_dietary_identity():
+    """`isGluten`/`isLactose`/`isVegan`/`isVegetarian`/`isHalal`/
+    `isKosher` must be `null`, never a fabricated True/False, for an
+    OCR-only ingredient with no scientific-database match."""
+    syn = create_synthetic_ingredient("Palm Oil")
+    out = IngredientOut.model_validate(syn)
+    dumped = out.model_dump(by_alias=True)
+    for field in ("isGluten", "isLactose", "isVegan", "isVegetarian", "isHalal", "isKosher"):
+        assert dumped[field] is None, field
+
+
+def test_unassessed_synthetic_ingredient_never_claims_no_allergens():
+    """The literal string 'None' must never be persisted/returned as
+    proof of "no allergens" -- absence of a keyword match is unknown,
+    not a verified clean bill of health (task requirement 2)."""
+    syn = create_synthetic_ingredient("Plain Water")
+    assert syn.allergens == ""
+    out = IngredientOut.model_validate(syn)
+    assert out.model_dump(by_alias=True)["allergens"] == ""
+
+
+def test_unassessed_synthetic_ingredient_never_infers_bad_for_flags_from_keywords():
+    """`bad_for_*` must never be guessed from an ingredient-name keyword
+    (task requirement 2) -- a name containing "sugar"/"sodium"/"palm"
+    used to flip `badForDiabetes`/`badForHypertension`/
+    `badForHighCholesterol` to `True` with no real clinical assessment
+    behind it."""
+    for name in ("Cane Sugar", "Sodium Benzoate", "Palm Oil", "Corn Syrup", "Hydrogenated Palm Fat"):
+        syn = create_synthetic_ingredient(name)
+        assert syn.bad_for_diabetes is False, name
+        assert syn.bad_for_hypertension is False, name
+        assert syn.bad_for_high_cholesterol is False, name

@@ -56,6 +56,20 @@ class IngredientSource(str, enum.Enum):
     OCR_HEURISTIC = "OCR_HEURISTIC"
 
 
+# The only two sources allowed to back an authoritative regulatory claim
+# (EFSA/FDA approval status, a numeric ADI) or a stale-VERIFIED-row
+# revalidation (see `app.services.ingredient_regulatory` and
+# `app.services.ingredient_catalog.merge_verified_fields`) -- a curated,
+# hand-reviewed seed entry or a real regulatory-database lookup. GEMINI
+# (an AI-parsed label) and OCR_HEURISTIC (a bare OCR token) are real,
+# useful ingredient content but NEVER a regulatory authority, so neither
+# may ever appear as the source behind an approval status or an ADI
+# figure, no matter how high their own confidence is. Defined once here
+# (rather than duplicated per module) so both call sites can never drift
+# out of sync with each other.
+TRUSTED_INGREDIENT_SOURCES = frozenset({IngredientSource.CURATED_SEED, IngredientSource.REGULATORY_LOOKUP})
+
+
 class WarningSeverity(str, enum.Enum):
     """Mirrors com.example.util.WarningSeverity"""
     HIGH = "HIGH"

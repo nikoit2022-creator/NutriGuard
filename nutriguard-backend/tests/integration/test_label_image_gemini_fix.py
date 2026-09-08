@@ -11,6 +11,7 @@ import pytest
 from PIL import Image
 
 from app.integrations.gemini import GeminiUnavailableError, gemini_service
+from app.services.ocr_normalizer import create_synthetic_ingredient
 
 
 def _fake_jpeg_bytes() -> bytes:
@@ -123,7 +124,8 @@ async def test_unusable_gemini_ingredient_objects_fall_back_to_raw_text(app_clie
     body = resp.json()
 
     returned_ids = [ingredient["id"] for ingredient in body["ingredients"]]
-    assert returned_ids == ["synth_water", "synth_salt"]
+    expected_ids = [create_synthetic_ingredient("Water").id, create_synthetic_ingredient("Salt").id]
+    assert returned_ids == expected_ids
     assert body["product"]["ingredientIds"] == ",".join(returned_ids)
 
 
