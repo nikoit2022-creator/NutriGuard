@@ -68,6 +68,14 @@ class ScanLabelImageDtoTest {
               "allergens": "Contains Phenylalanine",
               "references": "EFSA Journal 2013;11(12):3496",
               "riskLevel": "HIGH_CONCERN",
+              "riskAssessmentAvailable": true,
+              "riskRationale": "Strong evidence at high intake levels.",
+              "efsaApprovalStatus": "APPROVED",
+              "fdaApprovalStatus": "APPROVED",
+              "adiMinMgPerKgBwPerDay": 0.0,
+              "adiMaxMgPerKgBwPerDay": 40.0,
+              "adiSource": "EFSA Journal 2013;11(12):3496",
+              "sourceUrl": "https://www.efsa.europa.eu/example",
               "isGluten": false,
               "isLactose": false,
               "isVegan": true,
@@ -148,6 +156,14 @@ class ScanLabelImageDtoTest {
         assertEquals("L-aspartyl-L-phenylalanine methyl ester", ingredient.scientificName)
         assertEquals("E951", ingredient.eNumber)
         assertEquals(RiskLevel.HIGH_CONCERN, ingredient.riskLevel)
+        assertTrue(ingredient.riskAssessmentAvailable)
+        assertEquals("Strong evidence at high intake levels.", ingredient.riskRationale)
+        assertEquals("APPROVED", ingredient.efsaApprovalStatus)
+        assertEquals("APPROVED", ingredient.fdaApprovalStatus)
+        assertEquals(0.0, ingredient.adiMinMgPerKgBwPerDay!!, 0.0001)
+        assertEquals(40.0, ingredient.adiMaxMgPerKgBwPerDay!!, 0.0001)
+        assertEquals("EFSA Journal 2013;11(12):3496", ingredient.adiSource)
+        assertEquals("https://www.efsa.europa.eu/example", ingredient.sourceUrl)
         assertFalse(ingredient.badForDiabetes)
         assertFalse(ingredient.badForHypertension)
         assertTrue(ingredient.badForKidneyDisease)
@@ -258,6 +274,41 @@ class ScanLabelImageDtoTest {
 
         assertEquals("ING_4006381333931_0", entities[0].id)
         assertEquals("e211_sodium_benzoate", entities[1].id)
+    }
+
+    @Test
+    fun `explicit null dietary flags stay unknown and missing profile text is not fabricated`() {
+        val dto = IngredientDto.fromJson(
+            JSONObject(
+                """
+                {
+                  "id": "synth_water",
+                  "commonName": "Water",
+                  "riskLevel": "SAFE",
+                  "riskAssessmentAvailable": false,
+                  "isGluten": null,
+                  "isLactose": null,
+                  "isVegan": null,
+                  "isVegetarian": null,
+                  "isHalal": null,
+                  "isKosher": null
+                }
+                """.trimIndent()
+            )
+        )
+
+        val entity = listOf(dto).toEntities("test").single()
+        assertFalse(entity.riskAssessmentAvailable)
+        assertNull(entity.isGluten)
+        assertNull(entity.isLactose)
+        assertNull(entity.isVegan)
+        assertNull(entity.isVegetarian)
+        assertNull(entity.isHalal)
+        assertNull(entity.isKosher)
+        assertEquals("", entity.efsaStatus)
+        assertEquals("", entity.fdaStatus)
+        assertEquals("", entity.acceptableDailyIntake)
+        assertEquals("", entity.references)
     }
 
     // TEST 4: the optional barcode multipart field (review requirement:

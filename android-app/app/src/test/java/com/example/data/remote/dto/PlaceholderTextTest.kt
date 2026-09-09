@@ -37,6 +37,20 @@ class PlaceholderTextTest {
         assertEquals("Nonetheless Bakery", "Nonetheless Bakery".cleanOrNull())
     }
 
+    @Test
+    fun `generic OCR filler descriptions are hidden`() {
+        for (placeholder in listOf(
+            "Normalized Food Component",
+            "Ingredient extracted via OCR label scan.",
+            "Food component / formulation ingredient.",
+            "Standard ingredient.",
+            "None reported",
+            "Not specified"
+        )) {
+            assertNull("expected '$placeholder' to be filtered", placeholder.cleanOrNull())
+        }
+    }
+
     // --- Ingredient UI fixes (review requirement: hide E-Number/WHO-IARC
     // badges when there is no real value -- IngredientChip/
     // IngredientDetailBottomSheet both gate on `cleanOrNull() != null`,

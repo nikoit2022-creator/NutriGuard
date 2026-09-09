@@ -12,7 +12,15 @@ package com.example.data.remote.dto
  * `suggestedAction` text — see [com.example.data.remote.BackendErrorDto].
  */
 private val PLACEHOLDER_VALUES = setOf(
-    "null", "none", "n/a", "na", "nil", "undefined", "-", "unknown"
+    "null", "none", "n/a", "na", "nil", "undefined", "-", "unknown",
+    "normalized food component",
+    "ingredient extracted via ocr label scan.",
+    "food component / formulation ingredient.",
+    "standard ingredient.",
+    "scientific studies",
+    "not specified",
+    "none reported",
+    "nutriguard ocr & scientific pipeline"
 )
 
 /**

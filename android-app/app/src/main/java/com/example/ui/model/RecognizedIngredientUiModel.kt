@@ -18,7 +18,7 @@ data class RecognizedIngredientUiModel(
     val safetyScore: Int?,
     val rating: IngredientSafetyRating,
     val purpose: String?,
-    val explanation: String,
+    val explanation: String?,
     val eNumber: String?,
     val evidenceLevel: String?,
     val allergens: String?
@@ -58,7 +58,7 @@ fun IngredientEntity.toRecognizedIngredientUiModel(
 
     val rating = when {
         normalizedScore != null -> ratingForSafetyScore(normalizedScore)
-        !hasScientificProfile -> IngredientSafetyRating.LIMITED_DATA
+        !riskAssessmentAvailable || !hasScientificProfile -> IngredientSafetyRating.LIMITED_DATA
         else -> riskLevel.toSafetyRating()
     }
 
@@ -66,7 +66,6 @@ fun IngredientEntity.toRecognizedIngredientUiModel(
         ?: category.meaningfulProfileText()
     val cleanedExplanation = description.meaningfulProfileText()
         ?: healthConcerns.meaningfulProfileText()
-        ?: "No verified scientific profile is available for this ingredient yet."
 
     return RecognizedIngredientUiModel(
         ingredient = this,
