@@ -68,15 +68,15 @@ fun IngredientChip(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.weight(1f)
             ) {
-                // Risk status indicator dot/badge
-                Box(
-                    modifier = Modifier
-                        .size(10.dp)
-                        .clip(CircleShape)
-                        .background(riskUi.main)
-                )
-
-                Spacer(modifier = Modifier.width(12.dp))
+                if (ingredient.riskAssessmentAvailable) {
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(riskUi.main)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                }
 
                 Column {
                     Row(
@@ -108,30 +108,38 @@ fun IngredientChip(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(2.dp))
+                    val displayCategory = ingredient.category.cleanOrNull()
+                    if (displayCategory != null || ingredient.riskAssessmentAvailable) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            displayCategory?.let { category ->
+                                Text(
+                                    text = category,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
 
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = ingredient.category,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                            if (displayCategory != null && ingredient.riskAssessmentAvailable) {
+                                Text(
+                                    text = "•",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
 
-                        Text(
-                            text = "•",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-
-                        Text(
-                            text = riskLabel,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.Medium,
-                            color = riskUi.text
-                        )
+                            if (ingredient.riskAssessmentAvailable) {
+                                Text(
+                                    text = riskLabel,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium,
+                                    color = riskUi.text
+                                )
+                            }
+                        }
                     }
 
                     val displayWhoIarc = ingredient.whoIarcClassification.cleanOrNull()

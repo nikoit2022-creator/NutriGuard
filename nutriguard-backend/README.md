@@ -12,6 +12,16 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V19 (NutriGuard E-number knowledge starter):** The seed loader now
+imports the provided 43-row curated starter CSV in addition to the 12
+existing rich ingredient profiles. Eight E-numbers overlap existing
+rows and are deliberately left untouched; 35 new identities/functions
+are inserted, producing 47 catalog rows. The separate 800-row E200–E999
+registry is not imported because 757 rows are empty coverage
+placeholders. Starter rows remain `LIMITED_DATA` with no risk
+assessment, approval badge or Health Score effect; only present text is
+returned, and the generic reference URLs remain informational sources.
+
 **V18 (PR #13 review round 3 -- ambiguous-alias safety, field-specific
 risk/citation provenance):** Two further review blockers on the same
 branch: `_reconcile_official_identifier_conflict` (V17) used to
@@ -528,7 +538,7 @@ export JWT_SECRET="dev-only-secret"
 export REDIS_ENABLED=false   # or point REDIS_URL at a real Redis
 
 alembic upgrade head
-python -m app.seed.load_seed     # loads the 12 scientific ingredients
+python -m app.seed.load_seed     # loads 12 rich profiles + 35 starter identities
 uvicorn app.main:app --reload
 ```
 

@@ -16,7 +16,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Cancel
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -25,8 +29,13 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,8 +47,11 @@ import com.example.data.model.IngredientEntity
 import com.example.data.model.RiskLevel
 import com.example.data.remote.dto.cleanOrNull
 import com.example.ui.theme.NutriGuardRadius
+import com.example.ui.theme.RiskGreen
+import com.example.ui.theme.RiskRed
 import com.example.ui.theme.getRiskUiColor
 import com.example.ui.theme.getWhoIarcUiColor
+import java.math.BigDecimal
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -52,11 +64,13 @@ fun IngredientDetailBottomSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val riskUi = getRiskUiColor(ingredient.riskLevel)
     val riskLabel = when (ingredient.riskLevel) {
-        RiskLevel.SAFE -> "Safe"
-        RiskLevel.MODERATE -> "Consume in moderation"
+        RiskLevel.SAFE -> "Low concern"
+        RiskLevel.MODERATE -> "Use in moderation"
         RiskLevel.POTENTIAL_CONCERN -> "Potential concern"
-        RiskLevel.HIGH_CONCERN -> "High concern / Restricted"
+        RiskLevel.HIGH_CONCERN -> "High concern"
     }
+    val sources = buildSources(ingredient)
+    var sourcesExpanded by rememberSaveable(ingredient.id) { mutableStateOf(false) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -79,22 +93,21 @@ fun IngredientDetailBottomSheet(
                         modifier = Modifier
                             .size(36.dp)
                             .clip(CircleShape)
-                            .background(riskUi.background),
+                            .background(MaterialTheme.colorScheme.primaryContainer),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Default.Science,
-                            contentDescription = "Scientific Profile",
-                            tint = riskUi.main,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(20.dp)
                         )
                     }
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = "Scientific Ingredient Profile",
+                        text = "Ingredient details",
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface
+                        fontWeight = FontWeight.SemiBold
                     )
                 }
 
@@ -104,55 +117,35 @@ fun IngredientDetailBottomSheet(
             }
 
             Spacer(modifier = Modifier.height(12.dp))
-
             Text(
                 text = ingredient.commonName,
                 style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface
+                fontWeight = FontWeight.Bold
             )
 
-            if (ingredient.scientificName.cleanOrNull() != null) {
+            ingredient.scientificName.cleanOrNull()?.let { scientificName ->
                 Text(
-                    text = ingredient.scientificName,
+                    text = scientificName,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(NutriGuardRadius.small))
-                        .background(riskUi.background)
-                        .padding(horizontal = 10.dp, vertical = 5.dp)
+            val displayENumber = ingredient.eNumber.cleanOrNull()
+            if (ingredient.riskAssessmentAvailable || displayENumber != null) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text(
-                        text = riskLabel,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = riskUi.text
-                    )
-                }
-
-                val displayENumber = ingredient.eNumber.cleanOrNull()
-                if (displayENumber != null) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(NutriGuardRadius.small))
-                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                    ) {
-                        Text(
-                            text = "E-Number: $displayENumber",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                    if (ingredient.riskAssessmentAvailable) {
+                        StatusPill(riskLabel, riskUi.background, riskUi.text)
+                    }
+                    displayENumber?.let {
+                        StatusPill(
+                            it,
+                            MaterialTheme.colorScheme.surfaceVariant,
+                            MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
@@ -160,31 +153,57 @@ fun IngredientDetailBottomSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // Structured Scientific Sections
             InfoSectionItem("Description", ingredient.description)
-            InfoSectionItem("Purpose in Food", ingredient.purposeInFood)
-            InfoSectionItem("Evidence-Based Health Concerns", ingredient.healthConcerns)
-            InfoSectionItem("Scientific Evidence Level", ingredient.evidenceLevel)
-            InfoSectionItem("EFSA (European Food Safety) Status", ingredient.efsaStatus)
-            InfoSectionItem("FDA (US Food & Drug) Status", ingredient.fdaStatus)
+            InfoSectionItem("Purpose in food", ingredient.purposeInFood)
+            InfoSectionItem("Health considerations", ingredient.healthConcerns)
+            if (ingredient.riskAssessmentAvailable) {
+                InfoSectionItem("Why this rating", ingredient.riskRationale.orEmpty())
+            }
+            InfoSectionItem("Evidence", ingredient.evidenceLevel)
 
-            ingredient.whoIarcClassification
-                .cleanOrNull()
-                ?.let { classification ->
-                    InfoSectionItem(
-                        "WHO / IARC Classification",
-                        classification,
-                        highlightColor = getWhoIarcUiColor(classification).main
+            RegulatoryStatusRow("EFSA", ingredient.efsaApprovalStatus)
+            RegulatoryStatusRow("FDA", ingredient.fdaApprovalStatus)
+
+            ingredient.whoIarcClassification.cleanOrNull()?.let { classification ->
+                InfoSectionItem(
+                    "WHO / IARC classification",
+                    classification,
+                    highlightColor = getWhoIarcUiColor(classification).main
+                )
+            }
+
+            InfoSectionItem("Restricted in", ingredient.countriesRestrictedOrBanned)
+            formatAdi(ingredient.adiMinMgPerKgBwPerDay, ingredient.adiMaxMgPerKgBwPerDay)?.let { adi ->
+                InfoSectionItem("Acceptable daily intake", adi)
+            }
+            InfoSectionItem("Known side effects", ingredient.sideEffects)
+            InfoSectionItem("Allergens", ingredient.allergens)
+
+            if (sources.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                TextButton(onClick = { sourcesExpanded = !sourcesExpanded }) {
+                    Text("Sources (${sources.size})")
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(
+                        imageVector = if (sourcesExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = if (sourcesExpanded) "Hide sources" else "Show sources"
                     )
                 }
-
-            InfoSectionItem("Countries Banned or Restricted", ingredient.countriesRestrictedOrBanned)
-            InfoSectionItem("Acceptable Daily Intake (ADI)", ingredient.acceptableDailyIntake)
-            InfoSectionItem("Known Side Effects & Toxicity", ingredient.sideEffects)
-            InfoSectionItem("Allergen Information", ingredient.allergens)
-            InfoSectionItem("Scientific References", ingredient.references)
+                if (sourcesExpanded) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        sources.forEach { source ->
+                            Text(
+                                text = source,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(28.dp))
         }
@@ -192,13 +211,49 @@ fun IngredientDetailBottomSheet(
 }
 
 @Composable
-private fun InfoSectionItem(
-    title: String,
-    content: String,
-    highlightColor: Color? = null
-) {
-    val displayContent = content.cleanOrNull() ?: return
+private fun StatusPill(label: String, background: Color, foreground: Color) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(NutriGuardRadius.small))
+            .background(background)
+            .padding(horizontal = 10.dp, vertical = 5.dp)
+    ) {
+        Text(text = label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = foreground)
+    }
+}
 
+@Composable
+private fun RegulatoryStatusRow(authority: String, rawStatus: String?) {
+    val status = rawStatus.cleanOrNull()?.uppercase() ?: return
+    val approved = when (status) {
+        "APPROVED" -> true
+        "NOT_APPROVED" -> false
+        else -> return
+    }
+    val color = if (approved) RiskGreen else RiskRed
+
+    Row(
+        modifier = Modifier.padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Icon(
+            imageVector = if (approved) Icons.Default.CheckCircle else Icons.Default.Cancel,
+            contentDescription = null,
+            tint = color,
+            modifier = Modifier.size(20.dp)
+        )
+        Text(
+            text = "$authority ${if (approved) "approved" else "not approved"}",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+@Composable
+private fun InfoSectionItem(title: String, content: String, highlightColor: Color? = null) {
+    val displayContent = content.cleanOrNull() ?: return
     Column(modifier = Modifier.padding(vertical = 6.dp)) {
         Text(
             text = title,
@@ -207,10 +262,29 @@ private fun InfoSectionItem(
             color = highlightColor ?: MaterialTheme.colorScheme.primary
         )
         Spacer(modifier = Modifier.height(2.dp))
-        Text(
-            text = displayContent,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface
-        )
+        Text(text = displayContent, style = MaterialTheme.typography.bodyMedium)
     }
+}
+
+private fun formatAdi(minimum: Double?, maximum: Double?): String? {
+    if (minimum == null && maximum == null) return null
+    val range = when {
+        minimum != null && maximum != null -> "${minimum.cleanNumber()}–${maximum.cleanNumber()}"
+        maximum != null -> "Up to ${maximum.cleanNumber()}"
+        else -> "From ${minimum!!.cleanNumber()}"
+    }
+    return "$range mg/kg body weight/day"
+}
+
+private fun Double.cleanNumber(): String = BigDecimal.valueOf(this).stripTrailingZeros().toPlainString()
+
+private fun buildSources(ingredient: IngredientEntity): List<String> {
+    val entries = buildList {
+        ingredient.references.cleanOrNull()?.let { references ->
+            addAll(references.split('|').mapNotNull { it.cleanOrNull() })
+        }
+        ingredient.adiSource.cleanOrNull()?.let(::add)
+        ingredient.sourceUrl.cleanOrNull()?.let(::add)
+    }
+    return entries.distinct()
 }

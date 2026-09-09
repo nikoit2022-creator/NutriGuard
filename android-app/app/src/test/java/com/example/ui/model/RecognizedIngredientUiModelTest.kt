@@ -29,6 +29,15 @@ class RecognizedIngredientUiModelTest {
     }
 
     @Test
+    fun unavailableRiskAssessment_doesNotClaimLowConcern() {
+        val model = ingredient(riskAssessmentAvailable = false)
+            .toRecognizedIngredientUiModel()
+
+        assertNull(model.safetyScore)
+        assertEquals(IngredientSafetyRating.LIMITED_DATA, model.rating)
+    }
+
+    @Test
     fun syntheticSafeIngredient_isLimitedData() {
         val model = ingredient(
             id = "synth_water",
@@ -109,7 +118,8 @@ class RecognizedIngredientUiModelTest {
         evidence: String = "Strong scientific consensus",
         eNumber: String? = "E330",
         allergens: String = "None",
-        riskLevel: RiskLevel = RiskLevel.SAFE
+        riskLevel: RiskLevel = RiskLevel.SAFE,
+        riskAssessmentAvailable: Boolean = true
     ) = IngredientEntity(
         id = id,
         commonName = commonName,
@@ -127,6 +137,7 @@ class RecognizedIngredientUiModelTest {
         sideEffects = "",
         allergens = allergens,
         references = "EFSA",
-        riskLevel = riskLevel
+        riskLevel = riskLevel,
+        riskAssessmentAvailable = riskAssessmentAvailable
     )
 }

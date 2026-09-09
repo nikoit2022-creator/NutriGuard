@@ -138,7 +138,7 @@ fun RecognizedIngredientsSection(
                     color = PastelInk
                 )
                 Text(
-                    text = "Verified cards open a detailed scientific profile",
+                    text = "Tap an ingredient to view available details",
                     style = MaterialTheme.typography.bodySmall,
                     color = PastelInk.copy(alpha = 0.66f)
                 )
@@ -146,15 +146,13 @@ fun RecognizedIngredientsSection(
         }
 
         visibleSections.forEach { section ->
-            CategoryHeader(section)
+            if (section.rating != IngredientSafetyRating.LIMITED_DATA) {
+                CategoryHeader(section)
+            }
             section.models.forEach { model ->
                 RecognizedIngredientCard(
                     model = model,
-                    onClick = if (model.rating == IngredientSafetyRating.LIMITED_DATA) {
-                        null
-                    } else {
-                        { onIngredientClick(model.ingredient) }
-                    }
+                    onClick = { onIngredientClick(model.ingredient) }
                 )
             }
         }
@@ -229,14 +227,21 @@ fun RecognizedIngredientCard(
     modifier: Modifier = Modifier
 ) {
     val ratingColors = ratingColors(model.rating)
+    val hasRating = model.rating != IngredientSafetyRating.LIMITED_DATA
     val ratingLabel = ratingLabel(model.rating)
     val scoreText = model.safetyScore?.let { "$it/100" }
-    val semanticRating = if (scoreText == null) ratingLabel else "$ratingLabel, $scoreText"
+    val semanticRating = when {
+        !hasRating -> ""
+        scoreText == null -> ratingLabel
+        else -> "$ratingLabel, $scoreText"
+    }
 
     val interactionModifier = if (onClick != null) {
         Modifier
             .semantics(mergeDescendants = true) {
-                contentDescription = "${model.displayName}. $semanticRating. Open scientific profile."
+                contentDescription = listOf(model.displayName, semanticRating, "Open ingredient details")
+                    .filter { it.isNotBlank() }
+                    .joinToString(". ")
                 role = Role.Button
             }
             .clickable(onClick = onClick)
@@ -285,7 +290,9 @@ fun RecognizedIngredientCard(
                         color = PastelInk
                     )
                     Spacer(modifier = Modifier.width(NutriGuardSpacing.sm))
-                    RatingBadge(label = ratingLabel, score = scoreText, colors = ratingColors)
+                    if (hasRating) {
+                        RatingBadge(label = ratingLabel, score = scoreText, colors = ratingColors)
+                    }
                 }
 
                 model.purpose?.let { purpose ->
@@ -299,14 +306,16 @@ fun RecognizedIngredientCard(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(NutriGuardSpacing.sm))
-                Text(
-                    text = model.explanation,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = PastelInk.copy(alpha = 0.72f),
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis
-                )
+                model.explanation?.let { explanation ->
+                    Spacer(modifier = Modifier.height(NutriGuardSpacing.sm))
+                    Text(
+                        text = explanation,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = PastelInk.copy(alpha = 0.72f),
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
 
                 if (model.eNumber != null || model.evidenceLevel != null || model.allergens != null) {
                     Spacer(modifier = Modifier.height(NutriGuardSpacing.sm))

@@ -20,11 +20,14 @@ Usage:
     python -m app.seed.load_seed
 """
 import asyncio
+import csv
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
+from sqlalchemy import select
 
 from app.database.session import AsyncSessionLocal
 from app.models.enums import IngredientSource, IngredientVerificationStatus, RiskLevel
@@ -36,6 +39,8 @@ from app.services.ingredient_normalization import normalize_ingredient_name
 logger = structlog.get_logger(__name__)
 
 _SEED_FILE = Path(__file__).parent / "ingredients_seed.json"
+_E_ADDITIVE_SEED_FILE = Path(__file__).parent / "e_additives_curated_starter.csv"
+_E_ADDITIVE_SOURCE_VERSION = "2026-09-08"
 
 _CAMEL_TO_SNAKE = {
     "id": "id",
@@ -107,6 +112,125 @@ def _row_to_kwargs(row: dict) -> dict:
     return kwargs
 
 
+def _starter_additive_id(e_number: str, name: str) -> str:
+    """Stable readable id for a starter-pack additive.
+
+    The E-number is the canonical identity.  The slug is display/debug
+    convenience only and is intentionally ASCII-bounded.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:48]
+    return f"{e_number.lower()}_{slug}" if slug else e_number.lower()
+
+
+def _join_present_sections(*sections: tuple[str, str]) -> str:
+    return "\n".join(f"{label}: {value.strip()}" for label, value in sections if value.strip())
+
+
+def _starter_row_to_kwargs(row: dict[str, str]) -> dict:
+    """Map one reviewed starter row without inventing missing science.
+
+    The pack is explicitly a curation starter, not a production-ready
+    regulatory assessment.  Rows therefore enter as LIMITED_DATA and
+    can provide identity/function text, but never a risk assessment,
+    approval badge, ADI calculation or Health Score deduction until a
+    later field-specific verified-source merge confirms those claims.
+    """
+    e_number = row["e_number"].strip().upper()
+    name = row["name"].strip()
+    now = datetime.now(timezone.utc)
+    return {
+        "id": _starter_additive_id(e_number, name),
+        "common_name": name,
+        "normalized_name": normalize_ingredient_name(name),
+        "scientific_name": "",
+        "e_number": e_number,
+        "ins_number": row["ins_number"].strip() or None,
+        "cas_number": None,
+        "category": row["functional_class"].strip(),
+        "description": _join_present_sections(
+            ("Digestion and absorption", row["digestion_absorption"]),
+            ("Metabolism", row["metabolism"]),
+        ),
+        "purpose_in_food": row["typical_role_or_foods"].strip(),
+        "health_concerns": row["potential_effects"].strip(),
+        "evidence_level": _join_present_sections(
+            ("Human evidence", row["human_evidence"]),
+            ("Animal evidence", row["animal_evidence"]),
+        ),
+        "countries_restricted_or_banned": "",
+        "efsa_status": row["efsa_assessment"].strip(),
+        "fda_status": "",
+        "who_iarc_classification": None,
+        "acceptable_daily_intake": row["adi_tdi"].strip(),
+        "side_effects": "",
+        "allergens": "",
+        "references": row["primary_sources"].strip(),
+        "risk_level": RiskLevel.SAFE,
+        "risk_assessment_available": False,
+        "verification_status": IngredientVerificationStatus.LIMITED_DATA,
+        "source": IngredientSource.CURATED_SEED,
+        "source_record_id": f"e-number-starter:{_E_ADDITIVE_SOURCE_VERSION}:{e_number}",
+        "source_url": None,
+        "retrieved_at": now,
+        "last_verified_at": None,
+        "confidence": 0.75,
+        "schema_version": 1,
+        "field_provenance_json": None,
+        "is_gluten": None,
+        "is_lactose": None,
+        "is_vegan": None,
+        "is_vegetarian": None,
+        "is_halal": None,
+        "is_kosher": None,
+        "bad_for_diabetes": False,
+        "bad_for_hypertension": False,
+        "bad_for_kidney_disease": False,
+        "bad_for_gout": False,
+        "bad_for_pregnancy": False,
+        "bad_for_children": False,
+        "bad_for_high_cholesterol": False,
+    }
+
+
+async def _load_e_additive_starter(session) -> int:
+    """Insert only the 43 populated starter rows, preserving richer data.
+
+    The separate 800-row registry is deliberately not shipped or read:
+    its remaining 757 records are coverage placeholders, not confirmed
+    assigned/currently-authorized additives.
+    """
+    with _E_ADDITIVE_SEED_FILE.open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    inserted = 0
+    for row in rows:
+        kwargs = _starter_row_to_kwargs(row)
+        existing = await session.execute(
+            select(Ingredient).where(Ingredient.e_number == kwargs["e_number"]).limit(1)
+        )
+        ingredient = existing.scalar_one_or_none()
+        if ingredient is not None:
+            # Existing curated data is intentionally richer and remains
+            # untouched.  In particular, never collapse generic E322
+            # "Lecithins" into the existing soy-specific ingredient.
+            continue
+
+        ingredient = Ingredient(**kwargs)
+        session.add(ingredient)
+        await session.flush()
+        inserted += 1
+
+        await ingredient_alias_repository.get_or_create(
+            session,
+            ingredient_id=ingredient.id,
+            alias_text=ingredient.common_name,
+            alias_normalized=ingredient.normalized_name,
+            language="en",
+            source=IngredientSource.CURATED_SEED,
+        )
+    return inserted
+
+
 async def load_seed() -> int:
     rows = json.loads(_SEED_FILE.read_text(encoding="utf-8"))
     count = 0
@@ -164,6 +288,8 @@ async def load_seed() -> int:
                     normalized_name=normalized,
                     already_claimed_by=alias.ingredient_id,
                 )
+
+        count += await _load_e_additive_starter(session)
 
         await session.commit()
     logger.info("seed_loaded", count=count)

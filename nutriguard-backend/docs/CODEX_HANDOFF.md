@@ -1,5 +1,36 @@
 # CODEX_HANDOFF
 
+## 2026-09-09: E-number starter knowledge and compact Android presentation
+
+- Branch: `feat/e-number-knowledge-ui`, based on GitHub `origin/main`
+  at `c94c20193602d9b90cf60d090dff7f50f383ba95`.
+- Added `app/seed/e_additives_curated_starter.csv`: exactly the 43
+  populated rows from the provided NutriGuard E-number starter pack.
+  The companion E200–E999 registry was deliberately not imported: 757
+  of its 800 rows are coverage placeholders, not confirmed additives.
+- `app.seed.load_seed` now adds 35 previously absent E-number identities
+  (8 overlap richer existing seed rows and are never overwritten), for
+  47 total catalog ingredients. New starter rows are deliberately
+  `LIMITED_DATA`, `risk_assessment_available=False`, with nullable
+  dietary flags. Their identity, function, available health text and
+  informational source URLs are reusable; they do not affect Health
+  Score or claim regulatory approval/ADI without stronger per-field
+  evidence.
+- Android now parses the backend's structured ingredient data-quality
+  fields (`riskAssessmentAvailable`, gated EFSA/FDA status, numeric ADI,
+  rationale and sources) and preserves explicit JSON `null` dietary
+  flags. It no longer fabricates `Approved`, `GRAS`, `Safe`, `None
+  reported`, or generic OCR profile text.
+- Ingredient cards and the detail sheet omit absent information.
+  EFSA/FDA appear only as compact approved/not-approved icon rows;
+  numeric ADI appears only when supplied; references/URLs are collapsed
+  in a final Sources section. Room migration 2→3 preserves product,
+  history and profile data while updating the ingredient cache schema.
+- Verification: Android `:app:testDebugUnitTest` passed. Backend loader
+  files pass `py_compile`; the backend pytest environment is not
+  installed on this Windows host, so `test_load_seed.py` still requires
+  execution in backend CI or the VM's pinned Docker environment.
+
 ## Current work
 
 Date: 2026-09-04
