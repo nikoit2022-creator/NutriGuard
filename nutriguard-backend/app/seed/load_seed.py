@@ -33,7 +33,7 @@ from app.database.session import AsyncSessionLocal
 from app.models.enums import IngredientSource, IngredientVerificationStatus, RiskLevel
 from app.models.ingredient import Ingredient
 from app.repositories import ingredient_alias_repository
-from app.services.ingredient_catalog import derive_ins_number_from_e_number
+from app.services.ingredient_catalog import derive_ins_number_from_e_number, register_curated_alias
 from app.services.ingredient_normalization import normalize_ingredient_name
 
 logger = structlog.get_logger(__name__)
@@ -88,6 +88,12 @@ _EXTRA_ALIASES: list[tuple[str, str, str | None]] = [
     ("e621_msg", "MSG", "en"),
     ("e250_sodium_nitrite", "натриев нитрит", "bg"),
     ("high_fructose_corn_syrup", "HFCS", "en"),
+    ("e322_soy_lecithin", "Emulsifier lecithin soy", "en"),
+    ("e322_soy_lecithin", "Emulsifier: soy lecithin", "en"),
+    ("e322_soy_lecithin", "Lecithin soy", "en"),
+    ("e322_soy_lecithin", "Lecithins (soy)", "en"),
+    ("e322_soy_lecithin", "соев лецитин", "bg"),
+    ("e322_soy_lecithin", "емулгатор соев лецитин", "bg"),
 ]
 
 
@@ -244,24 +250,16 @@ async def load_seed() -> int:
             # Register this row's own name as its first/primary alias.
             # Curated seed data always wins (SOURCE_PRIORITY['CURATED_SEED']
             # is the highest rank -- see app.services.ingredient_catalog) --
-            # but `get_or_create` never overwrites an existing alias row,
-            # so if this normalized name was somehow already claimed by a
-            # DIFFERENT ingredient id (e.g. an OCR-only stub persisted
-            # before this curated entry existed in the seed file), that
-            # pre-existing mapping is left exactly as-is and only logged,
-            # not silently repointed -- reconciling/merging that older
-            # stub into this curated row is a deliberate, reviewed
-            # maintenance operation, not something a seed load should
-            # ever do automatically to production data. See
-            # docs/CODEX_HANDOFF.md.
+            # `register_curated_alias` may reclaim the exact alias from
+            # a bare UNVERIFIED OCR stub. It never reassigns an alias
+            # owned by verified/limited data or by a row with its own
+            # official identifier.
             normalized = kwargs["normalized_name"]
-            alias = await ingredient_alias_repository.get_or_create(
+            alias = await register_curated_alias(
                 session,
-                ingredient_id=kwargs["id"],
+                canonical=ingredient,
                 alias_text=kwargs["common_name"],
-                alias_normalized=normalized,
                 language="en",
-                source=IngredientSource.CURATED_SEED,
             )
             if alias.ingredient_id != kwargs["id"]:
                 logger.warning(
@@ -273,13 +271,14 @@ async def load_seed() -> int:
 
         for ingredient_id, alias_text, language in _EXTRA_ALIASES:
             normalized = normalize_ingredient_name(alias_text)
-            alias = await ingredient_alias_repository.get_or_create(
+            canonical = await session.get(Ingredient, ingredient_id)
+            if canonical is None:
+                raise RuntimeError(f"Curated alias target {ingredient_id!r} does not exist")
+            alias = await register_curated_alias(
                 session,
-                ingredient_id=ingredient_id,
+                canonical=canonical,
                 alias_text=alias_text,
-                alias_normalized=normalized,
                 language=language,
-                source=IngredientSource.CURATED_SEED,
             )
             if alias.ingredient_id != ingredient_id:
                 logger.warning(

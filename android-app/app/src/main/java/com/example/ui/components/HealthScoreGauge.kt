@@ -4,6 +4,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,8 +17,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -49,6 +53,7 @@ fun HealthScoreGauge(
     sugarGrams: Double,
     sodiumMg: Double,
     saturatedFatGrams: Double,
+    onNovaGroupClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var startAnimation by remember { mutableStateOf(false) }
@@ -174,6 +179,8 @@ fun HealthScoreGauge(
                 subtitle = if (novaGroup >= 4) "Ultra-processed" else if (novaGroup == 3) "Processed" else "Unprocessed",
                 progress = (novaGroup / 4f).coerceIn(0f, 1f),
                 accentColor = if (novaGroup >= 4) RiskRed else if (novaGroup >= 3) RiskOrange else RiskGreen,
+                onClick = onNovaGroupClick,
+                showInfoIcon = onNovaGroupClick != null,
                 modifier = Modifier.weight(1f)
             )
 
@@ -219,10 +226,14 @@ private fun NutrientTile(
     subtitle: String,
     progress: Float,
     accentColor: Color,
+    onClick: (() -> Unit)? = null,
+    showInfoIcon: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Card(
-        modifier = modifier,
+        modifier = modifier.then(
+            if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
+        ),
         shape = RoundedCornerShape(NutriGuardRadius.medium),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
@@ -239,12 +250,25 @@ private fun NutrientTile(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .clip(CircleShape)
-                        .background(accentColor)
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (showInfoIcon) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = "Learn about NOVA groups",
+                            tint = accentColor,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(accentColor)
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(4.dp))

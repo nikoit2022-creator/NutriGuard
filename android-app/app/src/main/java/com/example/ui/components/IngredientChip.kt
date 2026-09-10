@@ -39,7 +39,7 @@ import com.example.ui.theme.getWhoIarcUiColor
 @Composable
 fun IngredientChip(
     ingredient: IngredientEntity,
-    onClick: () -> Unit,
+    onClick: (() -> Unit)?,
     modifier: Modifier = Modifier
 ) {
     val riskUi = getRiskUiColor(ingredient.riskLevel)
@@ -54,7 +54,7 @@ fun IngredientChip(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(NutriGuardRadius.medium))
-            .clickable { onClick() },
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
@@ -155,12 +155,31 @@ fun IngredientChip(
                 }
             }
 
-            Icon(
-                imageVector = Icons.Default.ChevronRight,
-                contentDescription = "Inspect ingredient",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-            )
+            if (onClick != null) {
+                Icon(
+                    imageVector = Icons.Default.ChevronRight,
+                    contentDescription = "Inspect ingredient",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                )
+            }
         }
     }
 }
+
+fun hasUsefulIngredientDetails(ingredient: IngredientEntity): Boolean = listOf(
+    ingredient.description,
+    ingredient.purposeInFood,
+    ingredient.healthConcerns,
+    ingredient.evidenceLevel,
+    ingredient.countriesRestrictedOrBanned,
+    ingredient.sideEffects,
+    ingredient.allergens,
+    ingredient.references,
+    ingredient.sourceUrl.orEmpty(),
+).any { it.cleanOrNull() != null } ||
+    ingredient.riskAssessmentAvailable ||
+    ingredient.efsaApprovalStatus.cleanOrNull()?.uppercase() in setOf("APPROVED", "NOT_APPROVED") ||
+    ingredient.fdaApprovalStatus.cleanOrNull()?.uppercase() in setOf("APPROVED", "NOT_APPROVED") ||
+    ingredient.adiMinMgPerKgBwPerDay != null ||
+    ingredient.adiMaxMgPerKgBwPerDay != null
 

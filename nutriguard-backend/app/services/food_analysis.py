@@ -755,7 +755,9 @@ async def fetch_ingredients_for_product(db: AsyncSession, product: Product) -> l
     resolved: list[Any] = []
     for ingredient_id in ids:
         if ingredient_id in by_id:
-            resolved.append(by_id[ingredient_id])
+            resolved.append(
+                await ingredient_catalog.resolve_canonical_alias_owner(db, by_id[ingredient_id])
+            )
         else:
             resolved.append(reconstruct_synthetic_ingredient(ingredient_id, product.raw_ingredient_text))
     return resolved
