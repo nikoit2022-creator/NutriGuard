@@ -48,6 +48,8 @@ import com.example.ui.components.DietaryBadgesRow
 import com.example.ui.components.HealthScoreGauge
 import com.example.ui.components.IngredientChip
 import com.example.ui.components.IngredientDetailBottomSheet
+import com.example.ui.components.NovaGroupInfoBottomSheet
+import com.example.ui.components.hasUsefulIngredientDetails
 import com.example.ui.components.PersonalizedWarningCard
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.NutriGuardSpacing
@@ -67,6 +69,7 @@ fun ProductDetailScreen(
 ) {
     val uiState by viewModel.analysisState.collectAsState()
     var selectedIngredientForDetail by remember { mutableStateOf<IngredientEntity?>(null) }
+    var selectedNovaGroup by remember { mutableStateOf<Int?>(null) }
 
     when (val state = uiState) {
         is AnalysisUiState.Loading -> {
@@ -197,7 +200,10 @@ fun ProductDetailScreen(
                             novaGroup = product.novaGroup,
                             sugarGrams = product.sugarGrams,
                             sodiumMg = product.sodiumMg,
-                            saturatedFatGrams = product.saturatedFatGrams
+                            saturatedFatGrams = product.saturatedFatGrams,
+                            onNovaGroupClick = {
+                                if (product.novaGroup in 1..4) selectedNovaGroup = product.novaGroup
+                            }
                         )
                     } else {
                         PendingHealthScoreCard(
@@ -252,7 +258,11 @@ fun ProductDetailScreen(
                 items(analysis.ingredients) { ingredient ->
                     IngredientChip(
                         ingredient = ingredient,
-                        onClick = { selectedIngredientForDetail = ingredient }
+                        onClick = if (hasUsefulIngredientDetails(ingredient)) {
+                            { selectedIngredientForDetail = ingredient }
+                        } else {
+                            null
+                        }
                     )
                 }
 
@@ -320,6 +330,10 @@ fun ProductDetailScreen(
             IngredientDetailBottomSheet(
                 ingredient = selectedIngredientForDetail,
                 onDismiss = { selectedIngredientForDetail = null }
+            )
+            NovaGroupInfoBottomSheet(
+                selectedGroup = selectedNovaGroup,
+                onDismiss = { selectedNovaGroup = null }
             )
         }
 

@@ -155,16 +155,27 @@ fun IngredientDetailBottomSheet(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(10.dp))
 
+            val hasOverview = ingredient.description.cleanOrNull() != null ||
+                ingredient.purposeInFood.cleanOrNull() != null
+            val hasHealthInformation = ingredient.healthConcerns.cleanOrNull() != null ||
+                ingredient.sideEffects.cleanOrNull() != null ||
+                ingredient.allergens.cleanOrNull() != null ||
+                ingredient.whoIarcClassification.cleanOrNull() != null ||
+                formatAdi(ingredient.adiMinMgPerKgBwPerDay, ingredient.adiMaxMgPerKgBwPerDay) != null
+            val hasRegulatoryInformation = hasKnownRegulatoryStatus(ingredient.efsaApprovalStatus) ||
+                hasKnownRegulatoryStatus(ingredient.fdaApprovalStatus) ||
+                ingredient.countriesRestrictedOrBanned.cleanOrNull() != null ||
+                ingredient.evidenceLevel.cleanOrNull() != null ||
+                (ingredient.riskAssessmentAvailable && ingredient.riskRationale.cleanOrNull() != null)
+
+            if (hasOverview) DetailGroupTitle("About this ingredient")
             InfoSectionItem("Description", ingredient.description)
             InfoSectionItem("Purpose in food", ingredient.purposeInFood)
-            InfoSectionItem("Health considerations", ingredient.healthConcerns)
-            if (ingredient.riskAssessmentAvailable) {
-                InfoSectionItem("Why this rating", ingredient.riskRationale.orEmpty())
-            }
-            InfoSectionItem("Evidence", ingredient.evidenceLevel)
 
-            RegulatoryStatusRow("EFSA", ingredient.efsaApprovalStatus)
-            RegulatoryStatusRow("FDA", ingredient.fdaApprovalStatus)
+            if (hasHealthInformation) DetailGroupTitle("Health and safety")
+            InfoSectionItem("Health considerations", ingredient.healthConcerns)
+            InfoSectionItem("Known side effects", ingredient.sideEffects)
+            InfoSectionItem("Allergens", ingredient.allergens, highlightColor = RiskRed)
 
             ingredient.whoIarcClassification.cleanOrNull()?.let { classification ->
                 InfoSectionItem(
@@ -173,13 +184,18 @@ fun IngredientDetailBottomSheet(
                     highlightColor = getWhoIarcUiColor(classification).main
                 )
             }
-
-            InfoSectionItem("Restricted in", ingredient.countriesRestrictedOrBanned)
             formatAdi(ingredient.adiMinMgPerKgBwPerDay, ingredient.adiMaxMgPerKgBwPerDay)?.let { adi ->
                 InfoSectionItem("Acceptable daily intake", adi)
             }
-            InfoSectionItem("Known side effects", ingredient.sideEffects)
-            InfoSectionItem("Allergens", ingredient.allergens)
+
+            if (hasRegulatoryInformation) DetailGroupTitle("Evidence and regulation")
+            RegulatoryStatusRow("EFSA", ingredient.efsaApprovalStatus)
+            RegulatoryStatusRow("FDA", ingredient.fdaApprovalStatus)
+            if (ingredient.riskAssessmentAvailable) {
+                InfoSectionItem("Why this rating", ingredient.riskRationale.orEmpty())
+            }
+            InfoSectionItem("Evidence", ingredient.evidenceLevel)
+            InfoSectionItem("Restricted in", ingredient.countriesRestrictedOrBanned)
 
             if (sources.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(8.dp))
@@ -208,6 +224,22 @@ fun IngredientDetailBottomSheet(
             Spacer(modifier = Modifier.height(28.dp))
         }
     }
+}
+
+private fun hasKnownRegulatoryStatus(rawStatus: String?): Boolean = when (rawStatus.cleanOrNull()?.uppercase()) {
+    "APPROVED", "NOT_APPROVED" -> true
+    else -> false
+}
+
+@Composable
+private fun DetailGroupTitle(title: String) {
+    Text(
+        text = title,
+        modifier = Modifier.padding(top = 10.dp, bottom = 2.dp),
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.onSurface
+    )
 }
 
 @Composable
