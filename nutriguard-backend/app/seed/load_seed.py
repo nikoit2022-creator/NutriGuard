@@ -30,16 +30,25 @@ import structlog
 from sqlalchemy import select
 
 from app.database.session import AsyncSessionLocal
-from app.models.enums import IngredientSource, IngredientVerificationStatus, RiskLevel
+from app.models.enums import (
+    IngredientSource,
+    IngredientTranslationSource,
+    IngredientTranslationStatus,
+    IngredientVerificationStatus,
+    RiskLevel,
+)
 from app.models.ingredient import Ingredient
+from app.models.ingredient_localization import IngredientLocalization
 from app.repositories import ingredient_alias_repository
-from app.services.ingredient_catalog import derive_ins_number_from_e_number
+from app.services.ingredient_catalog import derive_ins_number_from_e_number, register_curated_alias
 from app.services.ingredient_normalization import normalize_ingredient_name
+from app.services.ingredient_localization import canonical_text_hash
 
 logger = structlog.get_logger(__name__)
 
 _SEED_FILE = Path(__file__).parent / "ingredients_seed.json"
 _E_ADDITIVE_SEED_FILE = Path(__file__).parent / "e_additives_curated_starter.csv"
+_BG_LOCALIZATION_SEED_FILE = Path(__file__).parent / "ingredients_seed_bg.json"
 _E_ADDITIVE_SOURCE_VERSION = "2026-09-08"
 
 _CAMEL_TO_SNAKE = {
@@ -88,6 +97,12 @@ _EXTRA_ALIASES: list[tuple[str, str, str | None]] = [
     ("e621_msg", "MSG", "en"),
     ("e250_sodium_nitrite", "натриев нитрит", "bg"),
     ("high_fructose_corn_syrup", "HFCS", "en"),
+    ("e322_soy_lecithin", "Emulsifier lecithin soy", "en"),
+    ("e322_soy_lecithin", "Emulsifier: soy lecithin", "en"),
+    ("e322_soy_lecithin", "Lecithin soy", "en"),
+    ("e322_soy_lecithin", "Lecithins (soy)", "en"),
+    ("e322_soy_lecithin", "соев лецитин", "bg"),
+    ("e322_soy_lecithin", "емулгатор соев лецитин", "bg"),
 ]
 
 
@@ -231,6 +246,58 @@ async def _load_e_additive_starter(session) -> int:
     return inserted
 
 
+async def _load_bg_localizations(session) -> int:
+    """Upsert reviewed Bulgarian display text without touching science.
+
+    The translations were initially machine-produced, which remains
+    explicit in their provenance even after review. A later
+    human-curated translation always wins and is never overwritten by
+    this seed loader.
+    """
+    rows = json.loads(_BG_LOCALIZATION_SEED_FILE.read_text(encoding="utf-8"))
+    loaded = 0
+    now = datetime.now(timezone.utc)
+    for item in rows:
+        ingredient = await session.get(Ingredient, item["ingredientId"])
+        if ingredient is None:
+            raise RuntimeError(f"Bulgarian localization target {item['ingredientId']!r} does not exist")
+        key = {"ingredient_id": ingredient.id, "language": "bg"}
+        existing = await session.get(IngredientLocalization, (ingredient.id, "bg"))
+        if (
+            existing is not None
+            and existing.translation_status == IngredientTranslationStatus.REVIEWED
+            and existing.translation_source == IngredientTranslationSource.HUMAN_CURATED
+        ):
+            continue
+        values = {
+            "common_name": item.get("commonName", ""),
+            "category": item.get("category", ""),
+            "description": item.get("description", ""),
+            "purpose_in_food": item.get("purposeInFood", ""),
+            "health_concerns": item.get("healthConcerns", ""),
+            "evidence_level": item.get("evidenceLevel", ""),
+            "countries_restricted_or_banned": item.get("countriesRestrictedOrBanned", ""),
+            "efsa_status": item.get("efsaStatus", ""),
+            "fda_status": item.get("fdaStatus", ""),
+            "acceptable_daily_intake": item.get("acceptableDailyIntake", ""),
+            "side_effects": item.get("sideEffects", ""),
+            "allergens": item.get("allergens", ""),
+            "translation_status": IngredientTranslationStatus.REVIEWED,
+            "translation_source": IngredientTranslationSource.MACHINE_TRANSLATED,
+            "source_content_hash": canonical_text_hash(ingredient),
+            "reviewed_at": now,
+            "schema_version": 1,
+        }
+        if existing is None:
+            session.add(IngredientLocalization(**key, **values))
+        else:
+            for field_name, value in values.items():
+                setattr(existing, field_name, value)
+        loaded += 1
+    await session.flush()
+    return loaded
+
+
 async def load_seed() -> int:
     rows = json.loads(_SEED_FILE.read_text(encoding="utf-8"))
     count = 0
@@ -244,24 +311,16 @@ async def load_seed() -> int:
             # Register this row's own name as its first/primary alias.
             # Curated seed data always wins (SOURCE_PRIORITY['CURATED_SEED']
             # is the highest rank -- see app.services.ingredient_catalog) --
-            # but `get_or_create` never overwrites an existing alias row,
-            # so if this normalized name was somehow already claimed by a
-            # DIFFERENT ingredient id (e.g. an OCR-only stub persisted
-            # before this curated entry existed in the seed file), that
-            # pre-existing mapping is left exactly as-is and only logged,
-            # not silently repointed -- reconciling/merging that older
-            # stub into this curated row is a deliberate, reviewed
-            # maintenance operation, not something a seed load should
-            # ever do automatically to production data. See
-            # docs/CODEX_HANDOFF.md.
+            # `register_curated_alias` may reclaim the exact alias from
+            # a bare UNVERIFIED OCR stub. It never reassigns an alias
+            # owned by verified/limited data or by a row with its own
+            # official identifier.
             normalized = kwargs["normalized_name"]
-            alias = await ingredient_alias_repository.get_or_create(
+            alias = await register_curated_alias(
                 session,
-                ingredient_id=kwargs["id"],
+                canonical=ingredient,
                 alias_text=kwargs["common_name"],
-                alias_normalized=normalized,
                 language="en",
-                source=IngredientSource.CURATED_SEED,
             )
             if alias.ingredient_id != kwargs["id"]:
                 logger.warning(
@@ -273,13 +332,14 @@ async def load_seed() -> int:
 
         for ingredient_id, alias_text, language in _EXTRA_ALIASES:
             normalized = normalize_ingredient_name(alias_text)
-            alias = await ingredient_alias_repository.get_or_create(
+            canonical = await session.get(Ingredient, ingredient_id)
+            if canonical is None:
+                raise RuntimeError(f"Curated alias target {ingredient_id!r} does not exist")
+            alias = await register_curated_alias(
                 session,
-                ingredient_id=ingredient_id,
+                canonical=canonical,
                 alias_text=alias_text,
-                alias_normalized=normalized,
                 language=language,
-                source=IngredientSource.CURATED_SEED,
             )
             if alias.ingredient_id != ingredient_id:
                 logger.warning(
@@ -290,6 +350,7 @@ async def load_seed() -> int:
                 )
 
         count += await _load_e_additive_starter(session)
+        await _load_bg_localizations(session)
 
         await session.commit()
     logger.info("seed_loaded", count=count)

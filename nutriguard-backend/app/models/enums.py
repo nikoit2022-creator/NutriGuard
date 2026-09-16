@@ -56,6 +56,25 @@ class IngredientSource(str, enum.Enum):
     OCR_HEURISTIC = "OCR_HEURISTIC"
 
 
+class IngredientTranslationStatus(str, enum.Enum):
+    """Review state of localized display text, independent of the
+    scientific claim's own verification status."""
+
+    DRAFT = "DRAFT"
+    REVIEWED = "REVIEWED"
+
+
+class IngredientTranslationSource(str, enum.Enum):
+    """How localized display text was produced.
+
+    A reviewed machine translation remains honestly machine-sourced;
+    review status and translation origin are deliberately separate.
+    """
+
+    HUMAN_CURATED = "HUMAN_CURATED"
+    MACHINE_TRANSLATED = "MACHINE_TRANSLATED"
+
+
 # The only two sources allowed to back an authoritative regulatory claim
 # (EFSA/FDA approval status, a numeric ADI) or a stale-VERIFIED-row
 # revalidation (see `app.services.ingredient_regulatory` and

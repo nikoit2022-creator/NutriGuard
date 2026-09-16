@@ -27,7 +27,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
+import com.example.ui.i18n.LocalizedText as Text
+import com.example.ui.i18n.LocalAppLanguage
+import com.example.ui.i18n.localizeUiText
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -99,8 +101,9 @@ fun RecognizedIngredientsSection(
 ) {
     if (ingredients.isEmpty()) return
 
+    val language = LocalAppLanguage.current
     var expanded by rememberSaveable { mutableStateOf(initiallyExpanded) }
-    val models = ingredients.map { it.toRecognizedIngredientUiModel() }
+    val models = ingredients.map { it.toRecognizedIngredientUiModel(language = language) }
     val orderedModels = categorizeIngredientResults(models).flatMap { it.models }
     val visibleModels = if (expanded) orderedModels else orderedModels.take(COLLAPSED_INGREDIENT_COUNT)
     val visibleSections = categorizeIngredientResults(visibleModels)
@@ -226,6 +229,7 @@ fun RecognizedIngredientCard(
     onClick: (() -> Unit)?,
     modifier: Modifier = Modifier
 ) {
+    val language = LocalAppLanguage.current
     val ratingColors = ratingColors(model.rating)
     val hasRating = model.rating != IngredientSafetyRating.LIMITED_DATA
     val ratingLabel = ratingLabel(model.rating)
@@ -239,7 +243,11 @@ fun RecognizedIngredientCard(
     val interactionModifier = if (onClick != null) {
         Modifier
             .semantics(mergeDescendants = true) {
-                contentDescription = listOf(model.displayName, semanticRating, "Open ingredient details")
+                contentDescription = listOf(
+                    model.displayName,
+                    localizeUiText(semanticRating, language),
+                    localizeUiText("Open ingredient details", language)
+                )
                     .filter { it.isNotBlank() }
                     .joinToString(". ")
                 role = Role.Button
@@ -247,7 +255,11 @@ fun RecognizedIngredientCard(
             .clickable(onClick = onClick)
     } else {
         Modifier.semantics(mergeDescendants = true) {
-            contentDescription = "${model.displayName}. $semanticRating. No verified scientific profile available."
+            contentDescription = listOf(
+                model.displayName,
+                localizeUiText(semanticRating, language),
+                localizeUiText("No verified scientific profile available.", language)
+            ).filter { it.isNotBlank() }.joinToString(". ")
         }
     }
 

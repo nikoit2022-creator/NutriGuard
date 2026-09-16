@@ -27,7 +27,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
-import androidx.compose.material3.Text
+import com.example.ui.i18n.LocalizedText as Text
+import com.example.ui.i18n.LocalAppLanguage
+import com.example.ui.i18n.localizeUiText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -49,6 +51,7 @@ fun HealthProfileScreen(
     onNavigateToLibrary: () -> Unit = {},
     onNavigateToAdmin: () -> Unit = {}
 ) {
+    val language = LocalAppLanguage.current
     val profileState by viewModel.userProfile.collectAsState()
     val profile = profileState ?: UserHealthProfile()
 
@@ -309,7 +312,7 @@ fun HealthProfileScreen(
 
                     Icon(
                         imageVector = Icons.Default.ChevronRight,
-                        contentDescription = "Navigate",
+                        contentDescription = localizeUiText("Navigate", language),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                     )
                 }

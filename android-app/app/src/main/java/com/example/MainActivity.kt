@@ -36,8 +36,9 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
+import com.example.ui.i18n.LocalizedText as Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -64,6 +65,10 @@ import com.example.ui.screens.ProductDetailScreen
 import com.example.ui.screens.ScanHomeScreen
 import com.example.ui.screens.ScanHistoryScreen
 import com.example.ui.screens.ScientificLibraryScreen
+import com.example.ui.i18n.AppLanguage
+import com.example.ui.i18n.LanguageSwitcher
+import com.example.ui.i18n.LocalAppLanguage
+import com.example.ui.i18n.localizeUiText
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.NutriGuardScannerTheme
 import com.example.ui.theme.ScannerPageBackground
@@ -101,7 +106,21 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val appContainer = (application as NutriGuardApplication).container
         setContent {
-            NutriGuardScannerTheme {
+            val languagePreferences = remember {
+                getSharedPreferences("nutriguard_ui", MODE_PRIVATE)
+            }
+            var appLanguage by remember {
+                mutableStateOf(
+                    AppLanguage.fromCode(languagePreferences.getString("language", AppLanguage.ENGLISH.code))
+                )
+            }
+            val changeLanguage: (AppLanguage) -> Unit = { language ->
+                appLanguage = language
+                languagePreferences.edit().putString("language", language.code).apply()
+            }
+
+            CompositionLocalProvider(LocalAppLanguage provides appLanguage) {
+                NutriGuardScannerTheme {
                 var authState by remember {
                     mutableStateOf<DeviceAuthState>(
                         if (appContainer.authTokenStore.hasValidToken()) {
@@ -144,7 +163,9 @@ class MainActivity : ComponentActivity() {
                         AuthBootstrapScreen(
                             isConnecting = true,
                             errorMessage = null,
-                            onRetry = triggerDeviceAuth
+                            onRetry = triggerDeviceAuth,
+                            language = appLanguage,
+                            onLanguageChange = changeLanguage
                         )
                     }
                     is DeviceAuthState.Error -> {
@@ -152,16 +173,23 @@ class MainActivity : ComponentActivity() {
                             isConnecting = false,
                             errorTitle = state.title,
                             errorMessage = state.message,
-                            onRetry = triggerDeviceAuth
+                            onRetry = triggerDeviceAuth,
+                            language = appLanguage,
+                            onLanguageChange = changeLanguage
                         )
                     }
                     is DeviceAuthState.Authenticated -> {
                         val viewModel: MainViewModel = viewModel(
                             factory = MainViewModel.Factory(appContainer.foodAnalysisRepository)
                         )
-                        NutriGuardApp(viewModel = viewModel)
+                        NutriGuardApp(
+                            viewModel = viewModel,
+                            language = appLanguage,
+                            onLanguageChange = changeLanguage
+                        )
                     }
                 }
+            }
             }
         }
     }
@@ -173,6 +201,8 @@ private fun AuthBootstrapScreen(
     errorTitle: String? = null,
     errorMessage: String?,
     onRetry: () -> Unit,
+    language: AppLanguage,
+    onLanguageChange: (AppLanguage) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -182,6 +212,11 @@ private fun AuthBootstrapScreen(
             .padding(24.dp),
         contentAlignment = Alignment.Center
     ) {
+        LanguageSwitcher(
+            language = language,
+            onLanguageChange = onLanguageChange,
+            modifier = Modifier.align(Alignment.TopEnd)
+        )
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
@@ -194,7 +229,7 @@ private fun AuthBootstrapScreen(
             ) {
                 Icon(
                     imageVector = Icons.Default.Shield,
-                    contentDescription = "NutriGuard Shield",
+                    contentDescription = localizeUiText("NutriGuard Shield", language),
                     tint = ScannerViolet,
                     modifier = Modifier.size(44.dp)
                 )
@@ -236,7 +271,7 @@ private fun AuthBootstrapScreen(
                     ) {
                         Icon(
                             imageVector = Icons.Default.ErrorOutline,
-                            contentDescription = "Error",
+                            contentDescription = localizeUiText("Error", language),
                             tint = MaterialTheme.colorScheme.error,
                             modifier = Modifier.size(36.dp)
                         )
@@ -263,7 +298,7 @@ private fun AuthBootstrapScreen(
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Refresh,
-                                contentDescription = "Retry",
+                                contentDescription = localizeUiText("Retry", language),
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.size(8.dp))
@@ -300,7 +335,9 @@ private fun Throwable.toBootstrapError(): Pair<String, String> {
 
 @Composable
 fun NutriGuardApp(
-    viewModel: MainViewModel
+    viewModel: MainViewModel,
+    language: AppLanguage,
+    onLanguageChange: (AppLanguage) -> Unit
 ) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -335,6 +372,20 @@ fun NutriGuardApp(
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
+        topBar = {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(ScannerPageBackground)
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                contentAlignment = Alignment.CenterEnd
+            ) {
+                LanguageSwitcher(
+                    language = language,
+                    onLanguageChange = onLanguageChange
+                )
+            }
+        },
         bottomBar = {
             if (showBottomBar) {
                 NavigationBar(
@@ -359,7 +410,7 @@ fun NutriGuardApp(
                             icon = {
                                 Icon(
                                     imageVector = if (isSelected) tab.selectedIcon else tab.unselectedIcon,
-                                    contentDescription = tab.title
+                                    contentDescription = localizeUiText(tab.title, language)
                                 )
                             },
                             label = {
@@ -406,6 +457,15 @@ fun NutriGuardApp(
                     viewModel = viewModel,
                     onBack = {
                         navController.popBackStack()
+                    },
+                    onScanLabelForProduct = { barcode ->
+                        viewModel.requestLabelCameraForProduct(barcode)
+                        val returnedToScanner = navController.popBackStack(Screen.ScanHome.route, false)
+                        if (!returnedToScanner) {
+                            navController.navigate(Screen.ScanHome.route) {
+                                launchSingleTop = true
+                            }
+                        }
                     }
                 )
             }

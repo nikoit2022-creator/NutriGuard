@@ -130,6 +130,13 @@ class MainViewModel(
     private val _pendingBarcode = MutableStateFlow<String?>(null)
     val pendingBarcode: StateFlow<String?> = _pendingBarcode.asStateFlow()
 
+    // One pending request to open the existing Ingredient Label camera
+    // from another screen (currently Product Details). A StateFlow is
+    // used instead of a fire-and-forget event so navigation can finish
+    // composing ScanHomeScreen before the request is consumed.
+    private val _labelCameraRequestBarcode = MutableStateFlow<String?>(null)
+    val labelCameraRequestBarcode: StateFlow<String?> = _labelCameraRequestBarcode.asStateFlow()
+
     // One-shot "navigate to Product Details now" signal for a successful
     // barcode lookup -- a StateFlow would re-fire navigation on every
     // recomposition/state re-collection (e.g. after a config change);
@@ -250,6 +257,28 @@ class MainViewModel(
     fun cancelPendingScanFlow() {
         _barcodeLookupState.value = BarcodeLookupUiState.Idle
         _pendingBarcode.value = null
+        _labelCameraRequestBarcode.value = null
+    }
+
+    /**
+     * Starts a label-enrichment continuation for an already-opened
+     * barcode product. The Scan screen consumes [labelCameraRequestBarcode]
+     * and launches its existing, tested camera flow; [pendingBarcode]
+     * ensures the resulting image is merged into this same canonical
+     * product instead of creating a standalone `img_...` product.
+     */
+    fun requestLabelCameraForProduct(barcode: String) {
+        val cleaned = barcode.trim()
+        if (!cleaned.matches(Regex("\\d{8,14}"))) return
+        _pendingBarcode.value = cleaned
+        _barcodeLookupState.value = BarcodeLookupUiState.Idle
+        _labelCameraRequestBarcode.value = cleaned
+    }
+
+    fun consumeLabelCameraRequest(barcode: String) {
+        if (_labelCameraRequestBarcode.value == barcode) {
+            _labelCameraRequestBarcode.value = null
+        }
     }
 
     /**

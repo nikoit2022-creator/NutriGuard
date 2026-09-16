@@ -30,7 +30,9 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
-import androidx.compose.material3.Text
+import com.example.ui.i18n.LocalizedText as Text
+import com.example.ui.i18n.LocalAppLanguage
+import com.example.ui.i18n.localizeUiText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -54,6 +56,7 @@ fun ArchitectureAdminScreen(
     viewModel: MainViewModel,
     onBack: () -> Unit = {}
 ) {
+    val language = LocalAppLanguage.current
     val ingredients by viewModel.allIngredients.collectAsState()
     val products by viewModel.allProducts.collectAsState()
     val history by viewModel.scanHistory.collectAsState()
@@ -80,7 +83,7 @@ fun ArchitectureAdminScreen(
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
+                        contentDescription = localizeUiText("Back", language),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }

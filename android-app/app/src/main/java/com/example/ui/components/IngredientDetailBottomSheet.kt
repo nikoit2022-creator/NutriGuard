@@ -28,7 +28,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Text
+import com.example.ui.i18n.LocalizedText as Text
+import com.example.ui.i18n.AppLanguage
+import com.example.ui.i18n.LocalAppLanguage
+import com.example.ui.i18n.localizeUiText
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -51,6 +54,7 @@ import com.example.ui.theme.RiskGreen
 import com.example.ui.theme.RiskRed
 import com.example.ui.theme.getRiskUiColor
 import com.example.ui.theme.getWhoIarcUiColor
+import com.example.ui.model.localizedContent
 import java.math.BigDecimal
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -61,6 +65,8 @@ fun IngredientDetailBottomSheet(
 ) {
     if (ingredient == null) return
 
+    val language = LocalAppLanguage.current
+    val localized = ingredient.localizedContent(language)
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val riskUi = getRiskUiColor(ingredient.riskLevel)
     val riskLabel = when (ingredient.riskLevel) {
@@ -112,13 +118,16 @@ fun IngredientDetailBottomSheet(
                 }
 
                 IconButton(onClick = onDismiss) {
-                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close")
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = localizeUiText("Close", language)
+                    )
                 }
             }
 
             Spacer(modifier = Modifier.height(12.dp))
             Text(
-                text = ingredient.commonName,
+                text = localized.commonName,
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold
             )
@@ -155,16 +164,28 @@ fun IngredientDetailBottomSheet(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(10.dp))
 
-            InfoSectionItem("Description", ingredient.description)
-            InfoSectionItem("Purpose in food", ingredient.purposeInFood)
-            InfoSectionItem("Health considerations", ingredient.healthConcerns)
-            if (ingredient.riskAssessmentAvailable) {
-                InfoSectionItem("Why this rating", ingredient.riskRationale.orEmpty())
-            }
-            InfoSectionItem("Evidence", ingredient.evidenceLevel)
+            val hasOverview = localized.description.cleanOrNull() != null ||
+                localized.purposeInFood.cleanOrNull() != null
+            val hasHealthInformation = localized.healthConcerns.cleanOrNull() != null ||
+                localized.sideEffects.cleanOrNull() != null ||
+                localized.allergens.cleanOrNull() != null ||
+                ingredient.whoIarcClassification.cleanOrNull() != null ||
+                formatAdi(ingredient.adiMinMgPerKgBwPerDay, ingredient.adiMaxMgPerKgBwPerDay, language) != null ||
+                localized.acceptableDailyIntake.cleanOrNull() != null
+            val hasRegulatoryInformation = hasKnownRegulatoryStatus(ingredient.efsaApprovalStatus) ||
+                hasKnownRegulatoryStatus(ingredient.fdaApprovalStatus) ||
+                ingredient.countriesRestrictedOrBanned.cleanOrNull() != null ||
+                localized.evidenceLevel.cleanOrNull() != null ||
+                (ingredient.riskAssessmentAvailable && localized.riskRationale.cleanOrNull() != null)
 
-            RegulatoryStatusRow("EFSA", ingredient.efsaApprovalStatus)
-            RegulatoryStatusRow("FDA", ingredient.fdaApprovalStatus)
+            if (hasOverview) DetailGroupTitle("About this ingredient")
+            InfoSectionItem("Description", localized.description)
+            InfoSectionItem("Purpose in food", localized.purposeInFood)
+
+            if (hasHealthInformation) DetailGroupTitle("Health and safety")
+            InfoSectionItem("Health considerations", localized.healthConcerns)
+            InfoSectionItem("Known side effects", localized.sideEffects)
+            InfoSectionItem("Allergens", localized.allergens, highlightColor = RiskRed)
 
             ingredient.whoIarcClassification.cleanOrNull()?.let { classification ->
                 InfoSectionItem(
@@ -173,13 +194,23 @@ fun IngredientDetailBottomSheet(
                     highlightColor = getWhoIarcUiColor(classification).main
                 )
             }
-
-            InfoSectionItem("Restricted in", ingredient.countriesRestrictedOrBanned)
-            formatAdi(ingredient.adiMinMgPerKgBwPerDay, ingredient.adiMaxMgPerKgBwPerDay)?.let { adi ->
+            val numericAdi = formatAdi(
+                ingredient.adiMinMgPerKgBwPerDay,
+                ingredient.adiMaxMgPerKgBwPerDay,
+                language
+            )
+            (numericAdi ?: localized.acceptableDailyIntake.cleanOrNull())?.let { adi ->
                 InfoSectionItem("Acceptable daily intake", adi)
             }
-            InfoSectionItem("Known side effects", ingredient.sideEffects)
-            InfoSectionItem("Allergens", ingredient.allergens)
+
+            if (hasRegulatoryInformation) DetailGroupTitle("Evidence and regulation")
+            RegulatoryStatusRow("EFSA", ingredient.efsaApprovalStatus)
+            RegulatoryStatusRow("FDA", ingredient.fdaApprovalStatus)
+            if (ingredient.riskAssessmentAvailable) {
+                InfoSectionItem("Why this rating", localized.riskRationale.orEmpty())
+            }
+            InfoSectionItem("Evidence", localized.evidenceLevel)
+            InfoSectionItem("Restricted in", localized.countriesRestrictedOrBanned)
 
             if (sources.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(8.dp))
@@ -189,7 +220,10 @@ fun IngredientDetailBottomSheet(
                     Spacer(modifier = Modifier.width(4.dp))
                     Icon(
                         imageVector = if (sourcesExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                        contentDescription = if (sourcesExpanded) "Hide sources" else "Show sources"
+                        contentDescription = localizeUiText(
+                            if (sourcesExpanded) "Hide sources" else "Show sources",
+                            language
+                        )
                     )
                 }
                 if (sourcesExpanded) {
@@ -208,6 +242,22 @@ fun IngredientDetailBottomSheet(
             Spacer(modifier = Modifier.height(28.dp))
         }
     }
+}
+
+private fun hasKnownRegulatoryStatus(rawStatus: String?): Boolean = when (rawStatus.cleanOrNull()?.uppercase()) {
+    "APPROVED", "NOT_APPROVED" -> true
+    else -> false
+}
+
+@Composable
+private fun DetailGroupTitle(title: String) {
+    Text(
+        text = title,
+        modifier = Modifier.padding(top = 10.dp, bottom = 2.dp),
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.onSurface
+    )
 }
 
 @Composable
@@ -266,14 +316,26 @@ private fun InfoSectionItem(title: String, content: String, highlightColor: Colo
     }
 }
 
-private fun formatAdi(minimum: Double?, maximum: Double?): String? {
+private fun formatAdi(minimum: Double?, maximum: Double?, language: AppLanguage): String? {
     if (minimum == null && maximum == null) return null
     val range = when {
         minimum != null && maximum != null -> "${minimum.cleanNumber()}–${maximum.cleanNumber()}"
-        maximum != null -> "Up to ${maximum.cleanNumber()}"
-        else -> "From ${minimum!!.cleanNumber()}"
+        maximum != null -> if (language == AppLanguage.BULGARIAN) {
+            "До ${maximum.cleanNumber()}"
+        } else {
+            "Up to ${maximum.cleanNumber()}"
+        }
+        else -> if (language == AppLanguage.BULGARIAN) {
+            "От ${minimum!!.cleanNumber()}"
+        } else {
+            "From ${minimum!!.cleanNumber()}"
+        }
     }
-    return "$range mg/kg body weight/day"
+    return if (language == AppLanguage.BULGARIAN) {
+        "$range mg/kg телесно тегло/ден"
+    } else {
+        "$range mg/kg body weight/day"
+    }
 }
 
 private fun Double.cleanNumber(): String = BigDecimal.valueOf(this).stripTrailingZeros().toPlainString()

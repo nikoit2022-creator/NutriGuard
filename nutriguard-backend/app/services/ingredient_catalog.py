@@ -578,6 +578,61 @@ def _is_provably_weaker_duplicate(alias_owner: Ingredient) -> bool:
     )
 
 
+async def register_curated_alias(
+    db: AsyncSession,
+    *,
+    canonical: Ingredient,
+    alias_text: str,
+    language: str | None,
+):
+    """Register one explicitly reviewed alias for a curated row.
+
+    Seed aliases are human-reviewed identity statements.  They may
+    therefore reclaim an exact normalized alias from an older, bare
+    OCR stub, but never from a verified/limited-data row or from a row
+    carrying its own official identifier.  Existing product ids are
+    intentionally not rewritten here; `resolve_canonical_alias_owner`
+    makes those historical references read through to the curated row.
+    """
+    normalized = normalize_ingredient_name(alias_text)
+    existing = await ingredient_alias_repository.get_by_normalized(db, normalized)
+    if existing is None:
+        return await ingredient_alias_repository.get_or_create(
+            db,
+            ingredient_id=canonical.id,
+            alias_text=alias_text,
+            alias_normalized=normalized,
+            language=language,
+            source=IngredientSource.CURATED_SEED,
+        )
+    if existing.ingredient_id == canonical.id:
+        return existing
+
+    current_owner = await ingredient_repository.get_by_id(db, existing.ingredient_id)
+    if current_owner is not None and _is_provably_weaker_duplicate(current_owner):
+        existing.ingredient_id = canonical.id
+        existing.alias_text = alias_text
+        existing.language = language
+        existing.source = IngredientSource.CURATED_SEED
+        await db.flush()
+    return existing
+
+
+async def resolve_canonical_alias_owner(db: AsyncSession, ingredient: Ingredient) -> Ingredient:
+    """Read through a historical OCR id after a curated alias reclaimed
+    its name.  Strong/verified rows are always returned unchanged; only
+    a provably weak OCR stub can resolve to the alias's current owner.
+    """
+    if not _is_provably_weaker_duplicate(ingredient):
+        return ingredient
+    normalized = normalize_ingredient_name(ingredient.common_name)
+    alias = await ingredient_alias_repository.get_by_normalized(db, normalized)
+    if alias is None or alias.ingredient_id == ingredient.id:
+        return ingredient
+    canonical = await ingredient_repository.get_by_id(db, alias.ingredient_id)
+    return canonical or ingredient
+
+
 async def _reconcile_official_identifier_conflict(
     db: AsyncSession, *, official: Ingredient, alias_owner: Ingredient
 ) -> Ingredient:

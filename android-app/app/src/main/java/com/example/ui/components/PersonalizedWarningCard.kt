@@ -20,7 +20,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
+import com.example.ui.i18n.LocalizedText as Text
+import com.example.ui.i18n.LocalAppLanguage
+import com.example.ui.i18n.localizeUiText
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -40,6 +42,7 @@ fun PersonalizedWarningCard(
     warnings: List<HealthWarning>,
     modifier: Modifier = Modifier
 ) {
+    val language = LocalAppLanguage.current
     if (warnings.isEmpty()) return
 
     val hasHighSeverity = warnings.any { it.severity == WarningSeverity.HIGH }
@@ -64,7 +67,7 @@ fun PersonalizedWarningCard(
                 ) {
                     Icon(
                         imageVector = Icons.Default.WarningAmber,
-                        contentDescription = "Health Alerts",
+                        contentDescription = localizeUiText("Health Alerts", language),
                         tint = cardAccent,
                         modifier = Modifier.size(18.dp)
                     )

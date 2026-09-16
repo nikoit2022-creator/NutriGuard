@@ -39,6 +39,12 @@ data class IngredientEntity(
     val adiMaxMgPerKgBwPerDay: Double? = null,
     val adiSource: String? = null,
     val sourceUrl: String? = null,
+    /**
+     * Additive backend `localizations` object, retained verbatim as compact JSON so
+     * English/Bulgarian scientific copy remains available after the app goes offline.
+     * The canonical fields above remain the backward-compatible fallback.
+     */
+    val localizationsJson: String = "",
     val isGluten: Boolean? = null,
     val isLactose: Boolean? = null,
     val isVegan: Boolean? = null,

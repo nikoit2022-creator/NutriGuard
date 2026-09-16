@@ -1,12 +1,20 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from pydantic import Field, PrivateAttr, computed_field, field_serializer
+from pydantic import AliasChoices, Field, PrivateAttr, computed_field, field_serializer
 
 from app.core.config import settings
-from app.models.enums import ApprovalStatus, IngredientSource, IngredientVerificationStatus, RiskLevel
+from app.models.enums import (
+    ApprovalStatus,
+    IngredientSource,
+    IngredientTranslationSource,
+    IngredientTranslationStatus,
+    IngredientVerificationStatus,
+    RiskLevel,
+)
 from app.schemas.common import ORMModel
 from app.services.ingredient_catalog import parse_field_provenance, resolve_parsed_field_source
+from app.services.ingredient_localization import build_localizations
 from app.services.ingredient_regulatory import (
     derive_gated_adi_range_mg_per_kg_bw_per_day,
     derive_gated_approval_status,
@@ -24,6 +32,45 @@ def _as_utc(value: datetime) -> datetime:
     so treating a naive value as UTC is always correct, never a guess
     -- same pattern as `auth_service`'s `expires_at.replace(tzinfo=timezone.utc)`."""
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+class IngredientLocalizationRow(ORMModel):
+    """Internal ORM adapter; excluded from the public wire shape."""
+
+    language: str
+    common_name: str
+    category: str
+    description: str
+    purpose_in_food: str
+    health_concerns: str
+    evidence_level: str
+    countries_restricted_or_banned: str
+    efsa_status: str
+    fda_status: str
+    acceptable_daily_intake: str
+    side_effects: str
+    allergens: str
+    translation_status: IngredientTranslationStatus
+    translation_source: IngredientTranslationSource
+    source_content_hash: str
+
+
+class IngredientLocalizedTextOut(ORMModel):
+    common_name: str
+    category: str
+    description: str
+    purpose_in_food: str
+    health_concerns: str
+    evidence_level: str
+    countries_restricted_or_banned: str
+    efsa_status: str
+    fda_status: str
+    acceptable_daily_intake: str
+    side_effects: str
+    allergens: str
+    risk_rationale: str
+    translation_status: IngredientTranslationStatus | None = None
+    translation_source: IngredientTranslationSource | None = None
 
 
 class IngredientOut(ORMModel):
@@ -102,6 +149,12 @@ class IngredientOut(ORMModel):
     # DIFFERENT field on this row. See `_field_provenance` below and
     # `app.services.ingredient_catalog.parse_field_provenance`.
     field_provenance_json: str | None = Field(default=None, exclude=True, repr=False)
+    localization_rows: list[IngredientLocalizationRow] = Field(
+        default_factory=list,
+        exclude=True,
+        repr=False,
+        validation_alias=AliasChoices("loaded_localization_rows", "localization_rows"),
+    )
     # Private (not a schema field -- never validated/serialized): the
     # ONE parse of `field_provenance_json`, computed once in
     # `model_post_init` and reused by every `@computed_field` below
@@ -264,6 +317,29 @@ class IngredientOut(ORMModel):
         presence implying a confidence it doesn't have -- reserved for a
         future real INS-register lookup to flip to `True`."""
         return False
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def localizations(self) -> dict[str, IngredientLocalizedTextOut]:
+        """Canonical English plus a current, reviewed Bulgarian profile.
+
+        Existing top-level fields stay English for backward
+        compatibility. Translation provenance describes only the
+        localized prose; scientific citations and regulatory evidence
+        remain the canonical fields above.
+        """
+        adapter = type("LocalizedIngredient", (), {})()
+        for field_name in (
+            "common_name", "category", "description", "purpose_in_food",
+            "health_concerns", "evidence_level", "countries_restricted_or_banned",
+            "efsa_status", "fda_status", "acceptable_daily_intake", "side_effects", "allergens",
+        ):
+            setattr(adapter, field_name, getattr(self, field_name))
+        adapter.localization_rows = self.localization_rows
+        return {
+            language: IngredientLocalizedTextOut.model_validate(profile)
+            for language, profile in build_localizations(adapter).items()
+        }
 
 
 class IngredientCreate(ORMModel):

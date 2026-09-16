@@ -157,6 +157,7 @@ data class IngredientDto(
     val adiMaxMgPerKgBwPerDay: Double? = null,
     val adiSource: String? = null,
     val sourceUrl: String? = null,
+    val localizations: Map<String, IngredientLocalizationDto> = emptyMap(),
     val isGluten: Boolean? = null,
     val isLactose: Boolean? = null,
     val isVegan: Boolean? = null,
@@ -206,6 +207,7 @@ data class IngredientDto(
                 adiMaxMgPerKgBwPerDay = json.optNullableDouble("adiMaxMgPerKgBwPerDay"),
                 adiSource = json.optString("adiSource").takeIf { it.isNotBlank() },
                 sourceUrl = json.optString("sourceUrl").takeIf { it.isNotBlank() },
+                localizations = parseIngredientLocalizations(json.optJSONObject("localizations")),
                 isGluten = json.optNullableBoolean("isGluten"),
                 isLactose = json.optNullableBoolean("isLactose"),
                 isVegan = json.optNullableBoolean("isVegan"),
@@ -325,6 +327,7 @@ fun List<IngredientDto>.toEntities(idPrefix: String): List<IngredientEntity> =
             adiMaxMgPerKgBwPerDay = ing.adiMaxMgPerKgBwPerDay,
             adiSource = ing.adiSource.cleanOrNull(),
             sourceUrl = ing.sourceUrl.cleanOrNull(),
+            localizationsJson = ingredientLocalizationsToJson(ing.localizations),
             isGluten = ing.isGluten,
             isLactose = ing.isLactose,
             isVegan = ing.isVegan,
@@ -340,6 +343,83 @@ fun List<IngredientDto>.toEntities(idPrefix: String): List<IngredientEntity> =
             badForHighCholesterol = ing.badForHighCholesterol ?: false
         )
     }
+
+data class IngredientLocalizationDto(
+    val language: String? = null,
+    val translationStatus: String? = null,
+    val translationSource: String? = null,
+    val commonName: String? = null,
+    val category: String? = null,
+    val description: String? = null,
+    val purposeInFood: String? = null,
+    val healthConcerns: String? = null,
+    val evidenceLevel: String? = null,
+    val countriesRestrictedOrBanned: String? = null,
+    val acceptableDailyIntake: String? = null,
+    val sideEffects: String? = null,
+    val allergens: String? = null,
+    val riskRationale: String? = null
+) {
+    companion object {
+        fun fromJson(json: JSONObject): IngredientLocalizationDto = IngredientLocalizationDto(
+            language = json.optString("language").cleanOrNull(),
+            translationStatus = json.optString("translationStatus").cleanOrNull(),
+            translationSource = json.optString("translationSource").cleanOrNull(),
+            commonName = json.optString("commonName").cleanOrNull(),
+            category = json.optString("category").cleanOrNull(),
+            description = json.optString("description").cleanOrNull(),
+            purposeInFood = json.optString("purposeInFood").cleanOrNull(),
+            healthConcerns = json.optString("healthConcerns").cleanOrNull(),
+            evidenceLevel = json.optString("evidenceLevel").cleanOrNull(),
+            countriesRestrictedOrBanned = json.optString("countriesRestrictedOrBanned").cleanOrNull(),
+            acceptableDailyIntake = json.optString("acceptableDailyIntake").cleanOrNull(),
+            sideEffects = json.optString("sideEffects").cleanOrNull(),
+            allergens = json.optString("allergens").cleanOrNull(),
+            riskRationale = json.optString("riskRationale").cleanOrNull()
+        )
+    }
+}
+
+private fun parseIngredientLocalizations(json: JSONObject?): Map<String, IngredientLocalizationDto> {
+    if (json == null) return emptyMap()
+    return buildMap {
+        json.keys().forEach { rawKey ->
+            val language = rawKey.lowercase()
+            if (language in setOf("en", "bg")) {
+                json.optJSONObject(rawKey)?.let { put(language, IngredientLocalizationDto.fromJson(it)) }
+            }
+        }
+    }
+}
+
+private fun ingredientLocalizationsToJson(
+    localizations: Map<String, IngredientLocalizationDto>
+): String {
+    if (localizations.isEmpty()) return ""
+    val root = JSONObject()
+    localizations.forEach { (language, value) ->
+        val item = JSONObject()
+        fun putIfPresent(key: String, text: String?) {
+            text.cleanOrNull()?.let { item.put(key, it) }
+        }
+        putIfPresent("language", value.language)
+        putIfPresent("translationStatus", value.translationStatus)
+        putIfPresent("translationSource", value.translationSource)
+        putIfPresent("commonName", value.commonName)
+        putIfPresent("category", value.category)
+        putIfPresent("description", value.description)
+        putIfPresent("purposeInFood", value.purposeInFood)
+        putIfPresent("healthConcerns", value.healthConcerns)
+        putIfPresent("evidenceLevel", value.evidenceLevel)
+        putIfPresent("countriesRestrictedOrBanned", value.countriesRestrictedOrBanned)
+        putIfPresent("acceptableDailyIntake", value.acceptableDailyIntake)
+        putIfPresent("sideEffects", value.sideEffects)
+        putIfPresent("allergens", value.allergens)
+        putIfPresent("riskRationale", value.riskRationale)
+        root.put(language.lowercase(), item)
+    }
+    return root.toString()
+}
 
 fun ScanLabelImageResponseDto.toParsedEntities(): ParsedScanData {
     val productDto = product

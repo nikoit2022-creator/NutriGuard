@@ -1017,6 +1017,99 @@
         "title": "HealthWarningOut",
         "description": "Mirrors com.example.util.HealthWarning (API Contract 5.8)."
       },
+      "IngredientLocalizedTextOut": {
+        "properties": {
+          "commonName": {
+            "type": "string",
+            "title": "Commonname"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "purposeInFood": {
+            "type": "string",
+            "title": "Purposeinfood"
+          },
+          "healthConcerns": {
+            "type": "string",
+            "title": "Healthconcerns"
+          },
+          "evidenceLevel": {
+            "type": "string",
+            "title": "Evidencelevel"
+          },
+          "countriesRestrictedOrBanned": {
+            "type": "string",
+            "title": "Countriesrestrictedorbanned"
+          },
+          "efsaStatus": {
+            "type": "string",
+            "title": "Efsastatus"
+          },
+          "fdaStatus": {
+            "type": "string",
+            "title": "Fdastatus"
+          },
+          "acceptableDailyIntake": {
+            "type": "string",
+            "title": "Acceptabledailyintake"
+          },
+          "sideEffects": {
+            "type": "string",
+            "title": "Sideeffects"
+          },
+          "allergens": {
+            "type": "string",
+            "title": "Allergens"
+          },
+          "riskRationale": {
+            "type": "string",
+            "title": "Riskrationale"
+          },
+          "translationStatus": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IngredientTranslationStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "translationSource": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IngredientTranslationSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "commonName",
+          "category",
+          "description",
+          "purposeInFood",
+          "healthConcerns",
+          "evidenceLevel",
+          "countriesRestrictedOrBanned",
+          "efsaStatus",
+          "fdaStatus",
+          "acceptableDailyIntake",
+          "sideEffects",
+          "allergens",
+          "riskRationale"
+        ],
+        "title": "IngredientLocalizedTextOut"
+      },
       "IngredientOut": {
         "properties": {
           "id": {
@@ -1376,6 +1469,15 @@
             "title": "Insnumberverified",
             "description": "Always `False` today (task: review of INS derivation\nauthoritativeness). `insNumber` -- for a curated seed row\nexactly the same as for an OCR/Gemini row -- is always a\nMECHANICAL derivation from `eNumber` (see\n`ingredient_catalog.derive_ins_number_from_e_number`'s own\ndocstring: true for MOST, not all, shared food additives), never\nindependently confirmed against the Codex Alimentarius INS\nregister itself. This field exists so a client can tell the\ndifference between a truly independently-verified identifier and\na mechanically-derived one, rather than `insNumber`'s mere\npresence implying a confidence it doesn't have -- reserved for a\nfuture real INS-register lookup to flip to `True`.",
             "readOnly": true
+          },
+          "localizations": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/IngredientLocalizedTextOut"
+            },
+            "type": "object",
+            "title": "Localizations",
+            "description": "Canonical English plus a current, reviewed Bulgarian profile.\n\nExisting top-level fields stay English for backward\ncompatibility. Translation provenance describes only the\nlocalized prose; scientific citations and regulatory evidence\nremain the canonical fields above.",
+            "readOnly": true
           }
         },
         "type": "object",
@@ -1410,7 +1512,8 @@
           "adiMinMgPerKgBwPerDay",
           "adiMaxMgPerKgBwPerDay",
           "adiSource",
-          "insNumberVerified"
+          "insNumberVerified",
+          "localizations"
         ],
         "title": "IngredientOut",
         "description": "Mirrors com.example.data.model.IngredientEntity exactly (API Contract 5.4),\nplus additive, backward-compatible data-quality fields (see the\n\"backend-ingredient-profile-data-quality\" task): the original\n`riskLevel`/`efsaStatus`/`fdaStatus`/`acceptableDailyIntake` text\nfields are preserved unchanged for existing clients; the new fields\nbelow let an updated client distinguish a genuine assessment from\nan absent one, without ever fabricating one."
@@ -1425,6 +1528,24 @@
         ],
         "title": "IngredientSource",
         "description": "Where an `Ingredient`/`IngredientAlias` row's data came from --\nalso the priority ranking used to decide whether new data is\nallowed to overwrite what's already stored (see\n`app.services.ingredient_catalog.SOURCE_PRIORITY`/`merge_verified_fields`:\nlower-priority/lower-confidence data must never overwrite\nhigher-priority/higher-confidence data)."
+      },
+      "IngredientTranslationSource": {
+        "type": "string",
+        "enum": [
+          "HUMAN_CURATED",
+          "MACHINE_TRANSLATED"
+        ],
+        "title": "IngredientTranslationSource",
+        "description": "How localized display text was produced.\n\nA reviewed machine translation remains honestly machine-sourced;\nreview status and translation origin are deliberately separate."
+      },
+      "IngredientTranslationStatus": {
+        "type": "string",
+        "enum": [
+          "DRAFT",
+          "REVIEWED"
+        ],
+        "title": "IngredientTranslationStatus",
+        "description": "Review state of localized display text, independent of the\nscientific claim's own verification status."
       },
       "IngredientVerificationStatus": {
         "type": "string",

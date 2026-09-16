@@ -3,6 +3,7 @@ package com.example.ui.model
 import com.example.data.model.IngredientEntity
 import com.example.data.model.RiskLevel
 import com.example.data.remote.dto.cleanOrNull
+import com.example.ui.i18n.AppLanguage
 
 enum class IngredientSafetyRating {
     LOW_CONCERN,
@@ -44,15 +45,17 @@ private val GENERIC_PROFILE_VALUES = setOf(
  * until the API supplies a real score.
  */
 fun IngredientEntity.toRecognizedIngredientUiModel(
-    safetyScore: Int? = null
+    safetyScore: Int? = null,
+    language: AppLanguage = AppLanguage.ENGLISH
 ): RecognizedIngredientUiModel {
+    val localized = localizedContent(language)
     val normalizedScore = safetyScore?.takeIf { it in 0..100 }
     val synthetic = isSyntheticOrGenerated()
     val hasScientificProfile = !synthetic && listOf(
-        description,
-        purposeInFood,
-        healthConcerns,
-        evidenceLevel,
+        localized.description,
+        localized.purposeInFood,
+        localized.healthConcerns,
+        localized.evidenceLevel,
         references
     ).any { value -> value.meaningfulProfileText() != null }
 
@@ -62,21 +65,21 @@ fun IngredientEntity.toRecognizedIngredientUiModel(
         else -> riskLevel.toSafetyRating()
     }
 
-    val cleanedPurpose = purposeInFood.meaningfulProfileText()
-        ?: category.meaningfulProfileText()
-    val cleanedExplanation = description.meaningfulProfileText()
-        ?: healthConcerns.meaningfulProfileText()
+    val cleanedPurpose = localized.purposeInFood.meaningfulProfileText()
+        ?: localized.category.meaningfulProfileText()
+    val cleanedExplanation = localized.description.meaningfulProfileText()
+        ?: localized.healthConcerns.meaningfulProfileText()
 
     return RecognizedIngredientUiModel(
         ingredient = this,
-        displayName = ingredientDisplayName(),
+        displayName = ingredientDisplayName(localized.commonName),
         safetyScore = normalizedScore,
         rating = rating,
         purpose = cleanedPurpose,
         explanation = cleanedExplanation,
         eNumber = eNumber.cleanOrNull(),
-        evidenceLevel = evidenceLevel.meaningfulProfileText(),
-        allergens = allergens.meaningfulAllergenText()
+        evidenceLevel = localized.evidenceLevel.meaningfulProfileText(),
+        allergens = localized.allergens.meaningfulAllergenText()
     )
 }
 
@@ -101,8 +104,8 @@ private fun IngredientEntity.isSyntheticOrGenerated(): Boolean {
         GENERATED_INGREDIENT_ID.matches(id)
 }
 
-private fun IngredientEntity.ingredientDisplayName(): String {
-    val source = commonName.cleanOrNull()
+private fun IngredientEntity.ingredientDisplayName(localizedName: String): String {
+    val source = localizedName.cleanOrNull()
         ?.takeUnless { it.equals("Unknown Ingredient", ignoreCase = true) }
         ?: id.cleanOrNull()
         ?: return "Recognized ingredient"

@@ -28,7 +28,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Text
+import com.example.ui.i18n.LocalizedText as Text
+import com.example.ui.i18n.LocalAppLanguage
+import com.example.ui.i18n.localizeUiText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -45,6 +47,7 @@ import com.example.data.model.IngredientEntity
 import com.example.data.model.RiskLevel
 import com.example.ui.components.IngredientChip
 import com.example.ui.components.IngredientDetailBottomSheet
+import com.example.ui.model.localizedContent
 import com.example.ui.theme.ScannerViolet
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.NutriGuardSpacing
@@ -58,15 +61,19 @@ fun ScientificLibraryScreen(
     val ingredients by viewModel.allIngredients.collectAsState()
     val searchQuery by viewModel.ingredientSearchQuery.collectAsState()
     val riskFilter by viewModel.selectedRiskFilter.collectAsState()
+    val language = LocalAppLanguage.current
 
     var selectedIngredientForDetail by remember { mutableStateOf<IngredientEntity?>(null) }
 
     val filteredList = ingredients.filter { ing ->
+        val localized = ing.localizedContent(language)
         val matchesQuery = searchQuery.isBlank() ||
                 ing.commonName.contains(searchQuery, ignoreCase = true) ||
+                localized.commonName.contains(searchQuery, ignoreCase = true) ||
                 ing.scientificName.contains(searchQuery, ignoreCase = true) ||
                 ing.eNumber?.contains(searchQuery, ignoreCase = true) == true ||
-                ing.category.contains(searchQuery, ignoreCase = true)
+                ing.category.contains(searchQuery, ignoreCase = true) ||
+                localized.category.contains(searchQuery, ignoreCase = true)
 
         val matchesRisk = riskFilter == null || ing.riskLevel == riskFilter
         matchesQuery && matchesRisk
@@ -92,7 +99,7 @@ fun ScientificLibraryScreen(
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
+                        contentDescription = localizeUiText("Back", language),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -121,7 +128,7 @@ fun ScientificLibraryScreen(
                 leadingIcon = {
                     Icon(
                         imageVector = Icons.Default.Search,
-                        contentDescription = "Search",
+                        contentDescription = localizeUiText("Search", language),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 },
@@ -130,7 +137,7 @@ fun ScientificLibraryScreen(
                         IconButton(onClick = { viewModel.setIngredientSearchQuery("") }) {
                             Icon(
                                 imageVector = Icons.Default.Close,
-                                contentDescription = "Clear search",
+                                contentDescription = localizeUiText("Clear search", language),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
