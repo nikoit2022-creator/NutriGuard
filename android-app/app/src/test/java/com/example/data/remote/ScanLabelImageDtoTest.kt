@@ -76,6 +76,19 @@ class ScanLabelImageDtoTest {
               "adiMaxMgPerKgBwPerDay": 40.0,
               "adiSource": "EFSA Journal 2013;11(12):3496",
               "sourceUrl": "https://www.efsa.europa.eu/example",
+              "localizations": {
+                "en": {
+                  "commonName": "Aspartame",
+                  "description": "A low-calorie artificial sweetener."
+                },
+                "bg": {
+                  "commonName": "Аспартам",
+                  "category": "Изкуствен подсладител",
+                  "description": "Нискокалоричен изкуствен подсладител.",
+                  "translationStatus": "REVIEWED",
+                  "translationSource": "MACHINE_TRANSLATED"
+                }
+              },
               "isGluten": false,
               "isLactose": false,
               "isVegan": true,
@@ -164,6 +177,8 @@ class ScanLabelImageDtoTest {
         assertEquals(40.0, ingredient.adiMaxMgPerKgBwPerDay!!, 0.0001)
         assertEquals("EFSA Journal 2013;11(12):3496", ingredient.adiSource)
         assertEquals("https://www.efsa.europa.eu/example", ingredient.sourceUrl)
+        assertTrue(ingredient.localizationsJson.contains("Аспартам"))
+        assertTrue(ingredient.localizationsJson.contains("MACHINE_TRANSLATED"))
         assertFalse(ingredient.badForDiabetes)
         assertFalse(ingredient.badForHypertension)
         assertTrue(ingredient.badForKidneyDisease)

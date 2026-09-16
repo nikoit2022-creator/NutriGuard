@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -29,7 +30,9 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
+import com.example.ui.i18n.LocalizedText as Text
+import com.example.ui.i18n.LocalAppLanguage
+import com.example.ui.i18n.localizeUiText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -46,6 +49,8 @@ import androidx.compose.ui.unit.sp
 import com.example.data.model.IngredientEntity
 import com.example.ui.components.DietaryBadgesRow
 import com.example.ui.components.HealthScoreGauge
+import com.example.ui.components.HealthFactor
+import com.example.ui.components.HealthFactorInfoBottomSheet
 import com.example.ui.components.IngredientChip
 import com.example.ui.components.IngredientDetailBottomSheet
 import com.example.ui.components.NovaGroupInfoBottomSheet
@@ -65,11 +70,14 @@ import com.example.ui.viewmodel.MainViewModel
 @Composable
 fun ProductDetailScreen(
     viewModel: MainViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onScanLabelForProduct: (String) -> Unit
 ) {
+    val language = LocalAppLanguage.current
     val uiState by viewModel.analysisState.collectAsState()
     var selectedIngredientForDetail by remember { mutableStateOf<IngredientEntity?>(null) }
     var selectedNovaGroup by remember { mutableStateOf<Int?>(null) }
+    var selectedHealthFactor by remember { mutableStateOf<HealthFactor?>(null) }
 
     when (val state = uiState) {
         is AnalysisUiState.Loading -> {
@@ -171,7 +179,7 @@ fun ProductDetailScreen(
                         ) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Back",
+                                contentDescription = localizeUiText("Back", language),
                                 tint = ScannerViolet
                             )
                         }
@@ -203,7 +211,10 @@ fun ProductDetailScreen(
                             saturatedFatGrams = product.saturatedFatGrams,
                             onNovaGroupClick = {
                                 if (product.novaGroup in 1..4) selectedNovaGroup = product.novaGroup
-                            }
+                            },
+                            onSugarClick = { selectedHealthFactor = HealthFactor.SUGAR },
+                            onSodiumClick = { selectedHealthFactor = HealthFactor.SODIUM },
+                            onSaturatedFatClick = { selectedHealthFactor = HealthFactor.SATURATED_FAT }
                         )
                     } else {
                         PendingHealthScoreCard(
@@ -252,6 +263,41 @@ fun ProductDetailScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = ScannerSlateMuted
                         )
+                    }
+                }
+
+                if (shouldOfferLabelEnrichment(
+                        barcode = product.barcode,
+                        hasVerifiedIngredients = product.hasVerifiedIngredients,
+                        ingredientCount = analysis.ingredients.size,
+                        rawIngredientText = product.rawIngredientText
+                    )
+                ) {
+                    item {
+                        Button(
+                            onClick = { onScanLabelForProduct(product.barcode) },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(NutriGuardRadius.medium),
+                            colors = ButtonDefaults.buttonColors(containerColor = ScannerViolet)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PhotoCamera,
+                                contentDescription = null,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = "Add more product information",
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Take another photo of ingredients, nutrition facts or product details",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.82f)
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -335,6 +381,16 @@ fun ProductDetailScreen(
                 selectedGroup = selectedNovaGroup,
                 onDismiss = { selectedNovaGroup = null }
             )
+            HealthFactorInfoBottomSheet(
+                factor = selectedHealthFactor,
+                value = when (selectedHealthFactor) {
+                    HealthFactor.SUGAR -> product.sugarGrams
+                    HealthFactor.SODIUM -> product.sodiumMg
+                    HealthFactor.SATURATED_FAT -> product.saturatedFatGrams
+                    null -> 0.0
+                },
+                onDismiss = { selectedHealthFactor = null }
+            )
         }
 
         else -> {
@@ -348,6 +404,18 @@ fun ProductDetailScreen(
             }
         }
     }
+}
+
+internal fun shouldOfferLabelEnrichment(
+    barcode: String,
+    hasVerifiedIngredients: Boolean,
+    ingredientCount: Int,
+    rawIngredientText: String
+): Boolean {
+    val isRealBarcode = barcode.matches(Regex("\\d{8,14}"))
+    val informationLooksIncomplete =
+        !hasVerifiedIngredients || ingredientCount <= 1 || rawIngredientText.isBlank()
+    return isRealBarcode && informationLooksIncomplete
 }
 
 @Composable

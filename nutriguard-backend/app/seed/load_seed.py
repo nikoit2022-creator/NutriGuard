@@ -30,16 +30,25 @@ import structlog
 from sqlalchemy import select
 
 from app.database.session import AsyncSessionLocal
-from app.models.enums import IngredientSource, IngredientVerificationStatus, RiskLevel
+from app.models.enums import (
+    IngredientSource,
+    IngredientTranslationSource,
+    IngredientTranslationStatus,
+    IngredientVerificationStatus,
+    RiskLevel,
+)
 from app.models.ingredient import Ingredient
+from app.models.ingredient_localization import IngredientLocalization
 from app.repositories import ingredient_alias_repository
 from app.services.ingredient_catalog import derive_ins_number_from_e_number, register_curated_alias
 from app.services.ingredient_normalization import normalize_ingredient_name
+from app.services.ingredient_localization import canonical_text_hash
 
 logger = structlog.get_logger(__name__)
 
 _SEED_FILE = Path(__file__).parent / "ingredients_seed.json"
 _E_ADDITIVE_SEED_FILE = Path(__file__).parent / "e_additives_curated_starter.csv"
+_BG_LOCALIZATION_SEED_FILE = Path(__file__).parent / "ingredients_seed_bg.json"
 _E_ADDITIVE_SOURCE_VERSION = "2026-09-08"
 
 _CAMEL_TO_SNAKE = {
@@ -237,6 +246,58 @@ async def _load_e_additive_starter(session) -> int:
     return inserted
 
 
+async def _load_bg_localizations(session) -> int:
+    """Upsert reviewed Bulgarian display text without touching science.
+
+    The translations were initially machine-produced, which remains
+    explicit in their provenance even after review. A later
+    human-curated translation always wins and is never overwritten by
+    this seed loader.
+    """
+    rows = json.loads(_BG_LOCALIZATION_SEED_FILE.read_text(encoding="utf-8"))
+    loaded = 0
+    now = datetime.now(timezone.utc)
+    for item in rows:
+        ingredient = await session.get(Ingredient, item["ingredientId"])
+        if ingredient is None:
+            raise RuntimeError(f"Bulgarian localization target {item['ingredientId']!r} does not exist")
+        key = {"ingredient_id": ingredient.id, "language": "bg"}
+        existing = await session.get(IngredientLocalization, (ingredient.id, "bg"))
+        if (
+            existing is not None
+            and existing.translation_status == IngredientTranslationStatus.REVIEWED
+            and existing.translation_source == IngredientTranslationSource.HUMAN_CURATED
+        ):
+            continue
+        values = {
+            "common_name": item.get("commonName", ""),
+            "category": item.get("category", ""),
+            "description": item.get("description", ""),
+            "purpose_in_food": item.get("purposeInFood", ""),
+            "health_concerns": item.get("healthConcerns", ""),
+            "evidence_level": item.get("evidenceLevel", ""),
+            "countries_restricted_or_banned": item.get("countriesRestrictedOrBanned", ""),
+            "efsa_status": item.get("efsaStatus", ""),
+            "fda_status": item.get("fdaStatus", ""),
+            "acceptable_daily_intake": item.get("acceptableDailyIntake", ""),
+            "side_effects": item.get("sideEffects", ""),
+            "allergens": item.get("allergens", ""),
+            "translation_status": IngredientTranslationStatus.REVIEWED,
+            "translation_source": IngredientTranslationSource.MACHINE_TRANSLATED,
+            "source_content_hash": canonical_text_hash(ingredient),
+            "reviewed_at": now,
+            "schema_version": 1,
+        }
+        if existing is None:
+            session.add(IngredientLocalization(**key, **values))
+        else:
+            for field_name, value in values.items():
+                setattr(existing, field_name, value)
+        loaded += 1
+    await session.flush()
+    return loaded
+
+
 async def load_seed() -> int:
     rows = json.loads(_SEED_FILE.read_text(encoding="utf-8"))
     count = 0
@@ -289,6 +350,7 @@ async def load_seed() -> int:
                 )
 
         count += await _load_e_additive_starter(session)
+        await _load_bg_localizations(session)
 
         await session.commit()
     logger.info("seed_loaded", count=count)

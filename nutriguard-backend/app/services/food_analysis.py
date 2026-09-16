@@ -143,6 +143,7 @@ from app.services import barcode_discovery, gemini_image_parser, health_score, w
 from app.services import barcode_validation
 from app.services import ingredient_catalog
 from app.services import ingredient_regulatory
+from app.services import ingredient_localization
 from app.services.barcode_text_safety import is_placeholder
 from app.services.barcode_validation import validate_and_normalize
 from app.services.fallback_analysis import AnalyzedProductData, fallback_local_analysis
@@ -531,6 +532,7 @@ def _ingredient_out_dict(ing: Any) -> dict:
         "confidence": (float(c) if (c := getattr(ing, "confidence", None)) is not None else None),
         "schemaVersion": getattr(ing, "schema_version", None),
         "needsRefresh": needs_refresh,
+        "localizations": ingredient_localization.build_localizations(ing),
         "isGluten": ing.is_gluten,
         "isLactose": ing.is_lactose,
         "isVegan": ing.is_vegan,

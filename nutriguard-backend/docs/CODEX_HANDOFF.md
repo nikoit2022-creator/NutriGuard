@@ -1,5 +1,40 @@
 # CODEX_HANDOFF
 
+## 2026-09-11: app-wide EN/BG and reviewed ingredient localizations
+
+- Android and backend were updated together on the existing
+  `fix/ingredient-details-nova-ui` branch; no commit, push, merge or
+  deployment was performed in this task.
+- Backend: added `ingredient_localizations`, keyed by ingredient and
+  language, with review/source provenance and canonical-content hashes.
+  Existing English fields remain canonical/backward compatible. The
+  API additively returns `localizations.en` and a current reviewed
+  `localizations.bg`; identifiers, numeric ADI, enums and URLs remain
+  unchanged. Twelve rich seed ingredients have Bulgarian profiles
+  marked `MACHINE_TRANSLATED` + `REVIEWED`.
+- Android: added persistent localization JSON to the Room ingredient
+  cache (schema 3→4), resolves Bulgarian with per-field English
+  fallback, and applies it to ingredient cards, details and library
+  search. A persistent EN/BG control now switches app-owned UI text,
+  dates, accessibility labels and available scientific profiles without
+  rescanning. Original product names, brands and OCR label text remain
+  unchanged.
+- Files involved: new backend localization model/service/seed/migration
+  and related schema/seed/serializer/tests; Android i18n components,
+  DTO/Room mapping, localized ingredient presentation and tests.
+- Verification: Android `:app:testDebugUnitTest :app:lintDebug
+  --rerun-tasks` passed after all changes: **116 tests, 0 failed, 0
+  skipped**, and lint succeeded. The Windows host has no Python or
+  Docker runtime, so the complete backend pytest suite, pinned OpenAPI
+  regeneration and disposable-PostgreSQL migration cycle still need to
+  run on the backend VM/CI. The tracked OpenAPI snapshot was updated to
+  the additive localization shape and parses as valid JSON, but must be
+  compared byte-for-byte with the pinned runtime generator there.
+- Recommended next step: run both full suites, regenerate and review
+  `openapi.json` using the pinned backend dependencies, verify the new
+  Alembic migration against disposable PostgreSQL, then commit and open
+  a PR only after review.
+
 ## 2026-09-09: E-number starter knowledge and compact Android presentation
 
 - Branch: `feat/e-number-knowledge-ui`, based on GitHub `origin/main`

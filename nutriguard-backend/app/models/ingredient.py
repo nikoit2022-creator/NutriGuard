@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, DateTime, Enum, Integer, Numeric, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
 from app.models.enums import IngredientSource, IngredientVerificationStatus, RiskLevel
@@ -215,3 +215,11 @@ class Ingredient(Base):
     bad_for_pregnancy: Mapped[bool] = mapped_column("bad_for_pregnancy", Boolean, default=False)
     bad_for_children: Mapped[bool] = mapped_column("bad_for_children", Boolean, default=False)
     bad_for_high_cholesterol: Mapped[bool] = mapped_column("bad_for_high_cholesterol", Boolean, default=False)
+
+    # Reviewed display translations. ``selectin`` is intentional: both
+    # normal scan responses and the hand-built partial-analysis error
+    # response serialize these rows outside repository code, where an
+    # async lazy load would otherwise raise MissingGreenlet.
+    localization_rows: Mapped[list["IngredientLocalization"]] = relationship(  # type: ignore[name-defined]
+        back_populates="ingredient", cascade="all, delete-orphan", lazy="selectin"
+    )

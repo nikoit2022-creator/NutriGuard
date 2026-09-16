@@ -24,7 +24,9 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
+import com.example.ui.i18n.LocalizedText as Text
+import com.example.ui.i18n.LocalAppLanguage
+import com.example.ui.i18n.localizeUiText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -54,6 +56,9 @@ fun HealthScoreGauge(
     sodiumMg: Double,
     saturatedFatGrams: Double,
     onNovaGroupClick: (() -> Unit)? = null,
+    onSugarClick: (() -> Unit)? = null,
+    onSodiumClick: (() -> Unit)? = null,
+    onSaturatedFatClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var startAnimation by remember { mutableStateOf(false) }
@@ -190,6 +195,8 @@ fun HealthScoreGauge(
                 subtitle = "per 100g",
                 progress = (sugarGrams / 25.0).toFloat().coerceIn(0f, 1f),
                 accentColor = if (sugarGrams > 12.0) RiskRed else if (sugarGrams > 5.0) RiskYellow else RiskGreen,
+                onClick = onSugarClick,
+                showInfoIcon = onSugarClick != null,
                 modifier = Modifier.weight(1f)
             )
         }
@@ -204,6 +211,8 @@ fun HealthScoreGauge(
                 subtitle = "per 100g",
                 progress = (sodiumMg / 1000.0).toFloat().coerceIn(0f, 1f),
                 accentColor = if (sodiumMg > 600.0) RiskRed else if (sodiumMg > 300.0) RiskYellow else RiskGreen,
+                onClick = onSodiumClick,
+                showInfoIcon = onSodiumClick != null,
                 modifier = Modifier.weight(1f)
             )
 
@@ -213,6 +222,8 @@ fun HealthScoreGauge(
                 subtitle = "per 100g",
                 progress = (saturatedFatGrams / 10.0).toFloat().coerceIn(0f, 1f),
                 accentColor = if (saturatedFatGrams > 5.0) RiskRed else if (saturatedFatGrams > 2.5) RiskYellow else RiskGreen,
+                onClick = onSaturatedFatClick,
+                showInfoIcon = onSaturatedFatClick != null,
                 modifier = Modifier.weight(1f)
             )
         }
@@ -230,6 +241,7 @@ private fun NutrientTile(
     showInfoIcon: Boolean = false,
     modifier: Modifier = Modifier
 ) {
+    val language = LocalAppLanguage.current
     Card(
         modifier = modifier.then(
             if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
@@ -257,7 +269,7 @@ private fun NutrientTile(
                     if (showInfoIcon) {
                         Icon(
                             imageVector = Icons.Default.Info,
-                            contentDescription = "Learn about NOVA groups",
+                            contentDescription = "${localizeUiText("Learn more", language)}: ${localizeUiText(title, language)}",
                             tint = accentColor,
                             modifier = Modifier.size(16.dp)
                         )

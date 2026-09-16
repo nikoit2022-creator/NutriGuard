@@ -6,7 +6,14 @@ data that was never actually confirmed. Complements
 `test_ingredient_regulatory.py` (the pure derivation logic) and
 `test_ocr_normalizer.py` (the synthetic-ingredient construction).
 """
-from app.models.enums import IngredientSource, IngredientVerificationStatus, RiskLevel
+from app.models.enums import (
+    IngredientSource,
+    IngredientTranslationSource,
+    IngredientTranslationStatus,
+    IngredientVerificationStatus,
+    RiskLevel,
+)
+from app.services.ingredient_localization import canonical_text_hash
 from app.schemas.ingredient import IngredientOut
 from app.services.ocr_normalizer import create_synthetic_ingredient
 
@@ -133,11 +140,47 @@ def test_ingredient_out_field_set_is_purely_additive():
     # PR #13 review fixes: `insNumberVerified` (see `ingredient_regulatory`
     # module docstring -- INS is only ever mechanically derived, never an
     # independently-verified identifier).
-    review_fix_fields = {"insNumberVerified"}
+    review_fix_fields = {"insNumberVerified", "localizations"}
     assert (
         dumped.keys()
         == original_camel_fields | data_quality_task_fields | knowledge_cache_task_fields | review_fix_fields
     )
+
+
+def test_reviewed_localization_serializes_nested_and_leaves_canonical_fields_unchanged():
+    canonical = _curated_kwargs()
+    hash_source = type("Canonical", (), canonical)()
+    out = IngredientOut(
+        **canonical,
+        localization_rows=[
+            {
+                "language": "bg",
+                "common_name": "Аспартам",
+                "category": "Изкуствен подсладител",
+                "description": "Интензивен подсладител.",
+                "purpose_in_food": "Подслаждане.",
+                "health_concerns": "Информация за здравето.",
+                "evidence_level": "Умерени доказателства",
+                "countries_restricted_or_banned": "",
+                "efsa_status": "Разрешен",
+                "fda_status": "Одобрен",
+                "acceptable_daily_intake": "0–40 mg/kg телесно тегло/ден",
+                "side_effects": "",
+                "allergens": "Съдържа фенилаланин",
+                "translation_status": IngredientTranslationStatus.REVIEWED,
+                "translation_source": IngredientTranslationSource.HUMAN_CURATED,
+                "source_content_hash": canonical_text_hash(hash_source),
+            }
+        ],
+    )
+
+    dumped = out.model_dump(by_alias=True)
+
+    assert dumped["commonName"] == "Aspartame"
+    assert dumped["localizations"]["en"]["commonName"] == "Aspartame"
+    assert dumped["localizations"]["bg"]["commonName"] == "Аспартам"
+    assert dumped["localizations"]["bg"]["translationSource"] == "HUMAN_CURATED"
+    assert "references" not in dumped["localizations"]["bg"]
 
 
 # --- Gated EFSA/FDA/ADI (PR #13 review: requirement 4) ----------------------

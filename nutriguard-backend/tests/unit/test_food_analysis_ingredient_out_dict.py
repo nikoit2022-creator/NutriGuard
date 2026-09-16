@@ -97,6 +97,42 @@ def test_a_row_that_never_went_through_a_partial_merge_is_unaffected():
     assert result["adiSource"] == "WHO IARC Monograph Vol 134 (2023)"
 
 
+def test_partial_analysis_dict_includes_the_same_reviewed_localizations():
+    row = _curated_row()
+    from app.models.enums import IngredientTranslationSource, IngredientTranslationStatus
+    from app.models.ingredient_localization import IngredientLocalization
+    from app.services.ingredient_localization import canonical_text_hash
+
+    row.localization_rows = [
+        IngredientLocalization(
+            ingredient_id=row.id,
+            language="bg",
+            common_name="Аспартам",
+            category="Изкуствен подсладител",
+            description="Описание",
+            purpose_in_food="Подсладител",
+            health_concerns="Здравна информация",
+            evidence_level="Умерени доказателства",
+            countries_restricted_or_banned="",
+            efsa_status="Разрешен",
+            fda_status="Одобрен",
+            acceptable_daily_intake="0–40 mg/kg телесно тегло/ден",
+            side_effects="",
+            allergens="Съдържа фенилаланин",
+            translation_status=IngredientTranslationStatus.REVIEWED,
+            translation_source=IngredientTranslationSource.MACHINE_TRANSLATED,
+            source_content_hash=canonical_text_hash(row),
+        )
+    ]
+
+    result = _ingredient_out_dict(row)
+
+    assert result["localizations"]["en"]["commonName"] == "Aspartame"
+    assert result["localizations"]["bg"]["commonName"] == "Аспартам"
+    assert result["localizations"]["bg"]["translationSource"] == "MACHINE_TRANSLATED"
+    assert result["references"] == "WHO IARC Monograph Vol 134 (2023)"
+
+
 # --- PR #13 review round 3: field-specific risk/citation provenance --------
 
 

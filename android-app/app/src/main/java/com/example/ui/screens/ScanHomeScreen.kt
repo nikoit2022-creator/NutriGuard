@@ -48,7 +48,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Text
+import com.example.ui.i18n.LocalizedText as Text
+import com.example.ui.i18n.LocalAppLanguage
+import com.example.ui.i18n.localizeUiText
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -106,9 +108,14 @@ fun ScanHomeScreen(
     onNavigateToLibrary: () -> Unit
 ) {
     val context = LocalContext.current
+    val language = LocalAppLanguage.current
+    fun toast(message: String) {
+        Toast.makeText(context, localizeUiText(message, language), Toast.LENGTH_SHORT).show()
+    }
     val recentScans by viewModel.scanHistory.collectAsState()
     val barcodeLookupState by viewModel.barcodeLookupState.collectAsState()
     val pendingBarcode by viewModel.pendingBarcode.collectAsState()
+    val labelCameraRequestBarcode by viewModel.labelCameraRequestBarcode.collectAsState()
 
     var isOcrMode by remember { mutableStateOf(false) }
     var showManualEntry by remember { mutableStateOf(false) }
@@ -180,14 +187,14 @@ fun ScanHomeScreen(
                 if (value != null) {
                     submitBarcode(value)
                 } else {
-                    Toast.makeText(context, "No barcode value was detected.", Toast.LENGTH_SHORT).show()
+                    toast("No barcode value was detected.")
                 }
             }
             .addOnCanceledListener {
                 // Stay on the scan screen when the user closes the scanner.
             }
             .addOnFailureListener {
-                Toast.makeText(context, "Unable to start barcode scanner.", Toast.LENGTH_SHORT).show()
+                toast("Unable to start barcode scanner.")
             }
     }
 
@@ -211,10 +218,10 @@ fun ScanHomeScreen(
                 if (bitmap != null) {
                     viewModel.analyzeLabelImage(bitmap)
                 } else {
-                    Toast.makeText(context, "Unable to read the selected image.", Toast.LENGTH_SHORT).show()
+                    toast("Unable to read the selected image.")
                 }
             } catch (e: Exception) {
-                Toast.makeText(context, "Unable to process the selected image.", Toast.LENGTH_SHORT).show()
+                toast("Unable to process the selected image.")
             }
         }
     }
@@ -233,10 +240,10 @@ fun ScanHomeScreen(
                 if (bitmap != null) {
                     viewModel.analyzeLabelImage(bitmap)
                 } else {
-                    Toast.makeText(context, "Unable to read the captured image.", Toast.LENGTH_SHORT).show()
+                    toast("Unable to read the captured image.")
                 }
             } catch (_: Exception) {
-                Toast.makeText(context, "Unable to process the captured image.", Toast.LENGTH_SHORT).show()
+                toast("Unable to process the captured image.")
             } finally {
                 // decodeCapturedBitmap has fully read the file into `bitmap`
                 // by this point (or the read/decode itself is what failed) --
@@ -267,8 +274,19 @@ fun ScanHomeScreen(
             createdFile?.delete()
             pendingCameraFile = null
             pendingCameraUri = null
-            Toast.makeText(context, "Unable to open the camera.", Toast.LENGTH_SHORT).show()
+            toast("Unable to open the camera.")
         }
+    }
+
+    // Product Details can request more evidence for its existing
+    // barcode. Consume only after this screen and its camera launcher
+    // exist, switch to the correct tab, then reuse the exact same
+    // permission/FileProvider/result handling as an ordinary label scan.
+    LaunchedEffect(labelCameraRequestBarcode) {
+        val requestedBarcode = labelCameraRequestBarcode ?: return@LaunchedEffect
+        viewModel.consumeLabelCameraRequest(requestedBarcode)
+        isOcrMode = true
+        startIngredientPhotoCapture()
     }
 
     NutriGuardScannerTheme {
@@ -314,7 +332,7 @@ fun ScanHomeScreen(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Search,
-                        contentDescription = "Search Ingredient Database",
+                        contentDescription = localizeUiText("Search Ingredient Database", language),
                         tint = ScannerSlateSecondary
                     )
                 }
@@ -409,7 +427,7 @@ fun ScanHomeScreen(
                         ) {
                             Icon(
                                 imageVector = if (isOcrMode) Icons.Default.DocumentScanner else Icons.Default.QrCodeScanner,
-                                contentDescription = "Scanner",
+                                contentDescription = localizeUiText("Scanner", language),
                                 tint = Color.White,
                                 modifier = Modifier.size(52.dp)
                             )
@@ -664,7 +682,10 @@ fun ScanHomeScreen(
 
                         Icon(
                             imageVector = if (showManualEntry) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                            contentDescription = if (showManualEntry) "Collapse" else "Expand",
+                            contentDescription = localizeUiText(
+                                if (showManualEntry) "Collapse" else "Expand",
+                                language
+                            ),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }

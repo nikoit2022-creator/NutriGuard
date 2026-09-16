@@ -20,7 +20,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
+import com.example.ui.i18n.LocalizedText as Text
+import com.example.ui.i18n.LocalAppLanguage
+import com.example.ui.i18n.localizeUiText
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -32,6 +34,7 @@ import androidx.compose.ui.unit.sp
 import com.example.data.model.IngredientEntity
 import com.example.data.model.RiskLevel
 import com.example.data.remote.dto.cleanOrNull
+import com.example.ui.model.localizedContent
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.getRiskUiColor
 import com.example.ui.theme.getWhoIarcUiColor
@@ -42,6 +45,8 @@ fun IngredientChip(
     onClick: (() -> Unit)?,
     modifier: Modifier = Modifier
 ) {
+    val language = LocalAppLanguage.current
+    val localized = ingredient.localizedContent(language)
     val riskUi = getRiskUiColor(ingredient.riskLevel)
     val riskLabel = when (ingredient.riskLevel) {
         RiskLevel.SAFE -> "Safe"
@@ -84,7 +89,7 @@ fun IngredientChip(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = ingredient.commonName,
+                            text = localized.commonName,
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface
@@ -108,7 +113,7 @@ fun IngredientChip(
                         }
                     }
 
-                    val displayCategory = ingredient.category.cleanOrNull()
+                    val displayCategory = localized.category.cleanOrNull()
                     if (displayCategory != null || ingredient.riskAssessmentAvailable) {
                         Spacer(modifier = Modifier.height(2.dp))
                         Row(
@@ -158,7 +163,7 @@ fun IngredientChip(
             if (onClick != null) {
                 Icon(
                     imageVector = Icons.Default.ChevronRight,
-                    contentDescription = "Inspect ingredient",
+                    contentDescription = localizeUiText("Inspect ingredient", language),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                 )
             }
@@ -176,6 +181,7 @@ fun hasUsefulIngredientDetails(ingredient: IngredientEntity): Boolean = listOf(
     ingredient.allergens,
     ingredient.references,
     ingredient.sourceUrl.orEmpty(),
+    ingredient.localizationsJson,
 ).any { it.cleanOrNull() != null } ||
     ingredient.riskAssessmentAvailable ||
     ingredient.efsaApprovalStatus.cleanOrNull()?.uppercase() in setOf("APPROVED", "NOT_APPROVED") ||

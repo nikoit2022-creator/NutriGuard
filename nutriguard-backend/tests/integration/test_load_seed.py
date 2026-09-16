@@ -13,9 +13,15 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.models.enums import IngredientSource, IngredientVerificationStatus
+from app.models.enums import (
+    IngredientSource,
+    IngredientTranslationSource,
+    IngredientTranslationStatus,
+    IngredientVerificationStatus,
+)
 from app.models.ingredient import Ingredient
 from app.models.ingredient_alias import IngredientAlias
+from app.models.ingredient_localization import IngredientLocalization
 from app.repositories import ingredient_alias_repository
 from app.seed import load_seed as load_seed_module
 from app.services.food_analysis import fetch_ingredients_for_product
@@ -108,6 +114,38 @@ async def test_load_seed_is_idempotent_and_never_duplicates_aliases(db_engine, m
         # 47 rows - 8 starter overlaps already represented by the original
         # seed = 47 self aliases, plus the curated extra variants.
         assert len(alias_rows) == 47 + len(load_seed_module._EXTRA_ALIASES)
+
+        localization_rows = (await db.execute(select(IngredientLocalization))).scalars().all()
+        assert len(localization_rows) == 12
+        aspartame_bg = next(row for row in localization_rows if row.ingredient_id == "e951_aspartame")
+        assert aspartame_bg.language == "bg"
+        assert aspartame_bg.common_name == "Аспартам"
+        assert aspartame_bg.translation_status == IngredientTranslationStatus.REVIEWED
+        assert aspartame_bg.translation_source == IngredientTranslationSource.MACHINE_TRANSLATED
+        assert len(aspartame_bg.source_content_hash) == 64
+
+
+@pytest.mark.asyncio
+async def test_load_seed_never_overwrites_a_reviewed_human_translation(db_engine, monkeypatch):
+    """A later human correction is authoritative and must survive every
+    application restart, when the idempotent seed loader runs again."""
+    session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False, class_=AsyncSession)
+    monkeypatch.setattr(load_seed_module, "AsyncSessionLocal", session_factory)
+
+    await load_seed_module.load_seed()
+    async with session_factory() as db:
+        localization = await db.get(IngredientLocalization, ("e951_aspartame", "bg"))
+        localization.common_name = "Аспартам — проверен превод"
+        localization.translation_source = IngredientTranslationSource.HUMAN_CURATED
+        localization.translation_status = IngredientTranslationStatus.REVIEWED
+        await db.commit()
+
+    await load_seed_module.load_seed()
+    async with session_factory() as db:
+        localization = await db.get(IngredientLocalization, ("e951_aspartame", "bg"))
+        assert localization.common_name == "Аспартам — проверен превод"
+        assert localization.translation_source == IngredientTranslationSource.HUMAN_CURATED
+        assert localization.translation_status == IngredientTranslationStatus.REVIEWED
 
 
 @pytest.mark.asyncio

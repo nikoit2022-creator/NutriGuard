@@ -23,7 +23,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Text
+import com.example.ui.i18n.LocalizedText as Text
+import com.example.ui.i18n.LocalAppLanguage
+import com.example.ui.i18n.localizeUiText
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -61,6 +63,7 @@ fun NovaGroupInfoBottomSheet(
     selectedGroup: Int?,
     onDismiss: () -> Unit
 ) {
+    val language = LocalAppLanguage.current
     if (selectedGroup == null) return
     val selected = novaGroupUiInfo(selectedGroup)
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -100,7 +103,10 @@ fun NovaGroupInfoBottomSheet(
                     )
                 }
                 IconButton(onClick = onDismiss) {
-                    Icon(Icons.Default.Close, contentDescription = "Close")
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = localizeUiText("Close", language)
+                    )
                 }
             }
 

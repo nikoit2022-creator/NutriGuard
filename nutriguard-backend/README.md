@@ -12,6 +12,20 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V20 (reviewed EN/BG ingredient profiles):** Ingredient scientific
+copy now supports additive, persistent localizations. Canonical English
+fields and every existing API field remain unchanged. A new
+`ingredient_localizations` table stores reviewed Bulgarian display text
+with translation status/source, a hash of the canonical source text and
+review timestamp. Responses add `localizations.en` and, only when a
+reviewed translation still matches the current canonical source,
+`localizations.bg`. The initial twelve rich scientific profiles include
+reviewed Bulgarian translations marked honestly as machine-translated.
+Identifiers, structured approval/risk values, numeric ADI values and
+citations/URLs are never translated or duplicated. Partial-analysis
+ingredient payloads use the same localization serializer as successful
+responses. Migration `b5c6d7e8f9a0`.
+
 **V19 (NutriGuard E-number knowledge starter):** The seed loader now
 imports the provided 43-row curated starter CSV in addition to the 12
 existing rich ingredient profiles. Eight E-numbers overlap existing

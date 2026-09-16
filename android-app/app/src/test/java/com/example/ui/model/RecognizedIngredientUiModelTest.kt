@@ -3,6 +3,7 @@ package com.example.ui.model
 import com.example.data.model.IngredientEntity
 import com.example.data.model.RiskLevel
 import com.example.ui.components.categorizeIngredientResults
+import com.example.ui.i18n.AppLanguage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -108,6 +109,28 @@ class RecognizedIngredientUiModelTest {
         )
         assertEquals("Colour", sections.first().models.single().displayName)
         assertEquals("Flavour", sections.last().models.single().displayName)
+    }
+
+    @Test
+    fun reviewedBulgarianProfileChangesDisplayCopyWithoutChangingCanonicalData() {
+        val ingredient = ingredient().copy(
+            localizationsJson = """
+                {"en":{"commonName":"Citric acid"},"bg":{
+                  "commonName":"Лимонена киселина",
+                  "category":"Регулатор на киселинността",
+                  "description":"Естествено срещаща се хранителна киселина.",
+                  "purposeInFood":"Регулира киселинността"
+                }}
+            """.trimIndent()
+        )
+
+        val english = ingredient.toRecognizedIngredientUiModel(language = AppLanguage.ENGLISH)
+        val bulgarian = ingredient.toRecognizedIngredientUiModel(language = AppLanguage.BULGARIAN)
+
+        assertEquals("Citric acid", english.displayName)
+        assertEquals("Лимонена киселина", bulgarian.displayName)
+        assertEquals("Естествено срещаща се хранителна киселина.", bulgarian.explanation)
+        assertEquals("Citric acid", ingredient.commonName)
     }
 
     private fun ingredient(

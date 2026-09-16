@@ -24,7 +24,10 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
+import com.example.ui.i18n.LocalizedText as Text
+import com.example.ui.i18n.AppLanguage
+import com.example.ui.i18n.LocalAppLanguage
+import com.example.ui.i18n.localizeUiText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -56,6 +59,7 @@ fun ScanHistoryScreen(
     onSelectHistoryItem: (String) -> Unit,
     onNavigateToScan: () -> Unit = {}
 ) {
+    val language = LocalAppLanguage.current
     val historyList by viewModel.scanHistory.collectAsState()
     var pendingBarcode by remember { mutableStateOf<String?>(null) }
 
@@ -117,7 +121,7 @@ fun ScanHistoryScreen(
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.History,
-                                    contentDescription = "Empty history",
+                                    contentDescription = localizeUiText("Empty history", language),
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.size(28.dp)
                                 )
@@ -158,7 +162,17 @@ fun ScanHistoryScreen(
                         else -> RiskRed to RiskRed.copy(alpha = 0.15f)
                     }
 
-                    val dateFormatted = SimpleDateFormat("MMM d, yyyy • h:mm a", Locale.getDefault())
+                    val dateLocale = if (language == AppLanguage.BULGARIAN) {
+                        Locale.forLanguageTag("bg-BG")
+                    } else {
+                        Locale.ENGLISH
+                    }
+                    val datePattern = if (language == AppLanguage.BULGARIAN) {
+                        "d MMM yyyy • HH:mm"
+                    } else {
+                        "MMM d, yyyy • h:mm a"
+                    }
+                    val dateFormatted = SimpleDateFormat(datePattern, dateLocale)
                         .format(Date(history.scannedAt))
 
                     Card(
@@ -223,7 +237,7 @@ fun ScanHistoryScreen(
 
                             Icon(
                                 imageVector = Icons.Default.ChevronRight,
-                                contentDescription = "View Analysis",
+                                contentDescription = localizeUiText("View Analysis", language),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                             )
                         }
