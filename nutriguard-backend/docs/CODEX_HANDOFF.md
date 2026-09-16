@@ -1,5 +1,125 @@
 # CODEX_HANDOFF
 
+## 2026-09-16: PR #18 pre-merge verification (Claude Code, isolated worktree)
+
+Full independent verification of PR #18 (`feat/app-bilingual-enrichment`,
+commit `eceaaff017737f82815fc630fd2b1f28b7b3b820`) requested ahead of
+merge. Performed entirely in a separate `git worktree` (detached HEAD at
+that exact SHA) and disposable Docker containers/network -- the live
+dev stack (`nutriguard-backend-db-1`/`-redis-1`/`-backend-1`) and the
+main checkout were never touched, switched, or stopped.
+
+**1. Target verification**: `origin/feat/app-bilingual-enrichment` ==
+`eceaaff017737f82815fc630fd2b1f28b7b3b820`, matching the requested SHA
+exactly, re-checked again after finishing (no remote drift). GitHub
+Actions for this SHA: both `tests` and `unit-tests` checks
+`completed`/`success` (checked via the public REST API).
+
+**2. Full backend suite** (pinned deps, Python 3.12, built from this
+branch's own `Dockerfile`/`requirements.txt`, env isolated from any
+`.env`): `python -m pytest -q` -> **486 passed, 10 skipped, 0 failed**
+before this pass's additions; **491 passed, 10 skipped, 0 failed**
+after (see item 6). All 10 skips are the pre-existing opt-in
+`tests/postgres/` suite (needs `NUTRIGUARD_TEST_POSTGRES_URL`), not
+failures.
+
+**3. Disposable PostgreSQL 16 migration cycle** (unique container/
+network, removed after use; live DB never touched, never downgraded):
+- `alembic upgrade` to the new migration's actual parent
+  (`a4b5c6d7e8f9`, NOT `e4f5a6b7c8d9` -- `main` has advanced two more
+  migrations, `f5a6b7c8d9e0` and `a4b5c6d7e8f9`, since the last
+  handoff entry below was written), inserted a pre-existing
+  Ingredient(E951 Aspartame)/Product row pair using the OLD column
+  set, then `upgrade -> b5c6d7e8f9a0 -> verify -> downgrade ->
+  a4b5c6d7e8f9 -> verify -> upgrade -> b5c6d7e8f9a0 -> verify`: **the
+  pre-existing ingredient row, its product's `ingredient_ids`
+  reference, the `ingredient_localizations` table, its composite PK
+  (`ingredient_id`,`language`), its `ON DELETE CASCADE` FK, and its
+  `language IN ('en','bg')` CHECK constraint all survived/reappeared
+  correctly at every step.** Also directly verified: a duplicate
+  `(ingredient_id, language)` insert is rejected (PK uniqueness);
+  `language='fr'` is rejected (CHECK constraint); deleting the parent
+  Ingredient cascades and removes its localization row.
+- Seed loader run twice against the same disposable instance:
+  **idempotent** -- identical `(ingredients=47, aliases=58,
+  bg_localizations=12)` after both runs, no duplicate
+  `(ingredient_id, language)` rows. All 12 reviewed Bulgarian rows
+  verified attached to the correct canonical curated ingredient id
+  (e.g. `e621_msg` -> "Monosodium Glutamate" / "Мононатриев глутамат").
+- `alembic heads`: **exactly one head**, `b5c6d7e8f9a0`.
+- All 10 opt-in `tests/postgres/` tests (unrelated pre-existing
+  concurrency/identifier-precedence suites) also re-run against this
+  same disposable instance after migrating to head: **10/10 passed**
+  (one transient failure was traced to leftover data from this
+  session's own earlier ad-hoc script runs against the same
+  container, not a product bug -- resolved by resetting the schema;
+  10/10 passed again from a clean slate).
+
+**4. OpenAPI**: `app.openapi()` regenerated inside the pinned-dependency
+image and compared to the tracked `openapi.json` -- **exact match, 0
+differences**. No changes needed.
+
+**5. Localization behavior**: read through `Ingredient.
+loaded_localization_rows`, `IngredientOut.localizations`, and
+`ingredient_localization.build_localizations` (used by both the
+Pydantic schema path and the hand-built `_ingredient_out_dict` partial-
+response path). Confirmed by inspection and by the new tests in item 6:
+existing English top-level fields are untouched; only a `REVIEWED` +
+content-hash-matching Bulgarian row is ever surfaced (a `DRAFT` row or
+one whose hash no longer matches the current English text falls back
+to English); identifiers/E-numbers/ADI/enums/citations/URLs are never
+duplicated into the localized profile; translation review status lives
+on a wholly separate table/enum from `Ingredient.verification_status`
+and is never written together with it anywhere in `load_seed.py` or
+`ingredient_catalog.py`, so a translation being `REVIEWED` cannot
+promote the underlying scientific/regulatory evidence.
+
+**6. Regression coverage added** (task requirement: exercise the
+MissingGreenlet fix with actual SQLAlchemy objects, not mocks -- the
+existing unit tests in `test_ingredient_schema_data_quality.py`/
+`test_ingredient_localization*.py` only used `SimpleNamespace`/a hand-
+written fake class for the "unloaded relationship" case). New file
+`tests/integration/test_ingredient_localization_response_paths.py`
+(+5 tests, all passing):
+- Forced a REAL, persistent `Ingredient` row's `localization_rows` to
+  come back genuinely unloaded (via an explicit `lazyload()` query
+  option -- confirmed no normal repository query anywhere in `app/`
+  does this itself; `lazy="selectin"` already protects every default
+  query path). Proved touching the raw relationship synchronously
+  reproduces the exact `MissingGreenlet` error CI hit, and that both
+  serializers (`IngredientOut.model_validate` and
+  `_ingredient_out_dict`) correctly fall back to English-only instead
+  of raising.
+- End-to-end, through the real FastAPI app with a real reviewed
+  Bulgarian row attached to a real Ingredient: `GET /products/
+  {barcode}` (normal product response), `GET /ingredients` (product
+  listing), a hand-built `labelScanRequired` partial response
+  (`_label_scan_required_details`), and `POST /scan/label-image` with
+  a Gemini-mocked payload resolved via official E-number match to the
+  same curated row (barcode/label scan) -- all four correctly surface
+  the reviewed Bulgarian localization alongside the unchanged English
+  fields, eNumber, and citations.
+- Full suite after adding these: **491 passed, 10 skipped, 0 failed**
+  (pinned image). OpenAPI re-confirmed exact match after the rebuild
+  (test-only change, no schema/route touched).
+
+**Files involved this pass**: only
+`tests/integration/test_ingredient_localization_response_paths.py`
+added (new file). No `app/` code changed -- no reproducible product
+bug was found; the only gap was test coverage, now closed.
+
+**Unresolved / carried forward**: none new. Everything listed as
+unresolved in the "app-wide EN/BG" entry immediately below this one
+remains accurate context but is otherwise unaffected by this pass.
+
+**Recommended next step**: commit and push this one new test file to
+`feat/app-bilingual-enrichment` (no `app/` changes, so no re-review of
+production behavior is needed beyond this file) and merge PR #18 once
+CI is green on the resulting commit. Live deployment was not touched
+at any point in this session.
+
+---
+
 ## 2026-09-16: CI regression fix for unloaded ingredient localizations
 
 - PR #18's first backend CI run failed with 20 `MissingGreenlet`
