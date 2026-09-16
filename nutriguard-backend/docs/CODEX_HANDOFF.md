@@ -1,5 +1,33 @@
 # CODEX_HANDOFF
 
+## 2026-09-16: CI regression fix for unloaded ingredient localizations
+
+- PR #18's first backend CI run failed with 20 `MissingGreenlet`
+  errors while Pydantic serialized `Ingredient.localization_rows` from
+  legacy product-query paths that had not preloaded the new async
+  relationship. Product data itself was valid; synchronous response
+  serialization was accidentally attempting hidden database I/O.
+- Added `Ingredient.loaded_localization_rows`, a SQLAlchemy-state-aware
+  view that returns reviewed translations only when the relationship is
+  already loaded. `IngredientOut` now validates its internal translation
+  rows through that safe view, and `build_localizations` follows the same
+  rule. An unloaded relationship therefore produces the canonical
+  English profile instead of HTTP 500; normally preloaded reviewed
+  Bulgarian profiles remain unchanged.
+- Added a regression test whose unsafe relationship accessor raises if
+  touched, proving schema validation uses the no-I/O path and returns an
+  English localization.
+- Files involved: `app/models/ingredient.py`,
+  `app/schemas/ingredient.py`, `app/services/ingredient_localization.py`,
+  and `tests/unit/test_ingredient_schema_data_quality.py`.
+- Local verification: `git diff --check` passed. The Windows workspace
+  has no backend Python/Docker runtime, so the full backend suite is to
+  be verified by the new GitHub Actions run after this fix is pushed.
+- Unresolved issue: none in the diagnosed serialization path; CI remains
+  the required full-suite confirmation.
+- Recommended next step: push the focused fix to PR #18 and require both
+  Android and backend checks to be green before considering merge.
+
 ## 2026-09-11: app-wide EN/BG and reviewed ingredient localizations
 
 - Android and backend were updated together on the existing

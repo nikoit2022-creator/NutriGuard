@@ -183,6 +183,35 @@ def test_reviewed_localization_serializes_nested_and_leaves_canonical_fields_unc
     assert "references" not in dumped["localizations"]["bg"]
 
 
+def test_unloaded_localization_relationship_falls_back_to_english_without_lazy_io():
+    """Response validation must not touch an unloaded async relationship.
+
+    This is the regression for the MissingGreenlet failures found by CI:
+    older product-query paths can return a valid Ingredient without
+    preloading the additive localization relationship. The response is
+    still useful in canonical English and must never become HTTP 500.
+    """
+
+    class IngredientWithUnloadedLocalizations:
+        def __init__(self) -> None:
+            for key, value in _curated_kwargs().items():
+                setattr(self, key, value)
+
+        @property
+        def loaded_localization_rows(self):
+            return []
+
+        @property
+        def localization_rows(self):
+            raise AssertionError("serialization attempted a lazy relationship load")
+
+    out = IngredientOut.model_validate(IngredientWithUnloadedLocalizations())
+    dumped = out.model_dump(by_alias=True)
+
+    assert dumped["localizations"].keys() == {"en"}
+    assert dumped["localizations"]["en"]["commonName"] == "Aspartame"
+
+
 # --- Gated EFSA/FDA/ADI (PR #13 review: requirement 4) ----------------------
 
 

@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from pydantic import Field, PrivateAttr, computed_field, field_serializer
+from pydantic import AliasChoices, Field, PrivateAttr, computed_field, field_serializer
 
 from app.core.config import settings
 from app.models.enums import (
@@ -149,7 +149,12 @@ class IngredientOut(ORMModel):
     # DIFFERENT field on this row. See `_field_provenance` below and
     # `app.services.ingredient_catalog.parse_field_provenance`.
     field_provenance_json: str | None = Field(default=None, exclude=True, repr=False)
-    localization_rows: list[IngredientLocalizationRow] = Field(default_factory=list, exclude=True, repr=False)
+    localization_rows: list[IngredientLocalizationRow] = Field(
+        default_factory=list,
+        exclude=True,
+        repr=False,
+        validation_alias=AliasChoices("loaded_localization_rows", "localization_rows"),
+    )
     # Private (not a schema field -- never validated/serialized): the
     # ONE parse of `field_provenance_json`, computed once in
     # `model_post_init` and reused by every `@computed_field` below

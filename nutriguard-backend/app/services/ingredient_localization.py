@@ -68,7 +68,13 @@ def build_localizations(ingredient: Any) -> dict[str, dict[str, Any]]:
     """
     result = {"en": _wire_profile(ingredient)}
     expected_hash = canonical_text_hash(ingredient)
-    for row in getattr(ingredient, "localization_rows", ()) or ():
+    # SQLAlchemy Ingredient exposes this safe view so response building
+    # never lazily queries an async relationship from synchronous code.
+    # Plain test/adaptor objects keep using ``localization_rows``.
+    rows = getattr(ingredient, "loaded_localization_rows", None)
+    if rows is None:
+        rows = getattr(ingredient, "localization_rows", ())
+    for row in rows or ():
         status = getattr(row, "translation_status", None)
         status_value = status.value if hasattr(status, "value") else status
         if (

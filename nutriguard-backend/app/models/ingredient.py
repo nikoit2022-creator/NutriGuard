@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Enum, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, DateTime, Enum, Integer, Numeric, String, Text, inspect as sa_inspect
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
@@ -216,10 +216,26 @@ class Ingredient(Base):
     bad_for_children: Mapped[bool] = mapped_column("bad_for_children", Boolean, default=False)
     bad_for_high_cholesterol: Mapped[bool] = mapped_column("bad_for_high_cholesterol", Boolean, default=False)
 
-    # Reviewed display translations. ``selectin`` is intentional: both
-    # normal scan responses and the hand-built partial-analysis error
-    # response serialize these rows outside repository code, where an
-    # async lazy load would otherwise raise MissingGreenlet.
+    # Reviewed display translations. ``selectin`` covers the normal
+    # repository query path. Some legacy/hand-built response paths can
+    # still hold an Ingredient whose relationship was not preloaded;
+    # serializers must use ``loaded_localization_rows`` below rather
+    # than triggering async database I/O implicitly.
     localization_rows: Mapped[list["IngredientLocalization"]] = relationship(  # type: ignore[name-defined]
         back_populates="ingredient", cascade="all, delete-orphan", lazy="selectin"
     )
+
+    @property
+    def loaded_localization_rows(self) -> list["IngredientLocalization"]:  # type: ignore[name-defined]
+        """Return translations only when SQLAlchemy already loaded them.
+
+        Pydantic response serialization is synchronous. Accessing an
+        unloaded async relationship there raises ``MissingGreenlet``
+        and turns an otherwise valid product response into HTTP 500.
+        Missing eager loading is therefore a safe English-only fallback,
+        never an invitation to perform hidden database I/O.
+        """
+        state = sa_inspect(self)
+        if "localization_rows" in state.unloaded:
+            return []
+        return self.localization_rows
