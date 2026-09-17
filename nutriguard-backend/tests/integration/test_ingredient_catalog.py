@@ -188,12 +188,65 @@ async def test_materialize_ingredients_replaces_synthetic_stubs_and_passes_throu
 
     synthetic = create_synthetic_ingredient("Unobtainium Extract")
     mixed = [curated, synthetic]
-    materialized, _translation_occurred = await ingredient_catalog.materialize_ingredients(db_session, mixed)
+    materialized, _translation_occurred, _ = await ingredient_catalog.materialize_ingredients(db_session, mixed)
 
     assert materialized[0] is curated  # untouched
     assert isinstance(materialized[1], Ingredient)
     assert materialized[1].id == synthetic.id
     assert await ingredient_repository.count(db_session) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_all_normalized_english_excludes_non_english_and_untagged_aliases(db_session):
+    """Code-review regression (issue #19 finding 1): the repository
+    function backing `ingredient_translation._translation_is_reliable`'s
+    catalog-alias fallback must only ever return aliases explicitly
+    tagged `language="en"` -- a Bulgarian-tagged alias, a French-tagged
+    alias, and an untagged (`language=None`) spelling variant must all
+    be excluded, since none of them is evidence of ENGLISH output."""
+    curated = _seeded_ingredient()
+    db_session.add(curated)
+    await db_session.flush()
+
+    await ingredient_alias_repository.get_or_create(
+        db_session,
+        ingredient_id=curated.id,
+        alias_text="Citric Acid",
+        alias_normalized=normalize_ingredient_name("Citric Acid"),
+        language="en",
+        source=IngredientSource.CURATED_SEED,
+    )
+    await ingredient_alias_repository.get_or_create(
+        db_session,
+        ingredient_id=curated.id,
+        alias_text="Лимонена киселина",
+        alias_normalized=normalize_ingredient_name("Лимонена киселина"),
+        language="bg",
+        source=IngredientSource.CURATED_SEED,
+    )
+    await ingredient_alias_repository.get_or_create(
+        db_session,
+        ingredient_id=curated.id,
+        alias_text="acide citrique",
+        alias_normalized=normalize_ingredient_name("acide citrique"),
+        language="fr",
+        source=IngredientSource.GEMINI,
+    )
+    await ingredient_alias_repository.get_or_create(
+        db_session,
+        ingredient_id=curated.id,
+        alias_text="citric acid variant",
+        alias_normalized=normalize_ingredient_name("citric acid variant"),
+        language=None,
+        source=IngredientSource.OCR_HEURISTIC,
+    )
+
+    english_names = await ingredient_alias_repository.get_all_normalized_english(db_session)
+
+    assert normalize_ingredient_name("Citric Acid") in english_names
+    assert normalize_ingredient_name("Лимонена киселина") not in english_names
+    assert normalize_ingredient_name("acide citrique") not in english_names
+    assert normalize_ingredient_name("citric acid variant") not in english_names
 
 
 # --- 3. Deduplication across spelling/case variants -------------------------

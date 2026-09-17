@@ -48,6 +48,7 @@ something faked here to justify testing them. See
 `docs/CODEX_HANDOFF.md` for the full scoping note.
 """
 import json
+from dataclasses import dataclass
 from dataclasses import replace as _dataclasses_replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -944,9 +945,51 @@ async def get_or_create_catalog_ingredient(db: AsyncSession, synthetic: Syntheti
     )
 
 
+@dataclass(frozen=True)
+class IngredientTranslationSummary:
+    """The real, observed outcome of one request's per-ingredient
+    translation pass (`_resolve_ingredient_languages`) -- distinct from
+    the whole-LABEL-blob translation pass in `app.services.label_language`
+    (a mixed label can have the whole-label pass report "ok"/no
+    translation needed while individual embedded foreign tokens still
+    went through this per-ingredient path -- code-review fix: this used
+    to be silently discarded, so `app.api.v1.scan`'s diagnostics could
+    under-report `translationAttempted` for exactly that mixed case).
+
+    Deliberately bounded/aggregate-only -- counts and a small set of
+    detected LANGUAGE CODES, never original or translated ingredient
+    text -- so it is always safe to fold into request diagnostics
+    without violating `app.core.scan_diagnostics`'s no-raw-content rule.
+    """
+
+    attempted: int = 0
+    reliable: int = 0
+    unreliable: int = 0
+    detected_languages: tuple[str, ...] = ()
+
+    def merged_with(self, other: "IngredientTranslationSummary") -> "IngredientTranslationSummary":
+        """`food_analysis`'s finalize functions call `materialize_ingredients`
+        TWICE per request (an earlier pass right after ingredient
+        matching, then a second Bulgarian-alias-aware rebuild pass) --
+        the first pass is normally where any REAL translation work
+        happens; the second one's own targets are then usually already
+        alias-resolved (see `_resolve_ingredient_languages` step 1) and
+        contributes an empty summary. Combining both here (rather than
+        the caller keeping only the second/later one) means a real
+        first-pass translation is never silently dropped from
+        diagnostics just because the second pass had nothing left to
+        do."""
+        return IngredientTranslationSummary(
+            attempted=self.attempted + other.attempted,
+            reliable=self.reliable + other.reliable,
+            unreliable=self.unreliable + other.unreliable,
+            detected_languages=tuple(sorted(set(self.detected_languages) | set(other.detected_languages))),
+        )
+
+
 async def _resolve_ingredient_languages(
     db: AsyncSession, ingredients: list[Any]
-) -> tuple[list[Any], bool]:
+) -> tuple[list[Any], bool, "IngredientTranslationSummary"]:
     """Task 1 ("consistent ingredient identity and language"): runs
     BEFORE any `SyntheticIngredient` is persisted (the root cause this
     module exists to fix -- identity used to persist untranslated
@@ -970,13 +1013,20 @@ async def _resolve_ingredient_languages(
          are all derived correctly); an unreliable one is flagged
          `identity_uncertain` instead, original text preserved.
 
-    Returns `(prepared_ingredients, translation_occurred)` -- the second
-    element tells the caller whether any entry's display text actually
-    changed, so `food_analysis`'s finalize functions know whether
-    `Product.raw_ingredient_text` needs reconstructing from the
+    Returns `(prepared_ingredients, translation_occurred, summary)` --
+    the second element tells the caller whether any entry's display
+    text actually changed, so `food_analysis`'s finalize functions know
+    whether `Product.raw_ingredient_text` needs reconstructing from the
     materialized names to stay consistent with the ids just persisted
     (see `ocr_normalizer.reconstruct_synthetic_ingredient`, which
-    re-tokenizes that exact text on every later read).
+    re-tokenizes that exact text on every later read). `summary` is the
+    real, observed outcome of THIS request's own per-ingredient
+    translation attempts (distinct from the whole-label pass in
+    `app.services.label_language`) -- bounded counts and detected
+    language CODES only, never original/translated ingredient text, so
+    it is safe to fold into request diagnostics (task: "propagate
+    bounded request-scoped observed metadata from the per-ingredient
+    path" / diagnostics privacy limits, see `app.core.scan_diagnostics`).
     """
     prepared: list[Any] = list(ingredients)
     to_translate: list[tuple[int, SyntheticIngredient, str]] = []
@@ -1027,7 +1077,7 @@ async def _resolve_ingredient_languages(
         to_translate.append((idx, ing, lang))
 
     if not to_translate:
-        return prepared, False
+        return prepared, False, IngredientTranslationSummary()
 
     # Full-list context (task requirement): every entry this scan
     # actually saw, curated and synthetic alike, not just the subset
@@ -1038,7 +1088,7 @@ async def _resolve_ingredient_languages(
     # own docstring / `GeminiService.translate_ingredient_list`).
     full_context = [getattr(item, "common_name", None) for item in prepared]
     full_context = [name for name in full_context if name]
-    known_normalized_names = await ingredient_alias_repository.get_all_normalized(db)
+    known_normalized_names = await ingredient_alias_repository.get_all_normalized_english(db)
 
     translations = await translate_ingredient_tokens(
         [ing.common_name for _, ing, _ in to_translate],
@@ -1046,7 +1096,12 @@ async def _resolve_ingredient_languages(
         known_normalized_names=known_normalized_names,
     )
     translation_occurred = False
+    reliable_count = 0
+    unreliable_count = 0
+    detected_languages: set[str] = set()
     for (idx, ing, lang), result in zip(to_translate, translations):
+        if result.detected_language and result.detected_language not in ("en", "other"):
+            detected_languages.add(result.detected_language)
         if result.reliable and result.translated_text:
             rebuilt = create_synthetic_ingredient(result.translated_text)
             prepared[idx] = _dataclasses_replace(
@@ -1056,6 +1111,7 @@ async def _resolve_ingredient_languages(
                 translation_confidence=result.confidence,
             )
             translation_occurred = True
+            reliable_count += 1
         else:
             prepared[idx] = _dataclasses_replace(
                 ing,
@@ -1063,8 +1119,15 @@ async def _resolve_ingredient_languages(
                 uncertainty_reason="TRANSLATION_UNRELIABLE",
                 source_language=result.detected_language or lang,
             )
+            unreliable_count += 1
 
-    return prepared, translation_occurred
+    summary = IngredientTranslationSummary(
+        attempted=len(to_translate),
+        reliable=reliable_count,
+        unreliable=unreliable_count,
+        detected_languages=tuple(sorted(detected_languages)),
+    )
+    return prepared, translation_occurred, summary
 
 
 async def _register_original_text_alias(
@@ -1102,7 +1165,9 @@ async def _register_original_text_alias(
         )
 
 
-async def materialize_ingredients(db: AsyncSession, ingredients: list[Any]) -> tuple[list[Any], bool]:
+async def materialize_ingredients(
+    db: AsyncSession, ingredients: list[Any]
+) -> tuple[list[Any], bool, IngredientTranslationSummary]:
     """Replace every in-memory-only `SyntheticIngredient` in `ingredients`
     with its persisted catalog row (get-or-create, race-safe) -- called
     once, right after ingredient matching, at each of `food_analysis`'s
@@ -1112,11 +1177,11 @@ async def materialize_ingredients(db: AsyncSession, ingredients: list[Any]) -> t
     Runs the full language-resolution pipeline (see
     `_resolve_ingredient_languages`) FIRST, so nothing foreign-language
     and untranslated/unflagged is ever persisted into the shared
-    catalog. Returns `(materialized, translation_occurred)` -- see
-    `_resolve_ingredient_languages`'s own docstring for what the second
-    element means and why callers need it.
+    catalog. Returns `(materialized, translation_occurred, summary)` --
+    see `_resolve_ingredient_languages`'s own docstring for what the
+    second and third elements mean and why callers need them.
     """
-    prepared, translation_occurred = await _resolve_ingredient_languages(db, ingredients)
+    prepared, translation_occurred, summary = await _resolve_ingredient_languages(db, ingredients)
 
     materialized: list[Any] = []
     for ing in prepared:
@@ -1126,4 +1191,4 @@ async def materialize_ingredients(db: AsyncSession, ingredients: list[Any]) -> t
             await _register_original_text_alias(db, resolved, ing)
         else:
             materialized.append(ing)
-    return materialized, translation_occurred
+    return materialized, translation_occurred, summary

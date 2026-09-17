@@ -76,7 +76,7 @@ async def test_ambiguous_segmentation_token_is_identity_uncertain_and_never_tran
 
     token = "LAPTE proteină din LAPTE"
     synthetic = create_synthetic_ingredient(token)
-    materialized, translation_occurred = await ingredient_catalog.materialize_ingredients(
+    materialized, translation_occurred, _ = await ingredient_catalog.materialize_ingredients(
         db_session, [synthetic]
     )
 
@@ -120,7 +120,7 @@ async def test_previously_over_flagged_examples_are_now_sent_for_translation(db_
     monkeypatch.setattr(gemini_service, "translate_ingredient_list", _tracking_fake)
 
     synthetics = [create_synthetic_ingredient(t) for t in tokens]
-    materialized, translation_occurred = await ingredient_catalog.materialize_ingredients(
+    materialized, translation_occurred, _ = await ingredient_catalog.materialize_ingredients(
         db_session, synthetics
     )
 
@@ -150,7 +150,7 @@ async def test_reliable_translation_resolves_identity_and_never_promotes_verific
     )
 
     synthetic = create_synthetic_ingredient("Ulei de rapiță")
-    materialized, translation_occurred = await ingredient_catalog.materialize_ingredients(
+    materialized, translation_occurred, _ = await ingredient_catalog.materialize_ingredients(
         db_session, [synthetic]
     )
     await db_session.flush()
@@ -193,7 +193,7 @@ async def test_unreliable_translation_flags_identity_uncertain_and_keeps_origina
     )
 
     synthetic = create_synthetic_ingredient("Ulei de rapiță")
-    materialized, translation_occurred = await ingredient_catalog.materialize_ingredients(
+    materialized, translation_occurred, _ = await ingredient_catalog.materialize_ingredients(
         db_session, [synthetic]
     )
 
@@ -202,6 +202,88 @@ async def test_unreliable_translation_flags_identity_uncertain_and_keeps_origina
     assert row.identity_uncertain is True
     assert row.uncertainty_reason == "TRANSLATION_UNRELIABLE"
     assert row.common_name == "Ulei de rapiță"  # untouched, never a guessed translation
+
+
+@pytest.mark.asyncio
+async def test_foreign_alias_of_a_different_ingredient_never_counts_as_english_evidence(
+    db_session, monkeypatch
+):
+    """Code-review regression (issue #19 finding 1):
+    `_translation_is_reliable`'s catalog-alias fallback used to consult
+    EVERY known alias regardless of language
+    (`ingredient_alias_repository.get_all_normalized`), so an
+    untranslated foreign RESULT that happened to match some OTHER
+    ingredient's already-learned FOREIGN alias was wrongly accepted as
+    proof of genuinely English output. Known identity is not proof of
+    output language -- fixed by restricting the fallback to aliases
+    explicitly tagged `language="en"` (`get_all_normalized_english`).
+
+    Setup: ingredient A ("Whole Milk") already has a French alias
+    "lait entier" (tagged `language="fr"`, exactly as
+    `_register_original_text_alias` would have learned it from an
+    earlier scan). A completely DIFFERENT, unrelated target B is then
+    "translated" by Gemini into that exact same French text -- i.e.
+    Gemini failed to translate B into English at all and returned
+    another ingredient's foreign name instead. B's own text is
+    deliberately NOT the alias text itself, so the earlier "already
+    known" alias shortcut (`_resolve_ingredient_languages` step 1)
+    cannot bypass the translation-reliability check this test targets.
+    """
+    milk = Ingredient(
+        id="synth_whole_milk_regression",
+        common_name="Whole Milk",
+        normalized_name=normalize_ingredient_name("Whole Milk"),
+        scientific_name="",
+        risk_level=RiskLevel.SAFE,
+        risk_assessment_available=False,
+        verification_status=IngredientVerificationStatus.UNVERIFIED,
+        source=IngredientSource.GEMINI,
+        confidence=0.5,
+    )
+    db_session.add(milk)
+    await db_session.flush()
+    await ingredient_alias_repository.get_or_create(
+        db_session,
+        ingredient_id=milk.id,
+        alias_text="lait entier",
+        alias_normalized=normalize_ingredient_name("lait entier"),
+        language="fr",
+        source=IngredientSource.GEMINI,
+    )
+
+    target_text = "Compus Chimic Foarte Specific"
+
+    async def _fake(tokens: list[str], *, context=None) -> str:
+        assert tokens == [target_text]
+        payload = [
+            {
+                "originalText": target_text,
+                "detectedLanguage": "fr",
+                "confidence": 0.9,
+                # Gemini failed to translate this target -- it returned
+                # a DIFFERENT ingredient's already-known FRENCH alias
+                # verbatim, not an English translation of THIS text.
+                "translatedText": "lait entier",
+            }
+        ]
+        return json.dumps(payload)
+
+    monkeypatch.setattr(gemini_service, "translate_ingredient_list", _fake)
+
+    synthetic = create_synthetic_ingredient(target_text)
+    materialized, translation_occurred, summary = await ingredient_catalog.materialize_ingredients(
+        db_session, [synthetic]
+    )
+
+    assert translation_occurred is False
+    assert summary.attempted == 1
+    assert summary.reliable == 0
+    assert summary.unreliable == 1
+    row = materialized[0]
+    assert row.identity_uncertain is True
+    assert row.uncertainty_reason == "TRANSLATION_UNRELIABLE"
+    # Never silently mislabeled with a DIFFERENT ingredient's foreign name.
+    assert row.common_name == target_text
 
 
 # --- Repeated scans reuse the catalog translation ---------------------------
@@ -224,7 +306,7 @@ async def test_repeated_scan_of_the_same_text_reuses_the_catalog_translation(db_
     monkeypatch.setattr(gemini_service, "translate_ingredient_list", counting_fake)
 
     first_synthetic = create_synthetic_ingredient("Ulei de rapiță")
-    first_materialized, first_occurred = await ingredient_catalog.materialize_ingredients(
+    first_materialized, first_occurred, _ = await ingredient_catalog.materialize_ingredients(
         db_session, [first_synthetic]
     )
     await db_session.flush()
@@ -235,7 +317,7 @@ async def test_repeated_scan_of_the_same_text_reuses_the_catalog_translation(db_
     # Second, independent "scan" -- a FRESH SyntheticIngredient built
     # from the same raw OCR text, exactly as a new request would.
     second_synthetic = create_synthetic_ingredient("Ulei de rapiță")
-    second_materialized, second_occurred = await ingredient_catalog.materialize_ingredients(
+    second_materialized, second_occurred, _ = await ingredient_catalog.materialize_ingredients(
         db_session, [second_synthetic]
     )
 
@@ -279,7 +361,7 @@ async def test_pre_existing_alias_for_the_exact_text_skips_translation_entirely(
     monkeypatch.setattr(gemini_service, "translate_ingredient_list", must_not_be_called)
 
     synthetic = create_synthetic_ingredient("Ulei de rapiță")
-    materialized, translation_occurred = await ingredient_catalog.materialize_ingredients(
+    materialized, translation_occurred, _ = await ingredient_catalog.materialize_ingredients(
         db_session, [synthetic]
     )
     assert translation_occurred is False
@@ -323,11 +405,11 @@ async def test_two_different_language_spellings_of_milk_converge_on_one_canonica
     monkeypatch.setattr(gemini_service, "translate_ingredient_list", fake_translate)
 
     lapte = create_synthetic_ingredient("Lapte")
-    materialized_lapte, _ = await ingredient_catalog.materialize_ingredients(db_session, [lapte])
+    materialized_lapte, _, _ = await ingredient_catalog.materialize_ingredients(db_session, [lapte])
     await db_session.flush()
 
     milk = create_synthetic_ingredient("MILK")
-    materialized_milk, _ = await ingredient_catalog.materialize_ingredients(db_session, [milk])
+    materialized_milk, _, _ = await ingredient_catalog.materialize_ingredients(db_session, [milk])
 
     assert materialized_lapte[0].id == materialized_milk[0].id
     assert materialized_lapte[0].common_name == translated
@@ -354,7 +436,7 @@ async def test_allergen_keyword_fires_on_translated_text_even_though_original_di
     )
 
     synthetic = create_synthetic_ingredient("Lapte")
-    materialized, _ = await ingredient_catalog.materialize_ingredients(db_session, [synthetic])
+    materialized, _, _ = await ingredient_catalog.materialize_ingredients(db_session, [synthetic])
 
     assert materialized[0].allergens == "Potential Allergen"
 

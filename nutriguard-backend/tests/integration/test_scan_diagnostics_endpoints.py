@@ -112,6 +112,73 @@ async def test_scan_ocr_text_success_records_a_diagnostic(app_client, monkeypatc
     assert "untranslatedIngredientCount" in calls[0]
 
 
+@pytest.mark.asyncio
+async def test_scan_ocr_text_mixed_label_reports_per_ingredient_translation_separately(
+    app_client, monkeypatch
+):
+    """Code-review regression (issue #19 finding 4): an OCR block with an
+    English trigger word glued to foreign-language ingredient names gets
+    the WHOLE block classified "en" (`label_language_status == "ok"`,
+    no whole-blob translation) while the SEPARATE per-ingredient-token
+    pass still translates/rejects individual foreign tokens (see
+    `tests/integration/test_scan_language_e2e.py` for the underlying
+    identity-resolution behavior this diagnostic exposes). Before the
+    fix, `translationAttempted` stayed `false`/`translationResult`
+    stayed "not_needed" for this exact case, and `detectedLanguage` was
+    never emitted at all -- silently hiding that real per-ingredient
+    translation work (one reliable, one unreliable) happened."""
+    calls = _capture(monkeypatch)
+    headers = await _register_device(app_client, "diag-ocr-mixed-lang")
+
+    async def _fake_translate(tokens: list[str], *, context=None) -> str:
+        payload = []
+        for t in tokens:
+            if t == "Ulei de rapiță":
+                payload.append(
+                    {
+                        "originalText": t,
+                        "detectedLanguage": "ro",
+                        "confidence": 0.9,
+                        "translatedText": "Oil Made From Rapeseed",
+                    }
+                )
+            else:
+                payload.append(
+                    {
+                        "originalText": t,
+                        "detectedLanguage": "ro",
+                        "confidence": 0.2,  # below the reliability threshold
+                        "translatedText": "Unverified Guess",
+                    }
+                )
+        return json.dumps(payload)
+
+    monkeypatch.setattr(gemini_service, "translate_ingredient_list", _fake_translate)
+
+    raw_text = "Ingredients: Ulei de rapiță, Compus Foarte Necunoscut"
+    resp = await app_client.post("/api/v1/scan/ocr-text", json={"rawText": raw_text}, headers=headers)
+
+    assert resp.status_code == 200
+    assert len(calls) == 1
+    diag = calls[0]
+    assert diag["outcome"] == "success"
+
+    # Whole-label pass: no translation needed at the blob level.
+    assert diag["detectedLanguage"] == "en"
+
+    # Per-ingredient pass: DISTINCT from the whole-label fields above --
+    # must surface even though the whole-label pass alone said "ok".
+    assert diag["ingredientTranslationAttempted"] is True
+    assert diag["ingredientTranslationReliableCount"] == 1
+    assert diag["ingredientTranslationUnreliableCount"] == 1
+    assert "ro" in diag["ingredientTranslationLanguages"]
+
+    # `translationAttempted` must reflect the per-ingredient pass too,
+    # not only the whole-label one.
+    assert diag["translationAttempted"] is True
+    assert diag["untranslatedIngredientCount"] == 1
+
+
 # --- /scan/label-image ---------------------------------------------------------
 
 

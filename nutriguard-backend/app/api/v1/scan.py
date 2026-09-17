@@ -119,14 +119,56 @@ def _translation_fields(result: dict) -> dict:
     missing) on e.g. `analyze_barcode`'s pure identity lookup, which
     never touches label/OCR text at all. Diagnostics must treat that
     absence as honestly "not applicable", never fall back to guessing
-    from `Product.source`."""
+    from `Product.source`.
+
+    Code-review fix: `translationAttempted`/`translationResult`/
+    `translationReason` used to reflect ONLY the whole-label-blob pass
+    (`app.services.label_language`) -- a mixed label where that pass
+    reports `status="ok"` (nothing to translate at the whole-blob level)
+    could still have individual embedded foreign tokens translated or
+    rejected by the SEPARATE per-ingredient pass
+    (`ingredient_catalog._resolve_ingredient_languages`), which was
+    silently invisible here. `ingredientTranslationAttempted`/
+    `ingredientTranslationReliableCount`/
+    `ingredientTranslationUnreliableCount`/`ingredientTranslationLanguages`
+    below report that pass explicitly and separately -- never merged
+    into the whole-label fields, so a caller can always tell which pass
+    produced which outcome. `translationAttempted` is now `True` if
+    EITHER pass actually ran, so it can no longer silently miss the
+    per-ingredient-only case. `detectedLanguage` was computed by
+    `food_analysis` (`label_detected_language`) but never surfaced here
+    before -- now included whenever the whole-label pass ran."""
     status = result.get("label_language_status")
-    if status is None:
-        return {"translationAttempted": None, "translationResult": None, "translationReason": None}
+    summary = result.get("ingredient_translation_summary")
+    ingredient_attempted = bool(summary.attempted) if summary is not None else False
+    ingredient_reliable = summary.reliable if summary is not None else None
+    ingredient_unreliable = summary.unreliable if summary is not None else None
+    ingredient_languages = list(summary.detected_languages) if summary is not None else None
+
+    if status is None and not ingredient_attempted:
+        return {
+            "translationAttempted": None,
+            "translationResult": None,
+            "translationReason": None,
+            "detectedLanguage": None,
+            "ingredientTranslationAttempted": ingredient_attempted if summary is not None else None,
+            "ingredientTranslationReliableCount": ingredient_reliable,
+            "ingredientTranslationUnreliableCount": ingredient_unreliable,
+            "ingredientTranslationLanguages": ingredient_languages,
+        }
+
+    whole_label_attempted = status is not None and (
+        bool(result.get("label_translation_used")) or status != "ok"
+    )
     return {
-        "translationAttempted": bool(result.get("label_translation_used")) or status != "ok",
-        "translationResult": _TRANSLATION_RESULT_BY_STATUS.get(status, status),
-        "translationReason": None if status == "ok" else status,
+        "translationAttempted": whole_label_attempted or ingredient_attempted,
+        "translationResult": None if status is None else _TRANSLATION_RESULT_BY_STATUS.get(status, status),
+        "translationReason": None if status is None or status == "ok" else status,
+        "detectedLanguage": result.get("label_detected_language") if status is not None else None,
+        "ingredientTranslationAttempted": ingredient_attempted,
+        "ingredientTranslationReliableCount": ingredient_reliable,
+        "ingredientTranslationUnreliableCount": ingredient_unreliable,
+        "ingredientTranslationLanguages": ingredient_languages,
     }
 
 

@@ -290,7 +290,9 @@ async def test_numeric_token_mismatch_is_marked_unreliable(monkeypatch):
 # fallback: a short translated result that `detect_language` alone can't
 # confirm is only accepted when it matches a name ALREADY established in
 # the ingredient catalog (`known_normalized_names`, supplied by the
-# caller from `ingredient_alias_repository.get_all_normalized`). No
+# caller from `ingredient_alias_repository.get_all_normalized_english`
+# -- code-review follow-up: restricted to English-tagged aliases only,
+# since known identity alone is not proof of output LANGUAGE). No
 # blanket script/length rule replaces the old one.
 
 

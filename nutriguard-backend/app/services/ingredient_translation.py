@@ -49,16 +49,22 @@ _MIN_TRANSLATION_CONFIDENCE = 0.55
 # untranslated foreign text with no diacritics, e.g. French "lait
 # entier" -- a real false-accept, not a hypothetical one). Instead:
 # real, pre-existing evidence -- does the translated text match a name
-# ALREADY established in the ingredient catalog (a curated ingredient's
-# own name, or any previously-learned alias -- see
-# `app.repositories.ingredient_alias_repository.get_all_normalized`)?
-# That is independent confirmation this is a genuine, known ingredient
-# name, never a guess about scripts or word counts. A translation that
-# is short, doesn't match a recognized English word, AND doesn't match
-# any known catalog name is honestly UNRESOLVED (task: "preserve an
-# honest unresolved result when language cannot be established") --
-# rejected here, which the caller turns into `identity_uncertain=True`
-# rather than a silently wrong guess either way.
+# ALREADY established, IN ENGLISH, in the ingredient catalog (a curated
+# ingredient's own English name, or a previously-VERIFIED translation
+# output -- see
+# `app.repositories.ingredient_alias_repository.get_all_normalized_english`,
+# which excludes every alias not explicitly tagged `language="en"`)?
+# Known identity alone is not proof of output language -- a foreign
+# alias (e.g. a learned French original) must never count as evidence
+# an untranslated foreign RESULT is English, so only the English-tagged
+# subset is ever consulted here. That is independent confirmation this
+# is a genuine, known ENGLISH ingredient name, never a guess about
+# scripts or word counts. A translation that is short, doesn't match a
+# recognized English word, AND doesn't match any known English catalog
+# name is honestly UNRESOLVED (task: "preserve an honest unresolved
+# result when language cannot be established") -- rejected here, which
+# the caller turns into `identity_uncertain=True` rather than a
+# silently wrong guess either way.
 _E_NUMBER_RE = re.compile(r"\bE[- ]?(\d{3,4}[A-Za-z]?)\b", re.IGNORECASE)
 _NUMBER_WITH_UNIT_RE = re.compile(
     r"(?<![A-Za-z0-9])(\d+(?:[.,]\d+)?)\s*(%|kcal|kj|mcg|µg|mg|kg|g|ml|l)?(?![A-Za-z0-9])",

@@ -88,7 +88,7 @@ async def test_freshly_translated_ingredient_has_english_localization_only(db_se
     )
 
     synthetic = create_synthetic_ingredient("Ulei de rapiță")
-    materialized, translation_occurred = await ingredient_catalog.materialize_ingredients(
+    materialized, translation_occurred, _ = await ingredient_catalog.materialize_ingredients(
         db_session, [synthetic]
     )
     assert translation_occurred is True
@@ -119,7 +119,7 @@ async def test_translation_never_writes_an_ingredient_localization_row_or_marks_
     )
 
     synthetic = create_synthetic_ingredient("Semințe de mac")
-    materialized, _ = await ingredient_catalog.materialize_ingredients(db_session, [synthetic])
+    materialized, _, _ = await ingredient_catalog.materialize_ingredients(db_session, [synthetic])
     row = materialized[0]
 
     from sqlalchemy import select
@@ -220,7 +220,7 @@ async def test_foreign_language_mention_of_a_curated_ingredient_reuses_its_real_
     # A Romanian OCR mention that still carries the E-number -- resolves
     # via official identifier, never via translation.
     synthetic = create_synthetic_ingredient("Acid citric (E330)")
-    materialized, translation_occurred = await ingredient_catalog.materialize_ingredients(
+    materialized, translation_occurred, _ = await ingredient_catalog.materialize_ingredients(
         db_session, [synthetic]
     )
     assert translation_occurred is False
@@ -252,7 +252,7 @@ async def test_effect_conditions_and_dietary_guidance_stay_empty_for_a_translate
     )
 
     synthetic = create_synthetic_ingredient("Aluat acrisor")
-    materialized, _ = await ingredient_catalog.materialize_ingredients(db_session, [synthetic])
+    materialized, _, _ = await ingredient_catalog.materialize_ingredients(db_session, [synthetic])
     row = materialized[0]
 
     out = IngredientOut.model_validate(row)
