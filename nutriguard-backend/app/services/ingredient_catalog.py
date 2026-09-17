@@ -48,9 +48,11 @@ something faked here to justify testing them. See
 `docs/CODEX_HANDOFF.md` for the full scoping note.
 """
 import json
+from dataclasses import replace as _dataclasses_replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -65,7 +67,20 @@ from app.repositories import ingredient_alias_repository, ingredient_repository,
 from app.services.barcode_text_safety import is_placeholder
 from app.services.ingredient_normalization import normalize_ingredient_name
 from app.services.ingredient_regulatory import is_authoritative_regulatory_source
-from app.services.ocr_normalizer import SyntheticIngredient
+from app.services.ingredient_segmentation import detect_ambiguous_segmentation
+from app.services.ingredient_translation import translate_ingredient_tokens
+from app.services.language_detection import detect_language
+from app.services.ocr_normalizer import SyntheticIngredient, create_synthetic_ingredient
+
+_logger = structlog.get_logger(__name__)
+
+# Confidence assigned to a synthetic row built from a VERIFIED-reliable
+# translation -- lower than a curated/regulatory source, higher than a
+# bare untranslated OCR guess (see `_build_minimal_row`/`SOURCE_PRIORITY`
+# below): real content, from a real translation, still never a
+# regulatory confirmation (`IngredientSource.GEMINI` never promotes past
+# `LIMITED_DATA` -- see `merge_verified_fields`).
+_TRANSLATED_SYNTHETIC_CONFIDENCE_FLOOR = 0.3
 
 # Higher number = higher priority = harder to overwrite. A curated/
 # seeded row is the ground truth; nothing OCR/Gemini ever observes may
@@ -508,11 +523,20 @@ def _build_minimal_row(synthetic: SyntheticIngredient, normalized: str) -> Ingre
     function, not this one, if it ever did.
     """
     now = _utcnow()
+    # A verified-reliable translation is real content, from a real
+    # (Gemini) source -- not a bare OCR guess -- but per `SOURCE_PRIORITY`/
+    # `merge_verified_fields`, GEMINI can never promote past LIMITED_DATA,
+    # so this never risks a translation being presented as a scientific/
+    # regulatory confirmation (task: "translation must never promote
+    # scientific verification").
+    was_translated = synthetic.original_text is not None
     return Ingredient(
         id=synthetic.id,
         common_name=synthetic.common_name,
         normalized_name=normalized,
         scientific_name=synthetic.scientific_name,
+        identity_uncertain=synthetic.identity_uncertain,
+        uncertainty_reason=synthetic.uncertainty_reason,
         e_number=synthetic.e_number,
         ins_number=derive_ins_number_from_e_number(synthetic.e_number),
         category=synthetic.category,
@@ -531,12 +555,16 @@ def _build_minimal_row(synthetic: SyntheticIngredient, normalized: str) -> Ingre
         risk_level=RiskLevel.SAFE,
         risk_assessment_available=False,
         verification_status=IngredientVerificationStatus.UNVERIFIED,
-        source=IngredientSource.OCR_HEURISTIC,
+        source=IngredientSource.GEMINI if was_translated else IngredientSource.OCR_HEURISTIC,
         source_record_id=None,
         source_url=None,
         retrieved_at=now,
         last_verified_at=None,
-        confidence=0.2,
+        confidence=(
+            max(synthetic.translation_confidence or 0.0, _TRANSLATED_SYNTHETIC_CONFIDENCE_FLOOR)
+            if was_translated
+            else 0.2
+        ),
         schema_version=1,
         is_gluten=synthetic.is_gluten,
         is_lactose=synthetic.is_lactose,
@@ -721,6 +749,7 @@ async def _register_alias_and_resolve_canonical(
     normalized: str,
     owns_row: bool,
     official_identifier_match: bool = False,
+    language: str | None = None,
 ) -> Ingredient:
     """Register `synthetic.common_name` as an alias of `candidate` and
     return whichever `Ingredient` row is ACTUALLY canonical for that
@@ -771,8 +800,8 @@ async def _register_alias_and_resolve_canonical(
         ingredient_id=candidate.id,
         alias_text=synthetic.common_name,
         alias_normalized=normalized,
-        language=None,
-        source=IngredientSource.OCR_HEURISTIC,
+        language=language,
+        source=IngredientSource.GEMINI if synthetic.original_text is not None else IngredientSource.OCR_HEURISTIC,
     )
     if alias.ingredient_id == candidate.id:
         return candidate
@@ -818,6 +847,11 @@ async def get_or_create_catalog_ingredient(db: AsyncSession, synthetic: Syntheti
     """
     normalized = normalize_ingredient_name(synthetic.common_name)
     resolved: Ingredient | None = None
+    # A verified-reliable translation means `common_name` above IS now
+    # genuinely English -- safe to tag its own alias "en" (task:
+    # "persist reusable EN/BG display names and language-aware aliases").
+    # `None` (undetermined here) for every other, untouched case.
+    alias_language = "en" if synthetic.original_text is not None else None
 
     if synthetic.e_number:
         resolved = await ingredient_repository.get_by_official_identifier(db, e_number=synthetic.e_number)
@@ -846,6 +880,7 @@ async def get_or_create_catalog_ingredient(db: AsyncSession, synthetic: Syntheti
             normalized=normalized,
             owns_row=False,
             official_identifier_match=True,
+            language=alias_language,
         )
 
     # Genuinely new -- race-safe get-or-create. Two concurrent scans of
@@ -905,20 +940,158 @@ async def get_or_create_catalog_ingredient(db: AsyncSession, synthetic: Syntheti
         normalized=normalized,
         owns_row=owns_row,
         official_identifier_match=official_identifier_match,
+        language=alias_language,
     )
 
 
-async def materialize_ingredients(db: AsyncSession, ingredients: list[Any]) -> list[Any]:
+async def _resolve_ingredient_languages(
+    db: AsyncSession, ingredients: list[Any]
+) -> tuple[list[Any], bool]:
+    """Task 1 ("consistent ingredient identity and language"): runs
+    BEFORE any `SyntheticIngredient` is persisted (the root cause this
+    module exists to fix -- identity used to persist untranslated
+    foreign-language text into the shared catalog before any language
+    policy ever ran). For each `SyntheticIngredient`:
+
+      1. Already known? (a matching alias already exists for its exact
+         text, from a PRIOR translation) -- pass through unchanged; the
+         normal get-or-create/alias lookup below will resolve it for
+         free, no Gemini call spent (task: "do not translate again for
+         every product or request").
+      2. English/Bulgarian/no usable text -- pass through unchanged
+         (task: "prefer available English/Bulgarian label sections").
+      3. Suspected OCR concatenation/ambiguous segmentation -- flagged
+         `identity_uncertain`, NEVER sent for translation (task:
+         "translation alone must not certify identity").
+      4. Otherwise -- batched into ONE Gemini call across the whole list
+         (full-list context); a reliably-verified translation replaces
+         the synthetic ingredient (rebuilt via `create_synthetic_ingredient`
+         on the ENGLISH text, so id/category/allergen-keyword detection
+         are all derived correctly); an unreliable one is flagged
+         `identity_uncertain` instead, original text preserved.
+
+    Returns `(prepared_ingredients, translation_occurred)` -- the second
+    element tells the caller whether any entry's display text actually
+    changed, so `food_analysis`'s finalize functions know whether
+    `Product.raw_ingredient_text` needs reconstructing from the
+    materialized names to stay consistent with the ids just persisted
+    (see `ocr_normalizer.reconstruct_synthetic_ingredient`, which
+    re-tokenizes that exact text on every later read).
+    """
+    prepared: list[Any] = list(ingredients)
+    to_translate: list[tuple[int, SyntheticIngredient, str]] = []
+
+    for idx, ing in enumerate(prepared):
+        if not isinstance(ing, SyntheticIngredient):
+            continue
+        # Already processed by an earlier pass in this same request
+        # (e.g. `food_analysis`'s pre-rebuild materialize call, before
+        # the rebuild's own materialize call runs on the same items).
+        if ing.original_text is not None or ing.identity_uncertain:
+            continue
+
+        lang = detect_language(ing.common_name)
+        if lang in ("en", "bg", "unknown"):
+            continue
+
+        existing_alias = await ingredient_alias_repository.get_by_normalized(
+            db, normalize_ingredient_name(ing.common_name)
+        )
+        if existing_alias is not None:
+            continue
+
+        reason = detect_ambiguous_segmentation(ing.common_name)
+        if reason is not None:
+            prepared[idx] = _dataclasses_replace(
+                ing, identity_uncertain=True, uncertainty_reason=reason, source_language=lang
+            )
+            continue
+
+        to_translate.append((idx, ing, lang))
+
+    if not to_translate:
+        return prepared, False
+
+    translations = await translate_ingredient_tokens([ing.common_name for _, ing, _ in to_translate])
+    translation_occurred = False
+    for (idx, ing, lang), result in zip(to_translate, translations):
+        if result.reliable and result.translated_text:
+            rebuilt = create_synthetic_ingredient(result.translated_text)
+            prepared[idx] = _dataclasses_replace(
+                rebuilt,
+                original_text=ing.common_name,
+                source_language=result.detected_language or lang,
+                translation_confidence=result.confidence,
+            )
+            translation_occurred = True
+        else:
+            prepared[idx] = _dataclasses_replace(
+                ing,
+                identity_uncertain=True,
+                uncertainty_reason="TRANSLATION_UNRELIABLE",
+                source_language=result.detected_language or lang,
+            )
+
+    return prepared, translation_occurred
+
+
+async def _register_original_text_alias(
+    db: AsyncSession, resolved: Ingredient, synthetic: SyntheticIngredient
+) -> None:
+    """After a verified translation resolves to a canonical ingredient,
+    also register the ORIGINAL (pre-translation) text as its own
+    language-tagged alias (task: "persist ... language-aware aliases
+    where identity is established") -- so the NEXT scan of the exact
+    same original-language text resolves via alias lookup alone, no
+    translation call spent (see `_resolve_ingredient_languages` step 1).
+    Best-effort: this is a dedup optimization for FUTURE requests, never
+    required for THIS request's own correctness (the ingredient is
+    already resolved by the time this runs) -- a failure here is logged
+    and swallowed rather than allowed to fail the scan.
+    """
+    if synthetic.original_text is None:
+        return
+    original_normalized = normalize_ingredient_name(synthetic.original_text)
+    if original_normalized == resolved.normalized_name:
+        return
+    try:
+        await ingredient_alias_repository.get_or_create(
+            db,
+            ingredient_id=resolved.id,
+            alias_text=synthetic.original_text,
+            alias_normalized=original_normalized,
+            language=synthetic.source_language,
+            source=IngredientSource.GEMINI,
+        )
+    except Exception:  # noqa: BLE001
+        _logger.warning(
+            "ingredient_original_text_alias_registration_failed",
+            ingredient_id=resolved.id,
+        )
+
+
+async def materialize_ingredients(db: AsyncSession, ingredients: list[Any]) -> tuple[list[Any], bool]:
     """Replace every in-memory-only `SyntheticIngredient` in `ingredients`
     with its persisted catalog row (get-or-create, race-safe) -- called
     once, right after ingredient matching, at each of `food_analysis`'s
     scan pipelines. A curated `Ingredient` row already returned by
     `ocr_normalizer.match_against_database` passes through unchanged.
+
+    Runs the full language-resolution pipeline (see
+    `_resolve_ingredient_languages`) FIRST, so nothing foreign-language
+    and untranslated/unflagged is ever persisted into the shared
+    catalog. Returns `(materialized, translation_occurred)` -- see
+    `_resolve_ingredient_languages`'s own docstring for what the second
+    element means and why callers need it.
     """
+    prepared, translation_occurred = await _resolve_ingredient_languages(db, ingredients)
+
     materialized: list[Any] = []
-    for ing in ingredients:
+    for ing in prepared:
         if isinstance(ing, SyntheticIngredient):
-            materialized.append(await get_or_create_catalog_ingredient(db, ing))
+            resolved = await get_or_create_catalog_ingredient(db, ing)
+            materialized.append(resolved)
+            await _register_original_text_alias(db, resolved, ing)
         else:
             materialized.append(ing)
-    return materialized
+    return materialized, translation_occurred

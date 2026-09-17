@@ -188,7 +188,7 @@ async def test_materialize_ingredients_replaces_synthetic_stubs_and_passes_throu
 
     synthetic = create_synthetic_ingredient("Unobtainium Extract")
     mixed = [curated, synthetic]
-    materialized = await ingredient_catalog.materialize_ingredients(db_session, mixed)
+    materialized, _translation_occurred = await ingredient_catalog.materialize_ingredients(db_session, mixed)
 
     assert materialized[0] is curated  # untouched
     assert isinstance(materialized[1], Ingredient)

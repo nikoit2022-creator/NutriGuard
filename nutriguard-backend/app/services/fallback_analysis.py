@@ -44,6 +44,14 @@ class AnalyzedProductData:
     nutrition_basis: str = "UNKNOWN"
     serving_size: float | None = None
     serving_unit: str | None = None
+    # See `app.models.product.Product.original_ingredient_text`/
+    # `ingredient_text_source_language` -- set only by the label/OCR
+    # finalize paths that actually run the language policy
+    # (`app.services.food_analysis`'s two `_finalize_*` functions); ""/
+    # `None` (the honest "no label/OCR text was ever extracted, or the
+    # language policy hasn't run yet") for every other path.
+    original_ingredient_text: str = ""
+    ingredient_text_source_language: str | None = None
 
 
 def fallback_local_analysis(

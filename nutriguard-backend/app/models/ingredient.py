@@ -111,6 +111,45 @@ class Ingredient(Base):
         "risk_assessment_available", Boolean, nullable=False, default=True
     )
 
+    # Identity-uncertainty (see `app.services.ingredient_segmentation`
+    # and `app.services.ingredient_catalog.materialize_ingredients`):
+    # `True` only for a synthetic row built from label/OCR text that
+    # matched a suspected-OCR-concatenation/ambiguous-segmentation
+    # heuristic (e.g. an EU allergen-emphasis ALL-CAPS word merged into
+    # an adjacent clause) -- identity was never confidently established,
+    # so this row is deliberately NOT sent for translation ("translation
+    # alone must not certify identity") and the client should offer
+    # another label photo. `uncertainty_reason` is a short stable code
+    # (e.g. "EMBEDDED_ALLERGEN_EMPHASIS_MERGE", "DUPLICATE_TOKEN_FRAGMENT",
+    # "TRANSLATION_UNRELIABLE") explaining why, `None` when not uncertain.
+    # Never set for curated/seeded or officially-identified rows.
+    identity_uncertain: Mapped[bool] = mapped_column(
+        "identity_uncertain", Boolean, nullable=False, default=False
+    )
+    uncertainty_reason: Mapped[str | None] = mapped_column(
+        "uncertainty_reason", String(64), nullable=True
+    )
+    # Additive info-contract fields (task: "useful, reusable ingredient
+    # information"), deliberately separate from `health_concerns`/
+    # `side_effects` (which already cover "possible effects") and from
+    # `acceptable_daily_intake` (the formal per-kg-bodyweight ADI):
+    #   - `effect_conditions`: the population/scenario a listed effect
+    #     applies under (e.g. "Relevant to individuals with
+    #     phenylketonuria (PKU)"), when the source material draws that
+    #     distinction explicitly -- never inferred/fabricated.
+    #   - `dietary_guidance`: general, non-ADI consumption guidance, when
+    #     the source material states one distinct from the formal limit.
+    # Both left "" (absent on the wire, never a generic placeholder) when
+    # the underlying curated/reviewed source doesn't state one -- see
+    # `app.services.ingredient_regulatory` for why a per-kg-bodyweight
+    # ADI is never presented as a universal daily amount.
+    effect_conditions: Mapped[str] = mapped_column(
+        "effect_conditions", Text, nullable=False, default=""
+    )
+    dietary_guidance: Mapped[str] = mapped_column(
+        "dietary_guidance", Text, nullable=False, default=""
+    )
+
     # --- Verification status + provenance (persistent ingredient
     # knowledge cache -- see app.services.ingredient_catalog) ---
     # `source`/`confidence`/`retrieved_at`/`last_verified_at` below are

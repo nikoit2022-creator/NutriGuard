@@ -16,6 +16,7 @@ from app.schemas.common import ORMModel
 from app.services.ingredient_catalog import parse_field_provenance, resolve_parsed_field_source
 from app.services.ingredient_localization import build_localizations
 from app.services.ingredient_regulatory import (
+    derive_gated_adi_population_scope,
     derive_gated_adi_range_mg_per_kg_bw_per_day,
     derive_gated_approval_status,
     is_authoritative_regulatory_source,
@@ -50,6 +51,8 @@ class IngredientLocalizationRow(ORMModel):
     acceptable_daily_intake: str
     side_effects: str
     allergens: str
+    effect_conditions: str = ""
+    dietary_guidance: str = ""
     translation_status: IngredientTranslationStatus
     translation_source: IngredientTranslationSource
     source_content_hash: str
@@ -68,6 +71,8 @@ class IngredientLocalizedTextOut(ORMModel):
     acceptable_daily_intake: str
     side_effects: str
     allergens: str
+    effect_conditions: str = ""
+    dietary_guidance: str = ""
     risk_rationale: str
     translation_status: IngredientTranslationStatus | None = None
     translation_source: IngredientTranslationSource | None = None
@@ -105,6 +110,12 @@ class IngredientOut(ORMModel):
     side_effects: str
     allergens: str
     references: str
+    # Additive info-contract fields (task: "useful, reusable ingredient
+    # information") -- see `app.models.ingredient.Ingredient`'s own
+    # docstring for exactly what these do and don't claim. "" (never a
+    # generic placeholder) when the curated/reviewed source states none.
+    effect_conditions: str = ""
+    dietary_guidance: str = ""
     risk_level: RiskLevel
     # False for an OCR-only ingredient with no scientific-database match
     # (see app.services.ocr_normalizer.SyntheticIngredient) -- `riskLevel`
@@ -186,6 +197,13 @@ class IngredientOut(ORMModel):
     bad_for_pregnancy: bool
     bad_for_children: bool
     bad_for_high_cholesterol: bool
+
+    # Identity-uncertainty (task: "return structured information
+    # allowing Android to offer another label photo when necessary") --
+    # see `app.models.ingredient.Ingredient`'s docstring. `False`/`None`
+    # for every curated/officially-identified/successfully-resolved row.
+    identity_uncertain: bool = False
+    uncertainty_reason: str | None = None
 
     @field_serializer("retrieved_at", "last_verified_at")
     def _serialize_epoch_millis(self, value: datetime | None) -> int | None:
@@ -303,6 +321,22 @@ class IngredientOut(ORMModel):
 
     @computed_field  # type: ignore[prop-decorator]
     @property
+    def adi_population_scope(self) -> str | None:
+        """`"PER_KG_BODY_WEIGHT"` exactly when `adiMinMgPerKgBwPerDay`/
+        `adiMaxMgPerKgBwPerDay` carry a real gated number, else `None` --
+        makes explicit, on the wire, that this is a per-kilogram-
+        bodyweight limit, never a universal daily amount (task: "a
+        per-body-weight limit is not a universal daily amount"), and
+        never a male/female-specific figure the source text doesn't
+        itself distinguish."""
+        return derive_gated_adi_population_scope(
+            self.acceptable_daily_intake,
+            verification_status=self.verification_status,
+            source=resolve_parsed_field_source(self._field_provenance, "acceptable_daily_intake", fallback=self.source),
+        )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
     def ins_number_verified(self) -> bool:
         """Always `False` today (task: review of INS derivation
         authoritativeness). `insNumber` -- for a curated seed row
@@ -333,6 +367,7 @@ class IngredientOut(ORMModel):
             "common_name", "category", "description", "purpose_in_food",
             "health_concerns", "evidence_level", "countries_restricted_or_banned",
             "efsa_status", "fda_status", "acceptable_daily_intake", "side_effects", "allergens",
+            "effect_conditions", "dietary_guidance",
         ):
             setattr(adapter, field_name, getattr(self, field_name))
         adapter.localization_rows = self.localization_rows
@@ -364,6 +399,8 @@ class IngredientCreate(ORMModel):
     side_effects: str = ""
     allergens: str = ""
     references: str = ""
+    effect_conditions: str = ""
+    dietary_guidance: str = ""
     risk_level: RiskLevel = RiskLevel.SAFE
     risk_assessment_available: bool = True
     verification_status: IngredientVerificationStatus = IngredientVerificationStatus.VERIFIED
