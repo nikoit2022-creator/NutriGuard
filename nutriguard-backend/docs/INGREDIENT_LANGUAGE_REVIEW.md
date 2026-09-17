@@ -1,10 +1,10 @@
 # Ingredient-language code-review follow-up — completion report
 
 Tracked in [GitHub issue #19](https://github.com/nikoit2022-creator/NutriGuard/issues/19).
-This file is kept up to date as the running completion report; the
-current round's findings are also posted directly as an issue comment
-(this session has `gh` CLI access) — see the sections below for what
-changed in each round.
+Committed to the repository per the issue's own documented fallback
+("commit a focused report ... reference this issue, and tell the owner
+only the pushed SHA") — see the round 2 note below for why, despite
+this session having `gh` CLI authenticated access.
 
 ## Round 2 (code-review follow-up, addressing the owner's 2026-09-17
 12:05:53Z review comment on pushed head `5d852ac3873eca8561d5dd253a12532bdf2eb6f6`)
@@ -34,11 +34,24 @@ worktree, disposable Docker containers/images/networks only, no
 `docker compose` against the live stack, no live/production migration,
 repair tool never invoked).
 
-**Round 2 code-fix commit:** `853c05a512eb860b8d625405f4eb23e2e88822b8`,
-pushed to `origin/feat/backend-ingredient-language-diagnostics`. Posted
-directly as a comment on issue #19 (this session has `gh` CLI access,
-unlike round 1) and a PR was opened against `main` -- see the issue
-comment/PR for the exact link.
+**Round 2 code-fix commit:** `853c05a512eb860b8d625405f4eb23e2e88822b8`.
+**Report commit (this file):** `46449c8` (see `git log` on the branch
+for the exact full SHA). Both pushed to
+`origin/feat/backend-ingredient-language-diagnostics`.
+
+Posting directly as an issue comment and opening a PR were both
+attempted this session (this session does have `gh` CLI authenticated
+as the repo owner) but both failed:
+`GraphQL: Resource not accessible by personal access token` on
+`addComment` and `createPullRequest`. The authenticated fine-grained
+PAT has `Contents: write` (confirmed -- both commits above pushed
+successfully) but not `Issues: write` or `Pull requests: write`, which
+fine-grained PATs gate independently of the token owner's actual repo
+role/push access. Per the owner's explicit direction this session,
+falling back to the committed-report path rather than attempting a
+workaround. PR creation link (unchanged from round 1, still not
+created):
+https://github.com/nikoit2022-creator/NutriGuard/compare/main...feat/backend-ingredient-language-diagnostics?expand=1
 
 ---
 
