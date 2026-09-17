@@ -44,7 +44,7 @@ _TRANSLATIONS = {
 
 
 def _counting_fake_translate(call_count: dict):
-    async def _fake(tokens: list[str]) -> str:
+    async def _fake(tokens: list[str], *, context=None) -> str:
         call_count["n"] = call_count.get("n", 0) + 1
         payload = []
         for t in tokens:
@@ -126,27 +126,75 @@ async def test_repeated_scan_of_the_same_mixed_text_does_not_translate_again(app
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_concatenated_text_resolves_identity_uncertain_end_to_end(app_client, monkeypatch):
-    """The 4 exact ambiguous examples from the task requirement, driven
-    through the full HTTP scan endpoint: each must resolve to
-    `identityUncertain: true` and never be silently "translated" into a
-    plausible-sounding but fabricated identity."""
+async def test_genuinely_ambiguous_duplicate_word_resolves_identity_uncertain_end_to_end(
+    app_client, monkeypatch
+):
+    """Code-review fix (issue 3): of the task's original 4 examples,
+    only "LAPTE proteină din LAPTE" ("MILK protein from MILK") is still
+    genuinely ambiguous (it repeats the same significant word twice --
+    `DUPLICATE_TOKEN_FRAGMENT`, real structural evidence of two merged
+    clauses). Driven through the full HTTP scan endpoint: it must
+    resolve to `identityUncertain: true` and never be silently
+    "translated" into a plausible-sounding but fabricated identity."""
 
-    async def must_not_be_called(tokens):
-        raise AssertionError(f"translate_ingredient_list must not be called for ambiguous tokens: {tokens!r}")
+    async def must_not_be_called(tokens, *, context=None):
+        raise AssertionError(f"translate_ingredient_list must not be called for {tokens!r}")
 
     monkeypatch.setattr(gemini_service, "translate_ingredient_list", must_not_be_called)
     headers = await _register_device(app_client, "ambiguous-device")
 
-    raw_text = "SECARA agenți de creștere, Produs din GRAU, ZARA pudră, LAPTE proteină din LAPTE"
+    raw_text = "LAPTE proteină din LAPTE"
     resp = await app_client.post("/api/v1/scan/ocr-text", json={"rawText": raw_text}, headers=headers)
 
     assert resp.status_code == 200
     body = resp.json()
-    assert len(body["ingredients"]) >= 4
+    assert len(body["ingredients"]) >= 1
     for ing in body["ingredients"]:
         assert ing["identityUncertain"] is True, ing
-        assert ing["uncertaintyReason"] is not None
+        assert ing["uncertaintyReason"] == "DUPLICATE_TOKEN_FRAGMENT"
+
+
+@pytest.mark.asyncio
+async def test_previously_over_flagged_examples_translate_end_to_end_instead_of_blocking(
+    app_client, monkeypatch
+):
+    """Code-review fix (issue 3): "SECARA agenți de creștere", "Produs
+    din GRAU", and "ZARA pudră" are ordinary allergen-emphasis compound
+    names, not evidence of concatenation -- driven through the full HTTP
+    endpoint, they must reach translation (never pre-emptively blocked)
+    and resolve to a real, non-uncertain identity when translation
+    succeeds. This is a deliberate behavior CHANGE from the old,
+    over-broad capitalization heuristic."""
+
+    async def fake_translate(tokens, *, context=None):
+        translations = {
+            "SECARA agenți de creștere": "Rye Made With Raising Agents",
+            "Produs din GRAU": "Product Made From Wheat",
+            "ZARA pudră": "Zara Made With Powder",
+        }
+        payload = [
+            {
+                "originalText": t,
+                "detectedLanguage": "ro",
+                "confidence": 0.9,
+                "translatedText": translations[t],
+            }
+            for t in tokens
+        ]
+        return json.dumps(payload)
+
+    monkeypatch.setattr(gemini_service, "translate_ingredient_list", fake_translate)
+    headers = await _register_device(app_client, "previously-flagged-device")
+
+    raw_text = "SECARA agenți de creștere, Produs din GRAU, ZARA pudră"
+    resp = await app_client.post("/api/v1/scan/ocr-text", json={"rawText": raw_text}, headers=headers)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["ingredients"]) >= 3
+    for ing in body["ingredients"]:
+        assert ing["identityUncertain"] is False, ing
+        assert ing["uncertaintyReason"] is None
 
 
 # --- No fabricated "exceeds ADI" claim anywhere on the wire -----------------

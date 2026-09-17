@@ -16,6 +16,24 @@ class ProductOut(ORMModel):
     category: str
     image_url: str | None = None
     raw_ingredient_text: str
+    # Additive (code-review follow-up, task: "expose original ingredient
+    # text and its source language through ProductOut using additive
+    # camelCase fields and truthful missing values"). `raw_ingredient_text`
+    # above stays the CANONICAL text (English/Bulgarian, possibly
+    # translated -- the identity-bearing text
+    # `app.services.ocr_normalizer.reconstruct_synthetic_ingredient`
+    # re-tokenizes on every read). `original_ingredient_text` is the
+    # TRUE pre-translation label/OCR text exactly as extracted, "" (never
+    # `null`, matching the column's own NOT NULL default) when no
+    # label/OCR text was ever captured for this product (e.g. a
+    # barcode-only discovery) -- an empty string here is the honest
+    # "nothing to show", not a missing/omitted value.
+    original_ingredient_text: str = ""
+    # Detected/declared language of `original_ingredient_text` ("en",
+    # "bg", "en+bg", another code, "other", or "unknown") -- `null` (not
+    # "") when genuinely never determined, matching the column's own
+    # nullable default. See `app.services.language_detection.detect_language`.
+    ingredient_text_source_language: str | None = None
     ingredient_ids: str
     health_score: int
     nova_group: int

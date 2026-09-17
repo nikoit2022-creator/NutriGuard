@@ -1803,6 +1803,22 @@
             "type": "string",
             "title": "Rawingredienttext"
           },
+          "originalIngredientText": {
+            "type": "string",
+            "title": "Originalingredienttext",
+            "default": ""
+          },
+          "ingredientTextSourceLanguage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ingredienttextsourcelanguage"
+          },
           "ingredientIds": {
             "type": "string",
             "title": "Ingredientids"

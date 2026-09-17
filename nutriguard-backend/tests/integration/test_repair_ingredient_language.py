@@ -40,7 +40,7 @@ _RO_TRANSLATED = "Sugar and salt"
 # Ambiguous-segmentation candidate (EU allergen-emphasis ALL-CAPS
 # embedded in an otherwise lowercase clause) -- also "other"-language,
 # but must NEVER be auto-translated (task requirement 6).
-_AMBIGUOUS_COMMON_NAME = "arome cu SECARA in compozitie"
+_AMBIGUOUS_COMMON_NAME = "agenti de crestere: enzime"
 
 # Superficially foreign-looking, but CURATED_SEED -- must never be
 # touched (task requirement 7).
@@ -182,7 +182,7 @@ async def test_ambiguous_segmentation_is_flagged_unresolved_never_auto_repaired(
 
     entry = next(e for e in report.ingredient_details if e.ingredient_id == "synth_ambiguous")
     assert entry.category == repair_module.CATEGORY_FLAGGED_UNRESOLVED_AMBIGUOUS
-    assert entry.reason == "EMBEDDED_ALLERGEN_EMPHASIS_MERGE"
+    assert entry.reason == "COLON_SEPARATED_CLAUSE_MERGE"
 
     async with session_factory() as db:
         row = await db.get(Ingredient, "synth_ambiguous")

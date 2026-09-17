@@ -617,6 +617,14 @@ def _label_scan_required_details(product: Product, ingredients: list[Any] | None
         "healthScore": None,
         "nutritionScanRequired": not product.has_verified_nutrition,
         "ingredientsScanRequired": not product.has_verified_ingredients,
+        # The row's own actual, persisted provenance ("local", "ocr",
+        # "label_image", "label_scan"/"label_scan_translated", or a
+        # barcode-discovery provider name like "open_food_facts") --
+        # real, already-known data, never inferred/guessed. Lets a
+        # caller (and `app.api.v1.scan`'s diagnostics -- task: "propagate
+        # actual observed source information, without guessing") know
+        # where THIS partial identity actually came from.
+        "dataSource": product.source,
     }
     if ingredients is not None:
         details["ingredients"] = [_ingredient_out_dict(ing) for ing in ingredients]
@@ -1639,6 +1647,17 @@ async def _finalize_barcode_enrichment(
         "health_score": health_score_value,
         "warnings": warnings,
         "is_from_database_cache": not used_label_analysis,
+        # Real, observed language-policy outcome for THIS attempt (task:
+        # "report actual translation attempt/result/reason where
+        # available, rather than inferring it solely from Product.source")
+        # -- see `app.services.label_language.LabelTextResult`. Absent
+        # from the OTHER `return` sites in this module that never compute
+        # a `label_result` at all (e.g. `analyze_barcode`'s pure identity
+        # lookup) -- diagnostics must treat that as genuinely "not
+        # applicable", never fall back to guessing from `product.source`.
+        "label_language_status": label_result.status,
+        "label_translation_used": label_result.translation_used,
+        "label_detected_language": label_result.detected_language,
     }
 
 
@@ -1960,6 +1979,12 @@ async def _finalize_standalone_label_analysis(
         "health_score": health_score_value,
         "warnings": warnings,
         "is_from_database_cache": False,
+        # See `_finalize_barcode_enrichment`'s identical fields for why
+        # these exist (task: real, observed translation attempt/result,
+        # never inferred from `Product.source` alone).
+        "label_language_status": label_result.status,
+        "label_translation_used": label_result.translation_used,
+        "label_detected_language": label_result.detected_language,
     }
 
 

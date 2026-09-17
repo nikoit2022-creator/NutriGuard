@@ -1000,6 +1000,23 @@ async def _resolve_ingredient_languages(
         if existing_alias is not None:
             continue
 
+        # An official identifier (E-number) is definitive proof of
+        # identity on its own (task 1: "local-catalog resolution first,
+        # using established identifiers and aliases") -- a foreign-
+        # language OCR reading that still carries a genuine E-number
+        # already identifies a KNOWN ingredient regardless of what its
+        # display text says, so no translation is needed to establish
+        # identity here; `get_or_create_catalog_ingredient` below
+        # resolves it directly. Skipping the translation call for this
+        # case also serves "do not translate again for every product or
+        # request" -- an already-curated/previously-observed ingredient
+        # is never worth a Gemini call just because THIS OCR reading
+        # happens to be a new, foreign-language spelling of its name.
+        if ing.e_number and await ingredient_repository.get_by_official_identifier(
+            db, e_number=ing.e_number
+        ):
+            continue
+
         reason = detect_ambiguous_segmentation(ing.common_name)
         if reason is not None:
             prepared[idx] = _dataclasses_replace(
@@ -1012,7 +1029,22 @@ async def _resolve_ingredient_languages(
     if not to_translate:
         return prepared, False
 
-    translations = await translate_ingredient_tokens([ing.common_name for _, ing, _ in to_translate])
+    # Full-list context (task requirement): every entry this scan
+    # actually saw, curated and synthetic alike, not just the subset
+    # that still needs translating -- a short/ambiguous target is
+    # translated with its real neighboring ingredients as context, not
+    # in isolation. `targets` below stays the specific subset Gemini
+    # must return translations for (see `translate_ingredient_tokens`'s
+    # own docstring / `GeminiService.translate_ingredient_list`).
+    full_context = [getattr(item, "common_name", None) for item in prepared]
+    full_context = [name for name in full_context if name]
+    known_normalized_names = await ingredient_alias_repository.get_all_normalized(db)
+
+    translations = await translate_ingredient_tokens(
+        [ing.common_name for _, ing, _ in to_translate],
+        context=full_context,
+        known_normalized_names=known_normalized_names,
+    )
     translation_occurred = False
     for (idx, ing, lang), result in zip(to_translate, translations):
         if result.reliable and result.translated_text:

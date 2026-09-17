@@ -312,3 +312,145 @@ async def test_label_image_diagnostic_write_failure_on_success_does_not_prevent_
     monkeypatch.setattr(gemini_service, "analyze_image", fake_analyze_image)
     response = await app_client.post("/api/v1/scan/label-image", headers=headers, files=_small_jpeg_files())
     assert response.status_code == 200
+
+
+# --- Code-review follow-up (issue 4): truthful diagnostics -----------------
+
+
+@pytest.mark.asyncio
+async def test_scan_barcode_labelscan_required_partial_result_is_classified_consistently(
+    app_client, monkeypatch
+):
+    """A barcode whose IDENTITY is known (persisted via an earlier
+    ingredients-only label scan) but lacks verified nutrition raises
+    `labelScanRequired` -- this is a PARTIAL result, not a failure, and
+    must be classified the same way `/scan/ocr-text`/`/scan/label-image`
+    already classify it (task: "classify partial results consistently
+    across scan endpoints"). Distinct from a genuinely unknown barcode
+    (see `test_scan_barcode_failure_records_a_diagnostic` above, still
+    "failed") -- the discriminator is a real discovered identity, not
+    merely the `labelScanRequired` flag both cases set."""
+    headers = await _register_device(app_client, "diag-barcode-partial")
+
+    async def fake_analyze_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        return json.dumps(
+            {
+                "productName": "Partial Diag Product",
+                # No ingredient evidence at all (neither a structured
+                # array NOR raw text) -- V13's success gate only requires
+                # ingredient RECOGNITION, so nutrition alone missing
+                # still succeeds; this must fail BOTH groups to reach
+                # `labelScanRequired`.
+                "rawIngredientText": "",
+                "ingredients": [],
+                "sugarGrams": None,
+                "sodiumMg": None,
+                "saturatedFatGrams": None,
+                "nutritionBasis": "UNKNOWN",
+            }
+        )
+
+    monkeypatch.setattr(gemini_service, "analyze_image", fake_analyze_image)
+    seed = await app_client.post(
+        "/api/v1/scan/label-image",
+        headers=headers,
+        files=_small_jpeg_files(),
+        data={"barcode": "5328710122696"},
+    )
+    assert seed.status_code == 404  # labelScanRequired -- no ingredients recognized yet
+    assert seed.json()["error"]["details"]["labelScanRequired"] is True
+
+    calls = _capture(monkeypatch)
+    resp = await app_client.post(
+        "/api/v1/scan/barcode", json={"barcode": "5328710122696"}, headers=headers
+    )
+    assert resp.status_code == 404
+    assert resp.json()["error"]["details"]["labelScanRequired"] is True
+    assert len(calls) == 1
+    assert calls[0]["outcome"] == "partial"
+    assert calls[0]["errorCode"] == "PRODUCT_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_scan_barcode_cache_hit_reports_cache_as_data_source(app_client, monkeypatch):
+    """A repeat `/scan/barcode` call for an already-fully-verified
+    product must report `dataSource: "cache"` -- real, observed state
+    (`is_from_database_cache`), never the endpoint's own operation name
+    (task: "dataSource ... propagate actual observed source information,
+    without guessing")."""
+    headers = await _register_device(app_client, "diag-barcode-cache")
+
+    async def fake_analyze_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        return json.dumps(
+            {
+                "productName": "Cache Diag Product",
+                "rawIngredientText": "Water, Sugar, Salt",
+                "ingredients": [],
+                "sugarGrams": 2.0,
+                "sodiumMg": 80.0,
+                "saturatedFatGrams": 0.5,
+                "nutritionBasis": "PER_100_G",
+            }
+        )
+
+    monkeypatch.setattr(gemini_service, "analyze_image", fake_analyze_image)
+    seed = await app_client.post(
+        "/api/v1/scan/label-image", headers=headers, files=_small_jpeg_files()
+    )
+    assert seed.status_code == 200
+    barcode = seed.json()["product"]["barcode"]
+    seeded_source = seed.json()["product"].get("source")
+
+    calls = _capture(monkeypatch)
+    resp = await app_client.post("/api/v1/scan/barcode", json={"barcode": barcode}, headers=headers)
+    assert resp.status_code == 200
+    assert len(calls) == 1
+    assert calls[0]["outcome"] == "success"
+    # The FIRST (label-scan) request is not a cache hit -- this second,
+    # identical-barcode request against the already-persisted row is.
+    assert calls[0]["dataSource"] == "cache"
+    assert calls[0]["dataSource"] != seeded_source or seeded_source is None
+
+
+@pytest.mark.asyncio
+async def test_scan_label_image_computed_field_serialization_failure_is_a_failed_diagnostic(
+    app_client, monkeypatch
+):
+    """Distinct from `test_scan_label_image_serialization_failure_after_analysis_is_a_failed_diagnostic_not_success`
+    (which forces `_to_analysis_out`'s own construction to fail): THIS
+    test forces a failure specifically during the LATER full-serialization
+    step (`_finish_serializing`'s `model_dump(mode="json")` call, which
+    evaluates every nested `@computed_field`) -- the exact gap the task
+    identified ("constructing FullProductAnalysisOut does not finish
+    JSON serialization; computed-field/serialization failures can still
+    occur after success is recorded"). Must still be diagnosed as a
+    failure, never a false success."""
+    calls = _capture(monkeypatch)
+    headers = await _register_device(app_client, "diag-computed-field-fail")
+
+    async def fake_analyze_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        return json.dumps(
+            {
+                "productName": "Diag Product",
+                "rawIngredientText": "Water, Sugar, Salt",
+                "ingredients": [],
+                "sugarGrams": 2.0,
+                "sodiumMg": 80.0,
+                "saturatedFatGrams": 0.5,
+                "nutritionBasis": "PER_100_G",
+            }
+        )
+
+    def _broken_finish_serializing(out):
+        raise ValueError("forced computed-field serialization failure")
+
+    monkeypatch.setattr(gemini_service, "analyze_image", fake_analyze_image)
+    monkeypatch.setattr(scan_module, "_finish_serializing", _broken_finish_serializing)
+
+    with pytest.raises(ValueError, match="forced computed-field serialization failure"):
+        await app_client.post("/api/v1/scan/label-image", headers=headers, files=_small_jpeg_files())
+
+    assert len(calls) == 1
+    assert calls[0]["outcome"] == "failed"
+    assert calls[0]["errorCode"] == "INTERNAL_ERROR"
+    assert all(c["outcome"] != "success" for c in calls)

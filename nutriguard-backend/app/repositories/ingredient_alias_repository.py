@@ -27,6 +27,20 @@ async def list_for_ingredient(db: AsyncSession, ingredient_id: str) -> list[Ingr
     return list(result.scalars().all())
 
 
+async def get_all_normalized(db: AsyncSession) -> frozenset[str]:
+    """Every known normalized alias text across the whole catalog --
+    curated AND previously-learned OCR/translated names alike, since
+    every `Ingredient` row registers its own name as its first alias
+    (see `ingredient_catalog.register_curated_alias`/
+    `_register_alias_and_resolve_canonical`). Used as real,
+    pre-existing-evidence (never a guess) that a short translated
+    ingredient name is a genuinely established one -- see
+    `app.services.ingredient_translation`'s catalog-alias check."""
+    stmt = select(IngredientAlias.alias_normalized)
+    result = await db.execute(stmt)
+    return frozenset(result.scalars().all())
+
+
 async def get_or_create(
     db: AsyncSession,
     *,

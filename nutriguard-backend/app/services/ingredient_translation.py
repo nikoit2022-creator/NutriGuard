@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.integrations.gemini import GeminiUnavailableError, gemini_service
 from app.services.barcode_text_safety import is_placeholder
+from app.services.ingredient_normalization import normalize_ingredient_name
 from app.services.language_detection import detect_language
 
 _MIN_TRANSLATION_CONFIDENCE = 0.55
@@ -43,27 +44,21 @@ _MIN_TRANSLATION_CONFIDENCE = 0.55
 # `detect_language(...) == "en"` alone would reject a correct, verified
 # translation like "MILK" -> "Milk" outright.
 #
-# A SHORT (<=2 word) translated result containing no non-ASCII character
-# at all is used as a narrow fallback: independent, script-level
-# evidence it is NOT still-untranslated foreign text (a genuine Romanian/
-# Bulgarian/etc. word very often carries a diacritic or a non-Latin
-# script). Deliberately bounded to <=2 words, NOT any length -- a longer
-# ASCII-only phrase can still genuinely be un-translated foreign text
-# (e.g. French "Lait Entier Complet" has no diacritics at all) where the
-# word-count alone no longer makes coincidental false-acceptance
-# unlikely; longer text always goes through the stricter word-based
-# `detect_language` check only, unchanged. This is an OR alongside that
-# stricter check, never instead of it.
-_NON_ASCII_RE = re.compile(r"[^\x00-\x7F]")
-_MAX_ASCII_FALLBACK_WORDS = 2
-
-
-def _is_plain_ascii_text(text: str) -> bool:
-    if _NON_ASCII_RE.search(text):
-        return False
-    return len(text.split()) <= _MAX_ASCII_FALLBACK_WORDS
-
-
+# The fallback for that case is NOT another blanket script/length rule
+# (a plain-ASCII check previously used here also accepted short,
+# untranslated foreign text with no diacritics, e.g. French "lait
+# entier" -- a real false-accept, not a hypothetical one). Instead:
+# real, pre-existing evidence -- does the translated text match a name
+# ALREADY established in the ingredient catalog (a curated ingredient's
+# own name, or any previously-learned alias -- see
+# `app.repositories.ingredient_alias_repository.get_all_normalized`)?
+# That is independent confirmation this is a genuine, known ingredient
+# name, never a guess about scripts or word counts. A translation that
+# is short, doesn't match a recognized English word, AND doesn't match
+# any known catalog name is honestly UNRESOLVED (task: "preserve an
+# honest unresolved result when language cannot be established") --
+# rejected here, which the caller turns into `identity_uncertain=True`
+# rather than a silently wrong guess either way.
 _E_NUMBER_RE = re.compile(r"\bE[- ]?(\d{3,4}[A-Za-z]?)\b", re.IGNORECASE)
 _NUMBER_WITH_UNIT_RE = re.compile(
     r"(?<![A-Za-z0-9])(\d+(?:[.,]\d+)?)\s*(%|kcal|kj|mcg|µg|mg|kg|g|ml|l)?(?![A-Za-z0-9])",
@@ -119,17 +114,33 @@ def _extract_numeric_tokens(text: str) -> Counter[str]:
     return tokens
 
 
-def _translation_is_reliable(source_text: str, translated_text: str, confidence: float) -> bool:
+def _translation_is_reliable(
+    source_text: str,
+    translated_text: str,
+    confidence: float,
+    *,
+    known_normalized_names: frozenset[str],
+) -> bool:
     """Every check is deterministic and independent of what Gemini
     itself claimed -- mirrors `label_language._verify_translation_invariants`,
     applied per-entry rather than to a whole blob (closing the gap where
     a whole-blob aggregate check can pass even though one embedded
-    fragment stayed untranslated)."""
+    fragment stayed untranslated).
+
+    `known_normalized_names` -- see the module docstring's note above
+    `_E_NUMBER_RE` -- is the narrow, evidence-based fallback for short
+    translations `detect_language` alone can't confirm; it is never a
+    substitute for `detect_language` succeeding, only an additional,
+    independently-verifiable path to the same "genuinely English"
+    conclusion."""
     if confidence < _MIN_TRANSLATION_CONFIDENCE or not math.isfinite(confidence):
         return False
     if is_placeholder(translated_text) or not translated_text.strip():
         return False
-    if detect_language(translated_text) != "en" and not _is_plain_ascii_text(translated_text):
+    if (
+        detect_language(translated_text) != "en"
+        and normalize_ingredient_name(translated_text) not in known_normalized_names
+    ):
         return False
     if _extract_e_numbers(source_text) != _extract_e_numbers(translated_text):
         return False
@@ -148,38 +159,98 @@ def _unreliable(original_text: str) -> IngredientTokenTranslation:
     )
 
 
-async def translate_ingredient_tokens(tokens: list[str]) -> list[IngredientTokenTranslation]:
-    """Translate every entry in `tokens` in ONE batched Gemini call
-    (full-list context). Always returns exactly `len(tokens)` results,
-    in the same order -- a whole-call failure (Gemini unavailable,
-    unparsable response, wrong entry count) degrades EVERY entry to
+def _match_responses_to_targets(
+    targets: list[str], entries: list[_TranslationEntry]
+) -> list[_TranslationEntry | None]:
+    """Pairs each TARGET (by position in `targets`) with the response
+    `_TranslationEntry` whose `originalText` exactly matches it --
+    NEVER by response position/order alone (a reordered response is
+    matched correctly here by identifier, not silently mismatched to
+    the wrong original ingredient). Handles every irregular response
+    shape safely, without ever attaching a translation (or, downstream,
+    an alias) to the wrong original entry:
+
+      - reordered response: matched by exact text, position-independent.
+      - duplicate target text (the same ingredient name appears more
+        than once in `targets`): each occurrence gets its OWN response
+        entry, consumed in the order the response listed them for that
+        text -- never the same response entry reused for two different
+        target positions.
+      - a response `originalText` that doesn't match any (remaining)
+        target text at all -- mismatched, extra, or a hallucinated
+        entry -- is silently discarded, never force-attached to some
+        other target's position.
+      - a target with no matching response entry at all (missing) is
+        left `None` here; the caller turns that into an honest
+        `_unreliable` result, never a guess.
+    """
+    remaining_positions: dict[str, list[int]] = {}
+    for index, target_text in enumerate(targets):
+        remaining_positions.setdefault(target_text, []).append(index)
+
+    matched: list[_TranslationEntry | None] = [None] * len(targets)
+    for entry in entries:
+        positions = remaining_positions.get(entry.originalText)
+        if not positions:
+            continue
+        matched[positions.pop(0)] = entry
+    return matched
+
+
+async def translate_ingredient_tokens(
+    targets: list[str],
+    *,
+    context: list[str] | None = None,
+    known_normalized_names: frozenset[str] = frozenset(),
+) -> list[IngredientTokenTranslation]:
+    """Translate every entry in `targets` in ONE batched Gemini call.
+    `context` -- the FULL ingredient list this scan actually saw
+    (defaults to `targets` itself when the caller has nothing broader to
+    offer) -- is supplied to Gemini SEPARATELY as disambiguation
+    context, with `targets` clearly identified as the entries that
+    actually need a translation returned (task requirement: "supply the
+    full ingredient-list context separately while clearly identifying
+    the target entries" -- see `GeminiService.translate_ingredient_list`).
+
+    Always returns exactly `len(targets)` results, in the same order.
+    Every response entry is matched back to its target by its own
+    `originalText` identifier (see `_match_responses_to_targets`), never
+    by response position -- a whole-call failure (Gemini unavailable,
+    unparsable/non-list response) degrades EVERY target to
     `reliable=False` rather than raising, so one bad batch never breaks
     the scan; the caller already guarantees it only ever calls this with
-    a non-empty list of tokens that passed `ingredient_segmentation.
+    a non-empty list of targets that passed `ingredient_segmentation.
     detect_ambiguous_segmentation` (`None`) and independently detected as
     `"other"` -- callers must not include en/bg/unknown tokens here.
     """
-    if not tokens:
+    if not targets:
         return []
 
     try:
-        raw_response = await gemini_service.translate_ingredient_list(tokens)
+        raw_response = await gemini_service.translate_ingredient_list(targets, context=context)
     except GeminiUnavailableError:
-        return [_unreliable(t) for t in tokens]
+        return [_unreliable(t) for t in targets]
 
     try:
         payload = json.loads(raw_response)
     except (json.JSONDecodeError, TypeError, ValueError):
-        return [_unreliable(t) for t in tokens]
+        return [_unreliable(t) for t in targets]
 
-    if not isinstance(payload, list) or len(payload) != len(tokens):
-        return [_unreliable(t) for t in tokens]
+    if not isinstance(payload, list):
+        return [_unreliable(t) for t in targets]
+
+    entries: list[_TranslationEntry] = []
+    for raw_entry in payload:
+        try:
+            entries.append(_TranslationEntry.model_validate(raw_entry))
+        except ValidationError:
+            continue  # one malformed response entry never invalidates the rest
+
+    matched = _match_responses_to_targets(targets, entries)
 
     results: list[IngredientTokenTranslation] = []
-    for original_text, raw_entry in zip(tokens, payload):
-        try:
-            entry = _TranslationEntry.model_validate(raw_entry)
-        except ValidationError:
+    for original_text, entry in zip(targets, matched):
+        if entry is None:
             results.append(_unreliable(original_text))
             continue
 
@@ -187,7 +258,9 @@ async def translate_ingredient_tokens(tokens: list[str]) -> list[IngredientToken
         translated = entry.translatedText.strip()
         detected_language = entry.detectedLanguage.strip().lower() or "other"
 
-        if not _translation_is_reliable(original_text, translated, confidence):
+        if not _translation_is_reliable(
+            original_text, translated, confidence, known_normalized_names=known_normalized_names
+        ):
             results.append(
                 IngredientTokenTranslation(
                     original_text=original_text,

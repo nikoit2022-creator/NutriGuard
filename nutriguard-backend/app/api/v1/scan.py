@@ -50,6 +50,29 @@ def _to_analysis_out(result: dict) -> FullProductAnalysisOut:
     )
 
 
+def _finish_serializing(out: FullProductAnalysisOut) -> None:
+    """Forces the SAME serialization FastAPI's `response_model` machinery
+    performs later, INSIDE this endpoint's own try block (task: "record
+    serialization failures as failures and avoid premature success").
+
+    Constructing `FullProductAnalysisOut(...)` (see `_to_analysis_out`)
+    only runs Pydantic's field validation -- it does NOT evaluate every
+    nested `@computed_field` (e.g. `IngredientOut.localizations`/
+    `adi_population_scope`) or run full JSON encoding; those happen
+    later, inside `fastapi.routing`'s own response rendering, AFTER this
+    endpoint function has already returned -- outside any try/except
+    here. A computed-field/encoding failure there would previously leave
+    a false "success" diagnostic line behind (the endpoint's own
+    response was never actually sent). Calling `model_dump(mode="json")`
+    here evaluates everything response rendering would, so the same
+    exception surfaces INSIDE this function's try block and is diagnosed
+    as a genuine failure, never a guessed/deferred success. Return value
+    intentionally discarded -- this call exists purely to force
+    evaluation, not to replace `out`.
+    """
+    out.model_dump(mode="json", by_alias=True)
+
+
 def _ingredient_language_counts(ingredients: list[Any]) -> dict:
     """Recognized/unresolved/untranslated ingredient counts (task:
     "recognized, unresolved, and untranslated ingredient counts") --
@@ -75,11 +98,55 @@ def _ingredient_language_counts(ingredients: list[Any]) -> dict:
     }
 
 
-def _diagnostic_base(request: Request, *, operation: str, data_source: str, barcode: str | None) -> dict:
+# `label_language_status` (see `app.services.label_language.LabelTextResult.status`)
+# -> the real, OBSERVED translation attempt/result/reason for THIS
+# request (task: "report actual translation attempt/result/reason where
+# available, rather than inferring it solely from Product.source").
+# "ok" means no foreign-language text was ever found -- no attempt was
+# needed, never "translation succeeded trivially".
+_TRANSLATION_RESULT_BY_STATUS = {
+    "ok": "not_needed",
+    "translated": "translated",
+    "translation_unreliable_fallback": "unreliable_fallback",
+}
+
+
+def _translation_fields(result: dict) -> dict:
+    """`result` is the raw dict `app.services.food_analysis` returns.
+    `label_language_status` is present only on paths that actually ran
+    the language policy (the barcode-linked-enrichment and standalone
+    label/OCR finalize functions) -- ABSENT (not `None`, genuinely
+    missing) on e.g. `analyze_barcode`'s pure identity lookup, which
+    never touches label/OCR text at all. Diagnostics must treat that
+    absence as honestly "not applicable", never fall back to guessing
+    from `Product.source`."""
+    status = result.get("label_language_status")
+    if status is None:
+        return {"translationAttempted": None, "translationResult": None, "translationReason": None}
+    return {
+        "translationAttempted": bool(result.get("label_translation_used")) or status != "ok",
+        "translationResult": _TRANSLATION_RESULT_BY_STATUS.get(status, status),
+        "translationReason": None if status == "ok" else status,
+    }
+
+
+def _diagnostic_base(request: Request, *, operation: str, barcode: str | None) -> dict:
     return {
         "requestId": getattr(request.state, "request_id", None),
         "operation": operation,
-        "dataSource": data_source,
+        # The REAL observed origin of the data behind this response
+        # ("cache" for an already-verified existing row served as-is, a
+        # `Product.source` value like "open_food_facts"/"label_scan"/
+        # "local" once a product is known, or omitted/`None` while
+        # genuinely unknown) -- callers pass `dataSource=` explicitly at
+        # each write site via `_observed_data_source`, once actually
+        # known, never a guess (task: "dataSource ... identifies the
+        # operation, not the actual cache/provider source" -- `operation`
+        # above already covers "which endpoint"; `dataSource` covers
+        # "where did the data come from"). Deliberately NOT included in
+        # this base dict -- every write site supplies its own, so a
+        # generic failure branch that has no product yet simply omits it
+        # rather than colliding with an explicit value.
         "barcode": barcode,
         # Coarse, honest stages this router layer actually observes --
         # never a guess at what happened deeper inside
@@ -88,6 +155,56 @@ def _diagnostic_base(request: Request, *, operation: str, data_source: str, barc
         # information that was not observed").
         "stage": "request_validated",
     }
+
+
+def _is_partial_result(details: dict) -> bool:
+    """A PARTIAL result (a real product identity was found, just not
+    enough verified data for a Health Score) vs a genuine FAILURE
+    (nothing was found at all) -- task: "classify partial results
+    consistently across scan endpoints".
+
+    `labelScanRequired` alone is NOT the right discriminator: both
+    `food_analysis._label_scan_required_details` (a real, partially-
+    known product) AND `_not_found_details` (a barcode no source
+    recognizes at all -- nothing persisted, no identity known) set it
+    `True`, since both suggest the same next action ("scan the label").
+    `discoveredIdentity` is the actual structural signal -- it is only
+    ever present when a real product row's identity was actually
+    found/persisted (see `_label_scan_required_details`); `_not_found_details`
+    never includes it."""
+    return bool(details.get("discoveredIdentity"))
+
+
+def _observed_data_source(result: dict | None, exc_details: dict | None) -> str | None:
+    """The real, already-known origin of the data behind this response --
+    never inferred/guessed (task: "propagate actual observed source
+    information, without guessing").
+
+      - A successful/partial result carries the actual `Product` row:
+        `is_from_database_cache` (already computed by `food_analysis`
+        from real state, e.g. `analyze_barcode`'s `was_cache_hit`) wins
+        when true ("cache"); otherwise the row's own persisted
+        `source` column (a real provider name, "local", "label_scan",
+        etc.) is the honest answer.
+      - A `labelScanRequired`/not-found `AppError.details` dict may
+        carry its own `dataSource` (see
+        `food_analysis._label_scan_required_details`, set from the SAME
+        row) when a partial identity was found even though the request
+        ultimately raised.
+      - Otherwise (no product ever existed for this request -- total
+        not-found, plain validation error, unhandled exception before
+        any product was resolved): `None`, honestly "unknown", never a
+        placeholder value.
+    """
+    if result is not None:
+        product = result.get("product")
+        if product is not None:
+            if result.get("is_from_database_cache"):
+                return "cache"
+            return getattr(product, "source", None)
+    if exc_details:
+        return exc_details.get("dataSource")
+    return None
 
 
 @router.post("/barcode", response_model=FullProductAnalysisOut)
@@ -103,14 +220,28 @@ async def scan_barcode(
     if not body.barcode.strip():
         raise ValidationAppError("barcode must not be empty.")
 
-    diagnostic_base = _diagnostic_base(
-        request, operation="scan_barcode", data_source="barcode", barcode=body.barcode.strip()
-    )
+    diagnostic_base = _diagnostic_base(request, operation="scan_barcode", barcode=body.barcode.strip())
     try:
         result = await food_analysis.analyze_barcode(db, user_id, body.barcode.strip())
         diagnostic_base["stage"] = "analysis_complete"
         out = _to_analysis_out(result)
+        _finish_serializing(out)
         diagnostic_base["stage"] = "response_built"
+    except ProductNotFoundError as exc:
+        # A barcode whose *identity* was found but lacks enough verified
+        # data for a Health Score (`labelScanRequired`) is a PARTIAL
+        # result, not a failure -- classified the same way the other two
+        # scan endpoints already classify it (task: "classify partial
+        # results consistently across scan endpoints").
+        details = exc.details if isinstance(exc.details, dict) else {}
+        _safe_record_scan_diagnostic(
+            **diagnostic_base,
+            dataSource=_observed_data_source(None, details),
+            outcome="partial" if _is_partial_result(details) else "failed",
+            errorCode=exc.code,
+            durationMs=round((time.perf_counter() - started) * 1000, 2),
+        )
+        raise
     except AppError as exc:
         _safe_record_scan_diagnostic(
             **diagnostic_base,
@@ -128,8 +259,13 @@ async def scan_barcode(
         )
         raise
 
+    # Exactly one final summary record for this operation (task: "one
+    # final summary record per operation") -- every branch above either
+    # writes its own single record and re-raises, or falls through to
+    # this one; none can run more than once for the same request.
     _safe_record_scan_diagnostic(
         **diagnostic_base,
+        dataSource=_observed_data_source(result, None),
         outcome="success",
         **_ingredient_language_counts(result["ingredients"]),
         durationMs=round((time.perf_counter() - started) * 1000, 2),
@@ -154,9 +290,7 @@ async def scan_ocr_text(
         raise ValidationAppError("rawText must be at least 3 characters.")
 
     barcode = clean_optional(body.barcode)
-    diagnostic_base = _diagnostic_base(
-        request, operation="scan_ocr_text", data_source="ocr_text", barcode=barcode
-    )
+    diagnostic_base = _diagnostic_base(request, operation="scan_ocr_text", barcode=barcode)
     try:
         if barcode:
             result = await food_analysis.analyze_ocr_text_with_barcode(
@@ -166,12 +300,14 @@ async def scan_ocr_text(
             result = await food_analysis.analyze_ocr_text(db, user_id, body.raw_text.strip())
         diagnostic_base["stage"] = "analysis_complete"
         out = _to_analysis_out(result)
+        _finish_serializing(out)
         diagnostic_base["stage"] = "response_built"
     except ProductNotFoundError as exc:
         details = exc.details if isinstance(exc.details, dict) else {}
         _safe_record_scan_diagnostic(
             **{**diagnostic_base, "barcode": barcode},
-            outcome="partial" if details.get("labelScanRequired") else "failed",
+            dataSource=_observed_data_source(None, details),
+            outcome="partial" if _is_partial_result(details) else "failed",
             errorCode=exc.code,
             durationMs=round((time.perf_counter() - started) * 1000, 2),
         )
@@ -196,9 +332,9 @@ async def scan_ocr_text(
     product = result["product"]
     _safe_record_scan_diagnostic(
         **{**diagnostic_base, "barcode": product.barcode},
+        dataSource=_observed_data_source(result, None),
         outcome="success",
-        detectedLanguage=getattr(product, "ingredient_text_source_language", None),
-        translationUsed=product.source == "label_scan_translated",
+        **_translation_fields(result),
         **_ingredient_language_counts(result["ingredients"]),
         durationMs=round((time.perf_counter() - started) * 1000, 2),
     )
@@ -234,9 +370,7 @@ async def scan_label_image(
     # get a diagnostic record too -- previously these raised before
     # `diagnostic_base` was even built, so the diagnostics journal
     # silently had no coverage of them at all.
-    diagnostic_base = _diagnostic_base(
-        request, operation="scan_label_image", data_source="label_image", barcode=cleaned_barcode
-    )
+    diagnostic_base = _diagnostic_base(request, operation="scan_label_image", barcode=cleaned_barcode)
     diagnostic_base["stage"] = "content_type_validated"
 
     if image.content_type not in _ALLOWED_IMAGE_TYPES:
@@ -269,21 +403,25 @@ async def scan_label_image(
         else:
             result = await food_analysis.analyze_label_image(db, user_id, contents)
         diagnostic_base["stage"] = "analysis_complete"
-        # Response construction/serialization happens INSIDE this try
-        # block now, not after it: a "success" record must only ever be
-        # written once the response actually exists (task: "record
-        # success only after response construction/serialization
-        # succeeds") -- a `FullProductAnalysisOut` validation error here
-        # now correctly falls into the generic `except Exception` below
-        # instead of leaving a false "success" diagnostic line behind.
+        # Response construction AND full serialization happen INSIDE
+        # this try block now, not after it: a "success" record must only
+        # ever be written once the response actually exists and would
+        # actually serialize (task: "record success only after response
+        # construction/serialization succeeds") -- a `FullProductAnalysisOut`
+        # validation OR computed-field/encoding error now correctly
+        # falls into the generic `except Exception` below instead of
+        # leaving a false "success" diagnostic line behind (see
+        # `_finish_serializing`).
         out = _to_analysis_out(result)
+        _finish_serializing(out)
         diagnostic_base["stage"] = "response_built"
     except ProductNotFoundError as exc:
         details = exc.details if isinstance(exc.details, dict) else {}
         ingredients = details.get("ingredients")
         _safe_record_scan_diagnostic(
             **diagnostic_base,
-            outcome="partial" if details.get("labelScanRequired") else "failed",
+            dataSource=_observed_data_source(None, details),
+            outcome="partial" if _is_partial_result(details) else "failed",
             errorCode=exc.code,
             nutritionRecognized=not bool(details.get("nutritionScanRequired", True)),
             ingredientsRecognized=not bool(details.get("ingredientsScanRequired", True)),
@@ -311,12 +449,12 @@ async def scan_label_image(
     product = result["product"]
     _safe_record_scan_diagnostic(
         **{**diagnostic_base, "barcode": product.barcode},
+        dataSource=_observed_data_source(result, None),
         outcome="success",
         nutritionRecognized=product.has_verified_nutrition,
         ingredientsRecognized=product.has_verified_ingredients,
         nutritionBasis=product.nutrition_basis,
-        detectedLanguage=getattr(product, "ingredient_text_source_language", None),
-        translationUsed=product.source == "label_scan_translated",
+        **_translation_fields(result),
         **_ingredient_language_counts(result["ingredients"]),
         durationMs=round((time.perf_counter() - started) * 1000, 2),
     )

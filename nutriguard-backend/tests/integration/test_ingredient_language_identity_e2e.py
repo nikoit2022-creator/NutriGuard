@@ -35,7 +35,7 @@ def _fake_translate(mapping: dict[str, tuple[str, float]]):
     in the SAME order the batched call asked for, mirroring the real
     full-list-context call."""
 
-    async def _fake(tokens: list[str]) -> str:
+    async def _fake(tokens: list[str], *, context=None) -> str:
         payload = [
             {
                 "originalText": t,
@@ -54,18 +54,27 @@ def _fake_translate(mapping: dict[str, tuple[str, float]]):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "token",
-    ["SECARA agenți de creștere", "Produs din GRAU", "ZARA pudră", "LAPTE proteină din LAPTE"],
-)
 async def test_ambiguous_segmentation_token_is_identity_uncertain_and_never_translated(
-    db_session, monkeypatch, token
+    db_session, monkeypatch
 ):
-    def _must_not_be_called(tokens):
+    """Code-review fix (issue 3): capitalization alone is no longer
+    evidence of a broken/concatenated token (see
+    `app.services.ingredient_segmentation`'s module docstring) -- of the
+    4 originally-reported examples, only "LAPTE proteină din LAPTE"
+    ("MILK protein from MILK") is STILL genuinely ambiguous: it repeats
+    the same significant word ("lapte"/"LAPTE") twice, a real structural
+    signal (`DUPLICATE_TOKEN_FRAGMENT`) that two clauses sharing an
+    allergen word were merged. The other 3 are ordinary compound
+    ingredient names with allergen emphasis -- see
+    `test_previously_over_flagged_examples_are_now_sent_for_translation`
+    below for their (changed, correct) new behavior."""
+
+    def _must_not_be_called(tokens, *, context=None):
         raise AssertionError(f"translate_ingredient_list must not be called for {tokens!r}")
 
     monkeypatch.setattr(gemini_service, "translate_ingredient_list", _must_not_be_called)
 
+    token = "LAPTE proteină din LAPTE"
     synthetic = create_synthetic_ingredient(token)
     materialized, translation_occurred = await ingredient_catalog.materialize_ingredients(
         db_session, [synthetic]
@@ -74,16 +83,57 @@ async def test_ambiguous_segmentation_token_is_identity_uncertain_and_never_tran
     assert translation_occurred is False
     row = materialized[0]
     assert row.identity_uncertain is True
-    assert row.uncertainty_reason in (
-        "EMBEDDED_ALLERGEN_EMPHASIS_MERGE",
-        "DUPLICATE_TOKEN_FRAGMENT",
-        "LONG_UNSEGMENTED_CLAUSE",
-    )
+    assert row.uncertainty_reason == "DUPLICATE_TOKEN_FRAGMENT"
     # Never a fabricated/guessed identity -- the observed OCR text is
     # preserved exactly.
     assert row.common_name == synthetic.common_name
     assert row.verification_status == IngredientVerificationStatus.UNVERIFIED
-    assert row.source == IngredientSource.OCR_HEURISTIC
+
+
+@pytest.mark.asyncio
+async def test_previously_over_flagged_examples_are_now_sent_for_translation(db_session, monkeypatch):
+    """Code-review fix (issue 3): "SECARA agenți de creștere" (RYE
+    raising agents), "Produs din GRAU" (product from WHEAT), and "ZARA
+    pudră" all contain ordinary allergen-emphasis capitalization with no
+    other structural evidence of concatenation (no colon, no duplicated
+    word, under the 7-word length threshold) -- they must be treated as
+    plausible, translatable single ingredient names, NOT pre-emptively
+    flagged `identity_uncertain` before translation is ever attempted.
+    This is a deliberate behavior CHANGE from the old, over-broad
+    capitalization heuristic -- these were false positives, not
+    genuinely malformed tokens."""
+    tokens = ["SECARA agenți de creștere", "Produs din GRAU", "ZARA pudră"]
+    calls: list[list[str]] = []
+
+    fake = _fake_translate(
+        {
+            "SECARA agenți de creștere": ("Rye Made With Raising Agents", 0.9),
+            "Produs din GRAU": ("Product Made From Wheat", 0.9),
+            "ZARA pudră": ("Zara Made With Powder", 0.9),
+        }
+    )
+
+    async def _tracking_fake(targets, *, context=None):
+        calls.append(list(targets))
+        return await fake(targets, context=context)
+
+    monkeypatch.setattr(gemini_service, "translate_ingredient_list", _tracking_fake)
+
+    synthetics = [create_synthetic_ingredient(t) for t in tokens]
+    materialized, translation_occurred = await ingredient_catalog.materialize_ingredients(
+        db_session, synthetics
+    )
+
+    assert calls, "translate_ingredient_list must have been called -- these tokens are not ambiguous"
+    assert translation_occurred is True
+    for row in materialized:
+        assert row.identity_uncertain is False
+        assert row.uncertainty_reason is None
+        # A verified-reliable translation is real content from a real
+        # (Gemini) source -- never promoted past what GEMINI-sourced
+        # rows are allowed to reach (see `ingredient_catalog.merge_verified_fields`).
+        assert row.source == IngredientSource.GEMINI
+        assert row.verification_status != IngredientVerificationStatus.VERIFIED
 
 
 # --- Reliable translation: identity resolved, verification never promoted --
@@ -165,7 +215,7 @@ async def test_repeated_scan_of_the_same_text_reuses_the_catalog_translation(db_
     via that alias -- zero further Gemini calls."""
     call_count = {"n": 0}
 
-    async def counting_fake(tokens: list[str]) -> str:
+    async def counting_fake(tokens: list[str], *, context=None) -> str:
         call_count["n"] += 1
         return json.dumps(
             [{"originalText": t, "detectedLanguage": "ro", "confidence": 0.9, "translatedText": "Oil Made From Rapeseed"} for t in tokens]
@@ -201,7 +251,7 @@ async def test_pre_existing_alias_for_the_exact_text_skips_translation_entirely(
     an earlier, differently-shaped request), translation is skipped
     from the very start -- not merely deduped after the fact."""
 
-    async def must_not_be_called(tokens):
+    async def must_not_be_called(tokens, *, context=None):
         raise AssertionError("translate_ingredient_list must not be called when an alias already exists")
 
     canonical = Ingredient(
@@ -262,7 +312,7 @@ async def test_two_different_language_spellings_of_milk_converge_on_one_canonica
     """
     translated = "Whole Milk And Water"
 
-    async def fake_translate(tokens: list[str]) -> str:
+    async def fake_translate(tokens: list[str], *, context=None) -> str:
         return json.dumps(
             [
                 {"originalText": t, "detectedLanguage": "ro", "confidence": 0.9, "translatedText": translated}
