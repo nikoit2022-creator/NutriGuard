@@ -16,6 +16,7 @@ import pytest
 from PIL import Image
 
 import app.api.v1.scan as scan_module
+import app.services.food_analysis as food_analysis_module
 from app.integrations.gemini import gemini_service
 
 
@@ -177,6 +178,101 @@ async def test_scan_ocr_text_mixed_label_reports_per_ingredient_translation_sepa
     # not only the whole-label one.
     assert diag["translationAttempted"] is True
     assert diag["untranslatedIngredientCount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_scan_ocr_text_partial_outcome_preserves_observed_translation_summary(
+    app_client, monkeypatch
+):
+    """Code-review regression (issue #19, Codex follow-up finding 1): a
+    translation attempt `food_analysis` already observed BEFORE a LATER
+    `ProductNotFoundError` (partial/`labelScanRequired`) must not be
+    silently dropped from the final diagnostic. `AppError.
+    diagnostic_metadata` carries the bounded summary across the raise
+    (see `app.core.exceptions.AppError`), and `scan.py`'s
+    `except ProductNotFoundError` handler folds it in via
+    `_translation_fields(exc.diagnostic_metadata or {})`. It must also
+    NEVER leak into the public HTTP error body -- `diagnostic_metadata`
+    is a side channel `app.main`'s error envelope never reads.
+
+    `food_analysis._ingredients_group_is_complete` is force-returned
+    `False` here regardless of its real inputs -- isolating the
+    diagnostic-preservation mechanism under test from the unrelated
+    business rule for when a scan is genuinely "incomplete" (translation
+    success/failure does not itself affect that rule -- see that
+    function's own docstring)."""
+    calls = _capture(monkeypatch)
+    headers = await _register_device(app_client, "diag-partial-with-translation")
+
+    async def _fake_translate(tokens: list[str], *, context=None) -> str:
+        payload = []
+        for t in tokens:
+            if t == "Ulei de rapiță":
+                payload.append(
+                    {
+                        "originalText": t,
+                        "detectedLanguage": "ro",
+                        "confidence": 0.9,
+                        "translatedText": "Oil Made From Rapeseed",
+                    }
+                )
+            else:
+                payload.append(
+                    {
+                        "originalText": t,
+                        "detectedLanguage": "ro",
+                        "confidence": 0.2,
+                        "translatedText": "Unverified Guess",
+                    }
+                )
+        return json.dumps(payload)
+
+    monkeypatch.setattr(gemini_service, "translate_ingredient_list", _fake_translate)
+    monkeypatch.setattr(
+        food_analysis_module, "_ingredients_group_is_complete", lambda *a, **k: False
+    )
+
+    raw_text = "Ingredients: Ulei de rapiță, Compus Foarte Necunoscut"
+    resp = await app_client.post("/api/v1/scan/ocr-text", json={"rawText": raw_text}, headers=headers)
+
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["error"]["details"]["labelScanRequired"] is True
+    # The observed translation summary must never leak into the PUBLIC
+    # error response body.
+    assert "ingredientTranslationAttempted" not in body["error"]["details"]
+    assert "ingredient_translation_summary" not in body["error"]["details"]
+
+    assert len(calls) == 1
+    diag = calls[0]
+    assert diag["outcome"] == "partial"
+    assert diag["errorCode"] == "PRODUCT_NOT_FOUND"
+    assert diag["ingredientTranslationAttempted"] is True
+    assert diag["ingredientTranslationReliableCount"] == 1
+    assert diag["ingredientTranslationUnreliableCount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_barcode_not_found_before_any_translation_never_fabricates_diagnostic_metadata(
+    db_session,
+):
+    """Codex follow-up finding 1's explicit caveat: "do not fabricate
+    metadata for failures before translation". `food_analysis.
+    analyze_barcode` (the PURE identity-lookup path behind
+    `/scan/barcode`) raises `ProductNotFoundError` for an unknown
+    barcode entirely BEFORE any label/OCR/translation pipeline ever
+    runs -- unlike the two `_finalize_*` functions' own raise sites
+    (see `test_scan_ocr_text_partial_outcome_preserves_observed_translation_summary`
+    above), this one must never attach `diagnostic_metadata` at all."""
+    import uuid
+
+    from app.core.exceptions import ProductNotFoundError
+    from app.services import food_analysis
+
+    with pytest.raises(ProductNotFoundError) as excinfo:
+        await food_analysis.analyze_barcode(db_session, uuid.uuid4(), "9999999999999")
+
+    assert excinfo.value.diagnostic_metadata is None
 
 
 # --- /scan/label-image ---------------------------------------------------------
@@ -521,3 +617,64 @@ async def test_scan_label_image_computed_field_serialization_failure_is_a_failed
     assert calls[0]["outcome"] == "failed"
     assert calls[0]["errorCode"] == "INTERNAL_ERROR"
     assert all(c["outcome"] != "success" for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_scan_label_image_serialization_failure_after_translation_preserves_observed_summary(
+    app_client, monkeypatch
+):
+    """Code-review regression (issue #19, Codex follow-up finding 1): a
+    translation attempt that `food_analysis` already completed and
+    returned (a genuine, already-successful `result` dict) must not be
+    lost from the diagnostic just because a LATER, unrelated failure
+    (forced `_finish_serializing` failure here, mirroring
+    `test_scan_label_image_computed_field_serialization_failure_is_a_failed_diagnostic`)
+    happens afterward. `scan.py`'s generic `except Exception` handler
+    must fold in `_translation_fields(result or {})` using the `result`
+    that was already assigned before the later failure -- never `None`
+    in this specific case, since `food_analysis` itself did return."""
+    calls = _capture(monkeypatch)
+    headers = await _register_device(app_client, "diag-serialization-fail-with-translation")
+
+    async def fake_analyze_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        return json.dumps(
+            {
+                "productName": "Diag Product",
+                "rawIngredientText": "Ulei de rapiță",
+                "ingredients": [],
+                "sugarGrams": 2.0,
+                "sodiumMg": 80.0,
+                "saturatedFatGrams": 0.5,
+                "nutritionBasis": "PER_100_G",
+            }
+        )
+
+    async def _fake_translate(tokens: list[str], *, context=None) -> str:
+        return json.dumps(
+            [
+                {
+                    "originalText": t,
+                    "detectedLanguage": "ro",
+                    "confidence": 0.9,
+                    "translatedText": "Oil Made From Rapeseed",
+                }
+                for t in tokens
+            ]
+        )
+
+    def _broken_finish_serializing(out):
+        raise ValueError("forced computed-field serialization failure")
+
+    monkeypatch.setattr(gemini_service, "analyze_image", fake_analyze_image)
+    monkeypatch.setattr(gemini_service, "translate_ingredient_list", _fake_translate)
+    monkeypatch.setattr(scan_module, "_finish_serializing", _broken_finish_serializing)
+
+    with pytest.raises(ValueError, match="forced computed-field serialization failure"):
+        await app_client.post("/api/v1/scan/label-image", headers=headers, files=_small_jpeg_files())
+
+    assert len(calls) == 1
+    diag = calls[0]
+    assert diag["outcome"] == "failed"
+    assert diag["errorCode"] == "INTERNAL_ERROR"
+    assert diag["ingredientTranslationAttempted"] is True
+    assert diag["ingredientTranslationReliableCount"] >= 1

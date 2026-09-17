@@ -945,6 +945,85 @@ async def get_or_create_catalog_ingredient(db: AsyncSession, synthetic: Syntheti
     )
 
 
+# The finite ISO 639-1 two-letter code space -- the exact format
+# `GeminiService.translate_ingredient_list`'s own prompt asks
+# `detectedLanguage` to conform to (see `app.integrations.gemini`,
+# `"ISO 639-1 code or short language name"`). That prompt is advisory
+# only, never enforced by Gemini itself -- code-review fix: a raw
+# `detectedLanguage` string is otherwise UNRESTRICTED free text (could
+# be a hallucination, or injected OCR/label content reflected back by
+# the model) and must never be trusted directly for a privacy-bounded
+# diagnostic field. Every entry is `IngredientTokenTranslation.
+# detected_language`'s only safe path into
+# `IngredientTranslationSummary.detected_languages` (see
+# `_normalize_detected_language_code` below) -- never rely on prompt
+# wording alone for this boundary.
+_ISO_639_1_CODES = frozenset(
+    {
+        "aa", "ab", "ae", "af", "ak", "am", "an", "ar", "as", "av", "ay", "az",
+        "ba", "be", "bg", "bh", "bi", "bm", "bn", "bo", "br", "bs",
+        "ca", "ce", "ch", "co", "cr", "cs", "cu", "cv", "cy",
+        "da", "de", "dv", "dz",
+        "ee", "el", "en", "eo", "es", "et", "eu",
+        "fa", "ff", "fi", "fj", "fo", "fr", "fy",
+        "ga", "gd", "gl", "gn", "gu", "gv",
+        "ha", "he", "hi", "ho", "hr", "ht", "hu", "hy", "hz",
+        "ia", "id", "ie", "ig", "ii", "ik", "io", "is", "it", "iu",
+        "ja", "jv",
+        "ka", "kg", "ki", "kj", "kk", "kl", "km", "kn", "ko", "kr", "ks", "ku", "kv", "kw", "ky",
+        "la", "lb", "lg", "li", "ln", "lo", "lt", "lu", "lv",
+        "mg", "mh", "mi", "mk", "ml", "mn", "mr", "ms", "mt", "my",
+        "na", "nb", "nd", "ne", "ng", "nl", "nn", "no", "nr", "nv", "ny",
+        "oc", "oj", "om", "or", "os",
+        "pa", "pi", "pl", "ps", "pt",
+        "qu",
+        "rm", "rn", "ro", "ru", "rw",
+        "sa", "sc", "sd", "se", "sg", "si", "sk", "sl", "sm", "sn", "so", "sq", "sr", "ss", "st",
+        "su", "sv", "sw",
+        "ta", "te", "tg", "th", "ti", "tk", "tl", "tn", "to", "tr", "ts", "tt", "tw", "ty",
+        "ug", "uk", "ur", "uz",
+        "ve", "vi", "vo",
+        "wa", "wo",
+        "xh",
+        "yi", "yo",
+        "za", "zh", "zu",
+    }
+)
+
+# Defense in depth (finding: "cap lengths/counts") -- a real ISO 639-1
+# code is always exactly 2 characters, so this bound is already
+# structurally enforced by the length check inside
+# `_normalize_detected_language_code` below; this constant only guards
+# against ever slicing/logging an unbounded raw string before that
+# check runs.
+_MAX_RAW_LANGUAGE_LENGTH = 32
+
+# Same "cap lengths/counts" defense in depth, for the collected SET of
+# distinct languages across one request's whole ingredient list -- the
+# ISO 639-1 allowlist above already bounds this to a small number in
+# practice, but a pathological label with dozens of distinct foreign
+# tokens should still never grow this diagnostic field unbounded.
+_MAX_DETECTED_LANGUAGES = 8
+
+
+def _normalize_detected_language_code(raw: str | None) -> str:
+    """The ONLY safe path from Gemini's free-text `detectedLanguage`
+    into a bounded diagnostic field: anything that is not, after
+    stripping/lowercasing, an exact match for a real ISO 639-1 code is
+    normalized to `"other"` -- never passed through. This is a
+    allowlist, not a regex/shape guess: a coincidental 2-letter
+    lowercase string that is NOT an actual assigned code (e.g. random
+    OCR noise that happens to be 2 characters) also still normalizes to
+    `"other"`, never silently accepted just because it has the right
+    length."""
+    if not raw:
+        return "other"
+    candidate = raw[:_MAX_RAW_LANGUAGE_LENGTH].strip().lower()
+    if candidate in _ISO_639_1_CODES:
+        return candidate
+    return "other"
+
+
 @dataclass(frozen=True)
 class IngredientTranslationSummary:
     """The real, observed outcome of one request's per-ingredient
@@ -983,7 +1062,9 @@ class IngredientTranslationSummary:
             attempted=self.attempted + other.attempted,
             reliable=self.reliable + other.reliable,
             unreliable=self.unreliable + other.unreliable,
-            detected_languages=tuple(sorted(set(self.detected_languages) | set(other.detected_languages))),
+            detected_languages=tuple(
+                sorted(set(self.detected_languages) | set(other.detected_languages))
+            )[:_MAX_DETECTED_LANGUAGES],
         )
 
 
@@ -1100,8 +1181,13 @@ async def _resolve_ingredient_languages(
     unreliable_count = 0
     detected_languages: set[str] = set()
     for (idx, ing, lang), result in zip(to_translate, translations):
-        if result.detected_language and result.detected_language not in ("en", "other"):
-            detected_languages.add(result.detected_language)
+        # Code-review fix: normalize through the finite ISO 639-1
+        # allowlist BEFORE this ever reaches a diagnostic field -- see
+        # `_normalize_detected_language_code`'s docstring. Gemini's raw
+        # `detected_language` is untrusted free text.
+        normalized_language = _normalize_detected_language_code(result.detected_language)
+        if normalized_language not in ("en", "other"):
+            detected_languages.add(normalized_language)
         if result.reliable and result.translated_text:
             rebuilt = create_synthetic_ingredient(result.translated_text)
             prepared[idx] = _dataclasses_replace(
@@ -1125,7 +1211,7 @@ async def _resolve_ingredient_languages(
         attempted=len(to_translate),
         reliable=reliable_count,
         unreliable=unreliable_count,
-        detected_languages=tuple(sorted(detected_languages)),
+        detected_languages=tuple(sorted(detected_languages))[:_MAX_DETECTED_LANGUAGES],
     )
     return prepared, translation_occurred, summary
 

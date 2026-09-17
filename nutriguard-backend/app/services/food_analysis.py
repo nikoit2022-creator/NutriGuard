@@ -1453,6 +1453,27 @@ async def _run_label_image_pipeline(
     return data, ingredients, validity, ingredients_trustworthy
 
 
+def _translation_diagnostic_fields(
+    label_result: "label_language.LabelTextResult",
+    ingredient_translation_summary: "ingredient_catalog.IngredientTranslationSummary",
+) -> dict:
+    """The bounded, already-observed translation-related fields both the
+    SUCCESS return dict (see the two `_finalize_*` functions below) and a
+    later `labelScanRequired`/`ProductNotFoundError`'s own
+    `diagnostic_metadata` carry -- factored out so the two can never
+    silently drift apart. `app.api.v1.scan._translation_fields` consumes
+    exactly these same keys regardless of which source supplied them
+    (code-review fix: a translation attempt observed before a LATER
+    `ProductNotFoundError` used to be silently lost -- diagnostics only
+    ever saw it on the success path)."""
+    return {
+        "label_language_status": label_result.status,
+        "label_translation_used": label_result.translation_used,
+        "label_detected_language": label_result.detected_language,
+        "ingredient_translation_summary": ingredient_translation_summary,
+    }
+
+
 async def _finalize_barcode_enrichment(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -1631,6 +1652,9 @@ async def _finalize_barcode_enrichment(
         raise ProductNotFoundError(
             f"Product {product.barcode} could not be read reliably -- no ingredients were recognized.",
             details=_label_scan_required_details(product, None),
+            diagnostic_metadata=_translation_diagnostic_fields(
+                label_result, ingredient_translation_summary
+            ),
         )
 
     ingredients_out = await fetch_ingredients_for_product(db, product)
@@ -1677,15 +1701,10 @@ async def _finalize_barcode_enrichment(
         # a `label_result` at all (e.g. `analyze_barcode`'s pure identity
         # lookup) -- diagnostics must treat that as genuinely "not
         # applicable", never fall back to guessing from `product.source`.
-        "label_language_status": label_result.status,
-        "label_translation_used": label_result.translation_used,
-        "label_detected_language": label_result.detected_language,
-        # Per-ingredient translation pass outcome -- DISTINCT from the
-        # whole-label fields above (code-review fix: a mixed label can
-        # have `label_language_status == "ok"` while individual embedded
-        # foreign tokens still went through this separate pass; see
-        # `ingredient_catalog.IngredientTranslationSummary`).
-        "ingredient_translation_summary": ingredient_translation_summary,
+        # Shared with this same function's own `ProductNotFoundError`
+        # raise site above (`diagnostic_metadata=`) via
+        # `_translation_diagnostic_fields` so the two can never drift.
+        **_translation_diagnostic_fields(label_result, ingredient_translation_summary),
     }
 
 
@@ -1990,6 +2009,9 @@ async def _finalize_standalone_label_analysis(
         raise ProductNotFoundError(
             f"Product {product.barcode} could not be read reliably -- no ingredients were recognized.",
             details=_label_scan_required_details(product, None),
+            diagnostic_metadata=_translation_diagnostic_fields(
+                label_result, ingredient_translation_summary
+            ),
         )
 
     # Health Score stays a SEPARATE axis (V13): computed only when
@@ -2029,12 +2051,9 @@ async def _finalize_standalone_label_analysis(
         "is_from_database_cache": False,
         # See `_finalize_barcode_enrichment`'s identical fields for why
         # these exist (task: real, observed translation attempt/result,
-        # never inferred from `Product.source` alone).
-        "label_language_status": label_result.status,
-        "label_translation_used": label_result.translation_used,
-        "label_detected_language": label_result.detected_language,
-        # See `_finalize_barcode_enrichment`'s identical field.
-        "ingredient_translation_summary": ingredient_translation_summary,
+        # never inferred from `Product.source` alone). Shared with this
+        # same function's own `ProductNotFoundError` raise site above.
+        **_translation_diagnostic_fields(label_result, ingredient_translation_summary),
     }
 
 

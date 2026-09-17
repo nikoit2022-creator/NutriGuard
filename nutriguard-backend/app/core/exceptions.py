@@ -15,9 +15,29 @@ class AppError(Exception):
     code: str = "INTERNAL_ERROR"
     status_code: int = 500
 
-    def __init__(self, message: str, details: Optional[Any] = None):
+    def __init__(
+        self,
+        message: str,
+        details: Optional[Any] = None,
+        *,
+        diagnostic_metadata: Optional[dict] = None,
+    ):
         self.message = message
         self.details = details
+        # INTERNAL-ONLY, never part of the public error envelope (see
+        # `app.main`'s `handle_app_error`, which reads only
+        # `code`/`message`/`details` -- this attribute is never touched
+        # there). A side channel for bounded, already-observed
+        # request-scoped diagnostic data (e.g. a translation-attempt
+        # summary) that a raise site wants preserved in the internal
+        # scan-diagnostics journal even though the request itself is
+        # failing/partial -- see `app.api.v1.scan`'s exception handlers.
+        # Never put anything here that would be unsafe in `details`
+        # anyway EXCEPT for the specific reason it must not double as
+        # public API surface (still no raw label/OCR text, no
+        # credentials -- the diagnostics journal's own privacy limits
+        # still apply in full).
+        self.diagnostic_metadata = diagnostic_metadata
         super().__init__(message)
 
 

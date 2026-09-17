@@ -333,6 +333,10 @@ async def scan_ocr_text(
 
     barcode = clean_optional(body.barcode)
     diagnostic_base = _diagnostic_base(request, operation="scan_ocr_text", barcode=barcode)
+    # Assigned only once `food_analysis` actually returns; stays `None`
+    # if it raises before ever returning (e.g. a genuine internal error
+    # mid-pipeline) -- referenced defensively below, never assumed set.
+    result: dict | None = None
     try:
         if barcode:
             result = await food_analysis.analyze_ocr_text_with_barcode(
@@ -351,6 +355,14 @@ async def scan_ocr_text(
             dataSource=_observed_data_source(None, details),
             outcome="partial" if _is_partial_result(details) else "failed",
             errorCode=exc.code,
+            # Code-review fix: a translation attempt observed before
+            # THIS specific `ProductNotFoundError` (raised after
+            # `food_analysis` already ran its language/translation
+            # policy -- see `diagnostic_metadata=`'s docstring) is
+            # preserved here -- never present for a not-found/failure
+            # raised BEFORE any translation could have happened, since
+            # `diagnostic_metadata` is `None` at those raise sites.
+            **_translation_fields(exc.diagnostic_metadata or {}),
             durationMs=round((time.perf_counter() - started) * 1000, 2),
         )
         raise
@@ -363,10 +375,16 @@ async def scan_ocr_text(
         )
         raise
     except Exception:
+        # Code-review fix: a LATER failure (response construction /
+        # `_finish_serializing`) after `food_analysis` already
+        # succeeded and returned `result` must not silently drop the
+        # translation work it already observed -- `result` is `None`
+        # only when `food_analysis` itself never returned at all.
         _safe_record_scan_diagnostic(
             **diagnostic_base,
             outcome="failed",
             errorCode="INTERNAL_ERROR",
+            **_translation_fields(result or {}),
             durationMs=round((time.perf_counter() - started) * 1000, 2),
         )
         raise
@@ -437,6 +455,10 @@ async def scan_label_image(
             f"Image exceeds the {settings.MAX_IMAGE_SIZE_BYTES // (1024 * 1024)}MB limit."
         )
 
+    # Assigned only once `food_analysis` actually returns; stays `None`
+    # if it raises before ever returning -- referenced defensively
+    # below, never assumed set.
+    result: dict | None = None
     try:
         if cleaned_barcode:
             result = await food_analysis.analyze_label_image_with_barcode(
@@ -468,6 +490,10 @@ async def scan_label_image(
             nutritionRecognized=not bool(details.get("nutritionScanRequired", True)),
             ingredientsRecognized=not bool(details.get("ingredientsScanRequired", True)),
             recognizedIngredientCount=len(ingredients) if isinstance(ingredients, list) else 0,
+            # Code-review fix: preserve an already-observed translation
+            # attempt across a LATER `ProductNotFoundError` -- see
+            # `diagnostic_metadata=`'s docstring in `app.core.exceptions`.
+            **_translation_fields(exc.diagnostic_metadata or {}),
             durationMs=round((time.perf_counter() - started) * 1000, 2),
         )
         raise
@@ -480,10 +506,15 @@ async def scan_label_image(
         )
         raise
     except Exception:
+        # Code-review fix: preserve translation work `food_analysis`
+        # already observed and returned before a LATER response-
+        # construction/serialization failure -- `result` is `None` only
+        # when `food_analysis` itself never returned at all.
         _safe_record_scan_diagnostic(
             **diagnostic_base,
             outcome="failed",
             errorCode="INTERNAL_ERROR",
+            **_translation_fields(result or {}),
             durationMs=round((time.perf_counter() - started) * 1000, 2),
         )
         raise
