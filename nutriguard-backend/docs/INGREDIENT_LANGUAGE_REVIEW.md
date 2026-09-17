@@ -1,11 +1,48 @@
 # Ingredient-language code-review follow-up — completion report
 
 Tracked in [GitHub issue #19](https://github.com/nikoit2022-creator/NutriGuard/issues/19).
-Committed to the repository instead of posted as an issue comment because
-this session has no `gh` CLI and no GitHub API write credentials — per the
-issue's own documented fallback ("commit a focused report ... reference this
-issue, and tell the owner only the pushed SHA"). Codex/the owner can read
-this file directly from the branch below.
+This file is kept up to date as the running completion report; the
+current round's findings are also posted directly as an issue comment
+(this session has `gh` CLI access) — see the sections below for what
+changed in each round.
+
+## Round 2 (code-review follow-up, addressing the owner's 2026-09-17
+12:05:53Z review comment on pushed head `5d852ac3873eca8561d5dd253a12532bdf2eb6f6`)
+
+The owner's independent static review of round 1's pushed head found 2
+requirements still incomplete plus a documentation correction. All 3 are
+fixed in this round:
+
+| # | Finding | Status | Evidence |
+|---|---|---|---|
+| 1 | English-alias fallback trusted foreign aliases | **Fixed** | `ingredient_alias_repository.get_all_normalized` (selected EVERY alias regardless of language) replaced by `get_all_normalized_english` (filters `language == "en"`). A foreign-tagged alias (e.g. a French original learned via `_register_original_text_alias`, always tagged with its real `source_language`, never `"en"`) can no longer count as evidence an untranslated foreign RESULT is English. See `tests/integration/test_ingredient_catalog.py::test_get_all_normalized_english_excludes_non_english_and_untagged_aliases` (direct repository coverage: en/bg/fr/untagged) and `tests/integration/test_ingredient_language_identity_e2e.py::test_foreign_alias_of_a_different_ingredient_never_counts_as_english_evidence` (end-to-end regression: a DIFFERENT target than the alias owner, so the pre-existing "already known" alias shortcut can't bypass the check — confirms the target stays honestly `identity_uncertain`/`TRANSLATION_UNRELIABLE` instead of silently inheriting an unrelated ingredient's foreign name). |
+| 2 | Diagnostics omitted per-ingredient translation outcome | **Fixed** | New `ingredient_catalog.IngredientTranslationSummary` (bounded: attempted/reliable/unreliable counts + a small set of detected language CODES — never original/translated text) is returned from `materialize_ingredients` (previously discarded down to a single bool) and merged across BOTH `materialize_ingredients` calls each request pipeline makes (`IngredientTranslationSummary.merged_with`) since the first call is normally where real translation work happens and the second, later rebuild pass usually just finds it already alias-resolved — merging avoids silently losing the first pass's real result. Threaded through `food_analysis`'s result dict and surfaced in `app.api.v1.scan._translation_fields` as NEW, clearly separate fields: `ingredientTranslationAttempted`/`ingredientTranslationReliableCount`/`ingredientTranslationUnreliableCount`/`ingredientTranslationLanguages` — never merged into the pre-existing whole-label-blob fields, so a caller can always tell which pass produced which outcome. `translationAttempted` now also becomes `true` when only the per-ingredient pass ran (previously stayed `false`/`"not_needed"` for exactly the mixed-label case the review comment flagged). `detectedLanguage` ( `label_detected_language`, computed but never surfaced before) is now included too. See `tests/integration/test_scan_diagnostics_endpoints.py::test_scan_ocr_text_mixed_label_reports_per_ingredient_translation_separately` — the exact scenario requested: whole-label `status="ok"` (English trigger word glued to Romanian names) with a real mocked per-token translation attempt, one reliable + one unreliable result. |
+| 3 | Doc's representative JSON advertised a scientifically verified machine translation | **Fixed** | Section "Representative Android JSON" below regenerated from an actual persisted row (`IngredientOut.model_validate`), not hand-typed — now honestly shows `verificationStatus: "UNVERIFIED"` / `source: "GEMINI"`, never `"VERIFIED"`. |
+
+Verification for this round (see "Exact commands and test counts" below
+for the full-suite numbers, re-run against this round's own head):
+**585 passed, 0 failed, 0 skipped** (582 + 3 new tests: 1 repository-level,
+2 integration-level regressions above); disposable-PostgreSQL opt-in
+suite: **10 passed, 0 failed**. No schema/migration change this round, so
+no upgrade/downgrade/upgrade re-verification was needed. No Pydantic
+schema (`app/schemas/`) was touched this round, so `openapi.json` is
+unchanged (confirmed: `app.openapi()` still matches the tracked file
+exactly).
+
+Live deployment: **untouched**, same guarantees as round 1 below (isolated
+worktree, disposable Docker containers/images/networks only, no
+`docker compose` against the live stack, no live/production migration,
+repair tool never invoked).
+
+**Round 2 code-fix commit:** `853c05a512eb860b8d625405f4eb23e2e88822b8`,
+pushed to `origin/feat/backend-ingredient-language-diagnostics`. Posted
+directly as a comment on issue #19 (this session has `gh` CLI access,
+unlike round 1) and a PR was opened against `main` -- see the issue
+comment/PR for the exact link.
+
+---
+
+## Round 1 (original 5 code-review findings)
 
 ## 1. Final SHA and PR
 
@@ -67,22 +104,36 @@ skipped count above is the whole suite's.
 
 ### A freshly translated (never-curated) ingredient — `GET` ingredient/product response
 
+Doc-correction (code-review follow-up): the example below is copied
+directly from an actual persisted row, materialized through
+`ingredient_catalog.materialize_ingredients` with a mocked reliable
+Gemini translation ("Ulei de rapiță" -> "Oil Made From Rapeseed") and
+serialized through the real `IngredientOut.model_validate(row)` — not
+hand-typed. The previous version of this section showed
+`verificationStatus: "VERIFIED"` with a footnote explaining that away as
+a dataclass default used "for illustration"; that was never something a
+real translated row can actually return, and advertised a scientifically
+verified machine translation to the Android contract by mistake. A real
+row is always `verificationStatus: "UNVERIFIED"` / `source: "GEMINI"` /
+`riskAssessmentAvailable: false`, exactly as shown here:
+
 ```json
 {
-  "id": "synth_ulei_de_rapita_<hash>",
-  "commonName": "Rapeseed Oil",
+  "id": "synth_oil_made_from_rapeseed_5d2fb24560ee",
+  "commonName": "Oil Made From Rapeseed",
   "identityUncertain": false,
   "uncertaintyReason": null,
   "effectConditions": "",
   "dietaryGuidance": "",
   "adiPopulationScope": null,
-  "verificationStatus": "VERIFIED",
+  "verificationStatus": "UNVERIFIED",
+  "source": "GEMINI",
   "riskAssessmentAvailable": false,
   "efsaApprovalStatus": "NO_INFORMATION",
   "fdaApprovalStatus": "NO_INFORMATION",
   "localizations": {
     "en": {
-      "commonName": "Rapeseed Oil",
+      "commonName": "Oil Made From Rapeseed",
       "translationStatus": null,
       "translationSource": null
     }
@@ -90,11 +141,9 @@ skipped count above is the whole suite's.
 }
 ```
 
-Note: **no `bg` key at all** — see EN/BG fallback behavior below.
-`verificationStatus` shown here reflects this dataclass's own default when
-constructed directly for illustration; a real translated row persists as
-`source=GEMINI`, which the existing (unchanged) `merge_verified_fields`
-gating can never promote to `VERIFIED`/`riskAssessmentAvailable=true` —
+Note: **no `bg` key at all** — see EN/BG fallback behavior below. The
+existing (unchanged) `merge_verified_fields` gating can never promote a
+`source=GEMINI` row to `VERIFIED`/`riskAssessmentAvailable=true` —
 translation never promotes scientific/regulatory verification.
 
 ### `ProductOut` — new fields
