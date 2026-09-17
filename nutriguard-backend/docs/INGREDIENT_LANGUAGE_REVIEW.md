@@ -4,7 +4,47 @@ Tracked in [GitHub issue #19](https://github.com/nikoit2022-creator/NutriGuard/i
 Committed to the repository per the issue's own documented fallback
 ("commit a focused report ... reference this issue, and tell the owner
 only the pushed SHA") — see the round 2 note below for why, despite
-this session having `gh` CLI authenticated access.
+this session having `gh` CLI authenticated access (still true this
+round: no token-permission change was requested or made).
+
+## Round 3 (Codex follow-up review, addressing the 2026-09-17 12:34:10Z
+comment on pushed head `2cebd4a`)
+
+Codex's static review of round 2 confirmed the multilingual-alias
+filtering fix and the mixed-label success-path regression address the
+previously central findings, and flagged 2 remaining small diagnostic
+requirements (round 2's 585+10 test results were Claude-reported, not
+independently rerun by Codex). Both fixed in this round:
+
+| # | Finding | Status | Evidence |
+|---|---|---|---|
+| 1 | Translation summaries lost on partial/failure paths | **Fixed** | The observed `IngredientTranslationSummary` (and whole-label fields) previously existed only in the SUCCESS return dict from both `_finalize_*` functions -- a `ProductNotFoundError` raised AFTER translation already ran (`food_analysis.py`, both `_finalize_barcode_enrichment` and `_finalize_standalone_label_analysis`'s "not complete" branches) lost it entirely, as did a LATER response-construction/serialization failure in `scan.py`. Fixed via a new `AppError.diagnostic_metadata` side channel (internal-only -- `app.main`'s error-envelope builder never reads it, so it can never leak into the public HTTP error body) populated with the shared `_translation_diagnostic_fields(label_result, ingredient_translation_summary)` helper at both raise sites; `scan.py`'s `except ProductNotFoundError` handlers now fold in `_translation_fields(exc.diagnostic_metadata or {})`, and the generic `except Exception` handlers (ocr-text, label-image) now fold in `_translation_fields(result or {})` using the `result` `food_analysis` already returned before the later failure. The 3 `ProductNotFoundError` sites that run BEFORE any label/translation pipeline (`analyze_barcode`'s pure identity lookup) deliberately never set `diagnostic_metadata` -- no fabrication for a pass that never ran. See `tests/integration/test_scan_diagnostics_endpoints.py::test_scan_ocr_text_partial_outcome_preserves_observed_translation_summary` (partial outcome after a real per-ingredient translation, plus asserts the summary never leaks into the public error body), `::test_scan_label_image_serialization_failure_after_translation_preserves_observed_summary` (later serializer failure), and `::test_barcode_not_found_before_any_translation_never_fabricates_diagnostic_metadata` (the explicit "do not fabricate" case). |
+| 2 | Language-code/privacy boundary not enforced | **Fixed** | `IngredientTranslationSummary.detected_languages` copied Gemini's raw `detectedLanguage` string directly (only lowercased/stripped) -- that field is UNRESTRICTED free text by the actual API contract (the prompt asking for "ISO 639-1 code or short language name" is advisory, never enforced), so arbitrary/injected text could reach the diagnostics journal, defeating its bounded/no-raw-content guarantee. Fixed with `_normalize_detected_language_code`: a finite, explicit ISO 639-1 code allowlist (not a regex/shape guess -- a coincidentally 2-letter non-code string also normalizes to `"other"`), a raw-length cap (`_MAX_RAW_LANGUAGE_LENGTH`) applied before any comparison, and a cap on the collected set's size (`_MAX_DETECTED_LANGUAGES`, applied both when a summary is first built and again after `IngredientTranslationSummary.merged_with` unions two summaries). Never relies on the Gemini prompt wording as the boundary. See `tests/integration/test_ingredient_catalog.py::test_normalize_detected_language_code_rejects_non_allowlisted_and_injected_text` (unit-level: real codes pass, non-codes/empty/`None`/a long injected-instruction-shaped string all normalize to `"other"`) and `::test_materialize_ingredients_never_leaks_injected_detected_language_text` (end-to-end: a mocked Gemini response with an injected-content `detectedLanguage` never appears in the persisted summary). |
+
+Verification for this round: **590 passed, 0 failed, 0 skipped** (585 +
+5 new tests: 3 diagnostic-preservation regressions, 1 unit-level
+allowlist test, 1 end-to-end injected-content test); disposable-
+PostgreSQL opt-in suite: **10 passed, 0 failed**, migrated to head
+`c6d7e8f9a0b1` first (unchanged this round, no schema edits). No
+Pydantic schema was touched, so `openapi.json` is unchanged. Live
+deployment: **untouched** (same guarantees as rounds 1-2 -- isolated
+worktree, disposable Docker containers/images/networks only).
+
+**Round 3 code-fix commit:** `285fb028184d59932f4f5ffe8e0f187558d1f997`.
+This report is committed in one further commit on top of that (this
+file only) -- see `git log` on the branch for its exact SHA; the owner
+will be told that pushed SHA directly (per the same fallback used in
+rounds 1-2). Both pushed to
+`origin/feat/backend-ingredient-language-diagnostics`.
+Comment/PR posting was not attempted again this round -- no token-
+permission change occurred since round 2's documented failure
+(`Resource not accessible by personal access token` on both
+`addComment` and `createPullRequest`); falling back to this committed
+report per the issue's own documented alternative, as Codex's own
+comment explicitly anticipated ("no token permission expansion is
+needed").
+
+---
 
 ## Round 2 (code-review follow-up, addressing the owner's 2026-09-17
 12:05:53Z review comment on pushed head `5d852ac3873eca8561d5dd253a12532bdf2eb6f6`)
