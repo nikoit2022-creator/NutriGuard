@@ -35,6 +35,8 @@ class IngredientLocalization(Base):
     acceptable_daily_intake: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     side_effects: Mapped[str] = mapped_column(Text, nullable=False, default="")
     allergens: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    effect_conditions: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    dietary_guidance: Mapped[str] = mapped_column(Text, nullable=False, default="")
     translation_status: Mapped[IngredientTranslationStatus] = mapped_column(
         Enum(IngredientTranslationStatus, name="ingredient_translation_status", native_enum=True), nullable=False
     )

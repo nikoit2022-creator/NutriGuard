@@ -27,6 +27,29 @@ async def list_for_ingredient(db: AsyncSession, ingredient_id: str) -> list[Ingr
     return list(result.scalars().all())
 
 
+async def get_all_normalized_english(db: AsyncSession) -> frozenset[str]:
+    """Every normalized alias text EXPLICITLY tagged `language="en"` --
+    curated seed names and previously-verified translation outputs (see
+    `ingredient_catalog.register_curated_alias`,
+    `get_or_create_catalog_ingredient`'s `alias_language`). Used as
+    real, pre-existing evidence (never a guess) that a short translated
+    ingredient name is a genuinely established ENGLISH one -- see
+    `app.services.ingredient_translation`'s catalog-alias check.
+
+    Deliberately excludes every alias with a non-English or `None`
+    language tag (Bulgarian names, learned foreign-language OCR
+    originals -- see `_register_original_text_alias`, spelling variants
+    registered with no determined language). Code-review fix: this used
+    to select EVERY alias regardless of language, so an untranslated
+    foreign result matching an existing FOREIGN alias (e.g. "lait
+    entier" already known as milk's French name) was wrongly accepted
+    as proof of English output. Known identity is not proof of output
+    language -- only a name independently established as English is."""
+    stmt = select(IngredientAlias.alias_normalized).where(IngredientAlias.language == "en")
+    result = await db.execute(stmt)
+    return frozenset(result.scalars().all())
+
+
 async def get_or_create(
     db: AsyncSession,
     *,

@@ -217,6 +217,8 @@ def _to_product_model(
         category=data.category,
         image_url=data.image_url,
         raw_ingredient_text=data.raw_ingredient_text,
+        original_ingredient_text=data.original_ingredient_text,
+        ingredient_text_source_language=data.ingredient_text_source_language,
         ingredient_ids=_ingredient_ids_string(ingredients),
         health_score=0,  # placeholder, recomputed live on every read (see module docstring)
         nova_group=data.nova_group,
@@ -264,6 +266,8 @@ def _apply_discovered_fields(
     existing.category = data.category
     existing.image_url = data.image_url
     existing.raw_ingredient_text = data.raw_ingredient_text
+    existing.original_ingredient_text = data.original_ingredient_text
+    existing.ingredient_text_source_language = data.ingredient_text_source_language
     existing.ingredient_ids = _ingredient_ids_string(ingredients)
     existing.nova_group = data.nova_group
     existing.sugar_grams = data.sugar_grams
@@ -507,6 +511,8 @@ def _ingredient_out_dict(ing: Any) -> dict:
         "sideEffects": ing.side_effects,
         "allergens": ing.allergens,
         "references": ing.references,
+        "effectConditions": getattr(ing, "effect_conditions", "") or "",
+        "dietaryGuidance": getattr(ing, "dietary_guidance", "") or "",
         "riskLevel": risk_level.value if hasattr(risk_level, "value") else risk_level,
         "riskAssessmentAvailable": risk_assessment_available,
         "riskRationale": (
@@ -521,6 +527,11 @@ def _ingredient_out_dict(ing: Any) -> dict:
         "adiMinMgPerKgBwPerDay": adi_min,
         "adiMaxMgPerKgBwPerDay": adi_max,
         "adiSource": (ing.references or None) if (adi_min is not None and references_trusted) else None,
+        "adiPopulationScope": (
+            ingredient_regulatory.ADI_POPULATION_SCOPE_PER_KG_BODY_WEIGHT if adi_min is not None else None
+        ),
+        "identityUncertain": bool(getattr(ing, "identity_uncertain", False)),
+        "uncertaintyReason": getattr(ing, "uncertainty_reason", None),
         "verificationStatus": (
             verification_status.value if hasattr(verification_status, "value") else verification_status
         ),
@@ -606,6 +617,14 @@ def _label_scan_required_details(product: Product, ingredients: list[Any] | None
         "healthScore": None,
         "nutritionScanRequired": not product.has_verified_nutrition,
         "ingredientsScanRequired": not product.has_verified_ingredients,
+        # The row's own actual, persisted provenance ("local", "ocr",
+        # "label_image", "label_scan"/"label_scan_translated", or a
+        # barcode-discovery provider name like "open_food_facts") --
+        # real, already-known data, never inferred/guessed. Lets a
+        # caller (and `app.api.v1.scan`'s diagnostics -- task: "propagate
+        # actual observed source information, without guessing") know
+        # where THIS partial identity actually came from.
+        "dataSource": product.source,
     }
     if ingredients is not None:
         details["ingredients"] = [_ingredient_out_dict(ing) for ing in ingredients]
@@ -651,7 +670,7 @@ async def _persist_discovered_product(
     # curated match becomes a real, reusable catalog row (get-or-create,
     # race-safe) instead of an unpersisted in-memory stub -- see
     # `ingredient_catalog`'s module docstring.
-    ingredients = await ingredient_catalog.materialize_ingredients(db, ingredients)
+    ingredients, _, _ = await ingredient_catalog.materialize_ingredients(db, ingredients)
     is_complete = nutrition_known and ingredients_known
     # Canonical GTIN-13 storage key (see product_repository.get_by_barcode_or_aliases)
     # — every equivalent representation of this barcode converges on one row.
@@ -950,7 +969,9 @@ async def analyze_ocr_text(db: AsyncSession, user_id: uuid.UUID, raw_text: str) 
     """
     all_db_ingredients = await ingredient_repository.get_all(db)
     data, ingredients = await _run_ai_or_fallback("Scanned Product", raw_text, all_db_ingredients)
-    ingredients = await ingredient_catalog.materialize_ingredients(db, ingredients)
+    ingredients, _, pre_translation_summary = await ingredient_catalog.materialize_ingredients(
+        db, ingredients
+    )
     validity = gemini_image_parser.LabelFieldValidity()
     ingredients_trustworthy = True
 
@@ -964,6 +985,7 @@ async def analyze_ocr_text(db: AsyncSession, user_id: uuid.UUID, raw_text: str) 
         barcode_prefix="ocr",
         scan_type=ScanType.OCR_LABEL,
         provenance_provider="ocr_text",
+        pre_translation_summary=pre_translation_summary,
     )
 
 
@@ -1129,6 +1151,8 @@ def _apply_label_enrichment(
     # corrected label items do not linger forever.
     if ingredients_complete_this_scan or not existing.has_verified_ingredients:
         existing.raw_ingredient_text = data.raw_ingredient_text
+        existing.original_ingredient_text = data.original_ingredient_text
+        existing.ingredient_text_source_language = data.ingredient_text_source_language
         existing.ingredient_ids = _ingredient_ids_string(ingredients)
         if validity.nova_valid:
             existing.nova_group = data.nova_group
@@ -1429,6 +1453,27 @@ async def _run_label_image_pipeline(
     return data, ingredients, validity, ingredients_trustworthy
 
 
+def _translation_diagnostic_fields(
+    label_result: "label_language.LabelTextResult",
+    ingredient_translation_summary: "ingredient_catalog.IngredientTranslationSummary",
+) -> dict:
+    """The bounded, already-observed translation-related fields both the
+    SUCCESS return dict (see the two `_finalize_*` functions below) and a
+    later `labelScanRequired`/`ProductNotFoundError`'s own
+    `diagnostic_metadata` carry -- factored out so the two can never
+    silently drift apart. `app.api.v1.scan._translation_fields` consumes
+    exactly these same keys regardless of which source supplied them
+    (code-review fix: a translation attempt observed before a LATER
+    `ProductNotFoundError` used to be silently lost -- diagnostics only
+    ever saw it on the success path)."""
+    return {
+        "label_language_status": label_result.status,
+        "label_translation_used": label_result.translation_used,
+        "label_detected_language": label_result.detected_language,
+        "ingredient_translation_summary": ingredient_translation_summary,
+    }
+
+
 async def _finalize_barcode_enrichment(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -1441,6 +1486,7 @@ async def _finalize_barcode_enrichment(
     *,
     scan_type: ScanType,
     provenance_provider: str,
+    pre_translation_summary: "ingredient_catalog.IngredientTranslationSummary | None" = None,
 ) -> dict:
     """
     Shared tail end of `analyze_label_image_with_barcode` and
@@ -1476,6 +1522,19 @@ async def _finalize_barcode_enrichment(
     existing = await product_repository.get_by_barcode_or_aliases(
         db, barcode_raw, alias_keys, for_update=True
     )
+    # `pre_translation_summary` -- the caller's OWN earlier
+    # `materialize_ingredients` pass (run right after ingredient
+    # matching, before this finalize function) -- is where real
+    # translation work usually actually happens; THIS function's own
+    # rebuild pass below then typically finds those same tokens already
+    # alias-resolved and contributes little/nothing new. Both are
+    # merged into one honest total rather than only reporting whichever
+    # pass ran last (see `IngredientTranslationSummary.merged_with`).
+    ingredient_translation_summary = (
+        pre_translation_summary
+        if pre_translation_summary is not None
+        else ingredient_catalog.IngredientTranslationSummary()
+    )
 
     # Empty raw ingredient text means this is a nutrition-panel-only photo:
     # there is nothing to translate or replace. Real ingredient text always
@@ -1495,13 +1554,27 @@ async def _finalize_barcode_enrichment(
     # `label_language.bulgarian_ingredient_alias`) and could never
     # dedupe against an equivalent English mention. Only a genuinely
     # empty/"unknown" result (nothing tokenizable at all) is skipped.
+    # Default; overridden below ONLY when per-token translation actually
+    # changed at least one entry's display text (see the
+    # `translation_occurred` branch) -- `Product.raw_ingredient_text`
+    # must stay consistent with whatever text produced the ids just
+    # persisted, since `ocr_normalizer.reconstruct_synthetic_ingredient`
+    # re-tokenizes this exact text on every later read.
+    data.raw_ingredient_text = label_result.canonical_text
+    # Preserve the true pre-translation label/OCR text and its detected
+    # language separately from the canonical/display text above (task:
+    # "preserve original text and source language separately from
+    # display names").
+    data.original_ingredient_text = label_result.original_text
+    data.ingredient_text_source_language = label_result.detected_language
+
     if has_label_ingredients and label_result.detected_language != "unknown" and label_result.canonical_text.strip():
         tokens = normalize_and_extract_tokens(label_result.canonical_text)
         # Bulgarian ingredient-list tokens are aliased to their English
         # canonical form for MATCHING purposes only -- an English and a
         # Bulgarian mention of the same ingredient then resolve to the
         # same matched/synthetic ingredient instead of two. The text
-        # actually stored (`data.raw_ingredient_text`, set below) is
+        # actually stored (`data.raw_ingredient_text`, set above) is
         # untouched by this substitution -- English AND Bulgarian
         # content are both preserved verbatim in what's displayed.
         matchable_tokens = [label_language.bulgarian_ingredient_alias(t) or t for t in tokens]
@@ -1512,8 +1585,23 @@ async def _finalize_barcode_enrichment(
         if rebuilt:
             # Persistent ingredient knowledge cache -- see
             # `ingredient_catalog`'s module docstring.
-            ingredients = await ingredient_catalog.materialize_ingredients(db, rebuilt)
-    data.raw_ingredient_text = label_result.canonical_text
+            ingredients, translation_occurred, rebuild_translation_summary = (
+                await ingredient_catalog.materialize_ingredients(db, rebuilt)
+            )
+            ingredient_translation_summary = ingredient_translation_summary.merged_with(
+                rebuild_translation_summary
+            )
+            if translation_occurred:
+                # At least one entry's text was replaced by a verified
+                # translation (or flagged identity-uncertain) beyond
+                # what `label_result.canonical_text` alone reflects --
+                # rebuild the stored text from the materialized names so
+                # ids and text stay self-consistent for future reads.
+                data.raw_ingredient_text = "; ".join(
+                    dict.fromkeys(
+                        name for ing in ingredients if (name := getattr(ing, "common_name", ""))
+                    )
+                )
 
     source_label = "label_scan_translated" if label_result.translation_used else "label_scan"
     product, used_label_analysis = await _persist_enriched_product(
@@ -1564,6 +1652,9 @@ async def _finalize_barcode_enrichment(
         raise ProductNotFoundError(
             f"Product {product.barcode} could not be read reliably -- no ingredients were recognized.",
             details=_label_scan_required_details(product, None),
+            diagnostic_metadata=_translation_diagnostic_fields(
+                label_result, ingredient_translation_summary
+            ),
         )
 
     ingredients_out = await fetch_ingredients_for_product(db, product)
@@ -1602,6 +1693,18 @@ async def _finalize_barcode_enrichment(
         "health_score": health_score_value,
         "warnings": warnings,
         "is_from_database_cache": not used_label_analysis,
+        # Real, observed language-policy outcome for THIS attempt (task:
+        # "report actual translation attempt/result/reason where
+        # available, rather than inferring it solely from Product.source")
+        # -- see `app.services.label_language.LabelTextResult`. Absent
+        # from the OTHER `return` sites in this module that never compute
+        # a `label_result` at all (e.g. `analyze_barcode`'s pure identity
+        # lookup) -- diagnostics must treat that as genuinely "not
+        # applicable", never fall back to guessing from `product.source`.
+        # Shared with this same function's own `ProductNotFoundError`
+        # raise site above (`diagnostic_metadata=`) via
+        # `_translation_diagnostic_fields` so the two can never drift.
+        **_translation_diagnostic_fields(label_result, ingredient_translation_summary),
     }
 
 
@@ -1641,7 +1744,9 @@ async def analyze_label_image_with_barcode(
     # get-or-create against an already-existing row after the first
     # time) and keeps every code path honestly covered rather than
     # relying on the rebuild always running.
-    ingredients = await ingredient_catalog.materialize_ingredients(db, ingredients)
+    ingredients, _, pre_translation_summary = await ingredient_catalog.materialize_ingredients(
+        db, ingredients
+    )
 
     return await _finalize_barcode_enrichment(
         db,
@@ -1654,6 +1759,7 @@ async def analyze_label_image_with_barcode(
         ingredients_trustworthy,
         scan_type=ScanType.OCR_LABEL,
         provenance_provider="label_ocr",
+        pre_translation_summary=pre_translation_summary,
     )
 
 
@@ -1691,7 +1797,9 @@ async def analyze_ocr_text_with_barcode(
 
     all_db_ingredients = await ingredient_repository.get_all(db)
     data, ingredients = await _run_ai_or_fallback("Scanned Product", raw_text, all_db_ingredients)
-    ingredients = await ingredient_catalog.materialize_ingredients(db, ingredients)
+    ingredients, _, pre_translation_summary = await ingredient_catalog.materialize_ingredients(
+        db, ingredients
+    )
     validity = gemini_image_parser.LabelFieldValidity()
     ingredients_trustworthy = True
 
@@ -1706,6 +1814,7 @@ async def analyze_ocr_text_with_barcode(
         ingredients_trustworthy,
         scan_type=ScanType.OCR_LABEL,
         provenance_provider="ocr_text",
+        pre_translation_summary=pre_translation_summary,
     )
 
 
@@ -1783,6 +1892,7 @@ async def _finalize_standalone_label_analysis(
     barcode_prefix: str,
     scan_type: ScanType,
     provenance_provider: str,
+    pre_translation_summary: "ingredient_catalog.IngredientTranslationSummary | None" = None,
 ) -> dict:
     """
     Shared tail end of `analyze_label_image`/`analyze_ocr_text` (no
@@ -1807,6 +1917,21 @@ async def _finalize_standalone_label_analysis(
     trustworthy evidence does, exactly like the barcode-linked path.
     """
     label_result = await resolve_label_text(data.raw_ingredient_text, strict=False)
+    # See `_finalize_barcode_enrichment`'s identical block for the full
+    # rationale on merging the caller's earlier pass with this
+    # function's own rebuild pass below.
+    ingredient_translation_summary = (
+        pre_translation_summary
+        if pre_translation_summary is not None
+        else ingredient_catalog.IngredientTranslationSummary()
+    )
+
+    # See `_finalize_barcode_enrichment`'s identical block for the full
+    # rationale (default, overridden only when translation actually
+    # changed something; original text/language preserved separately).
+    data.raw_ingredient_text = label_result.canonical_text
+    data.original_ingredient_text = label_result.original_text
+    data.ingredient_text_source_language = label_result.detected_language
 
     # Same canonical (Bulgarian-alias-aware) ingredient rebuild the
     # barcode-linked path uses -- see `_finalize_barcode_enrichment`'s
@@ -1821,8 +1946,18 @@ async def _finalize_standalone_label_analysis(
         if rebuilt:
             # Persistent ingredient knowledge cache -- see
             # `ingredient_catalog`'s module docstring.
-            ingredients = await ingredient_catalog.materialize_ingredients(db, rebuilt)
-    data.raw_ingredient_text = label_result.canonical_text
+            ingredients, translation_occurred, rebuild_translation_summary = (
+                await ingredient_catalog.materialize_ingredients(db, rebuilt)
+            )
+            ingredient_translation_summary = ingredient_translation_summary.merged_with(
+                rebuild_translation_summary
+            )
+            if translation_occurred:
+                data.raw_ingredient_text = "; ".join(
+                    dict.fromkeys(
+                        name for ing in ingredients if (name := getattr(ing, "common_name", ""))
+                    )
+                )
 
     nutrition_complete = _nutrition_group_is_complete(validity)
     ingredients_complete = _ingredients_group_is_complete(data, ingredients_trustworthy)
@@ -1874,6 +2009,9 @@ async def _finalize_standalone_label_analysis(
         raise ProductNotFoundError(
             f"Product {product.barcode} could not be read reliably -- no ingredients were recognized.",
             details=_label_scan_required_details(product, None),
+            diagnostic_metadata=_translation_diagnostic_fields(
+                label_result, ingredient_translation_summary
+            ),
         )
 
     # Health Score stays a SEPARATE axis (V13): computed only when
@@ -1911,6 +2049,11 @@ async def _finalize_standalone_label_analysis(
         "health_score": health_score_value,
         "warnings": warnings,
         "is_from_database_cache": False,
+        # See `_finalize_barcode_enrichment`'s identical fields for why
+        # these exist (task: real, observed translation attempt/result,
+        # never inferred from `Product.source` alone). Shared with this
+        # same function's own `ProductNotFoundError` raise site above.
+        **_translation_diagnostic_fields(label_result, ingredient_translation_summary),
     }
 
 
@@ -1948,7 +2091,9 @@ async def analyze_label_image(db: AsyncSession, user_id: uuid.UUID, image_bytes:
     # get-or-create against an already-existing row after the first
     # time) and keeps every code path honestly covered rather than
     # relying on the rebuild always running.
-    ingredients = await ingredient_catalog.materialize_ingredients(db, ingredients)
+    ingredients, _, pre_translation_summary = await ingredient_catalog.materialize_ingredients(
+        db, ingredients
+    )
 
     return await _finalize_standalone_label_analysis(
         db,
@@ -1960,4 +2105,5 @@ async def analyze_label_image(db: AsyncSession, user_id: uuid.UUID, image_bytes:
         barcode_prefix="img",
         scan_type=ScanType.OCR_LABEL,
         provenance_provider="label_ocr",
+        pre_translation_summary=pre_translation_summary,
     )

@@ -150,6 +150,29 @@ class SyntheticIngredient:
     bad_for_children: bool = False
     bad_for_high_cholesterol: bool = False
 
+    # Language/identity provenance (see `app.services.ingredient_catalog.
+    # materialize_ingredients`, the only writer of these four). All
+    # default to "not processed yet" so every EXISTING call site above
+    # (which never sets them) is unaffected.
+    #
+    # `identity_uncertain`/`uncertainty_reason`: set when
+    # `app.services.ingredient_segmentation.detect_ambiguous_segmentation`
+    # flagged this token, or a translation attempt could not be
+    # reliably verified -- `common_name` is then deliberately left AS
+    # OBSERVED (never a guessed translation) and the row must not be
+    # sent for translation again next time it's built fresh from the
+    # same raw text.
+    identity_uncertain: bool = False
+    uncertainty_reason: str | None = None
+    # `original_text`: the pre-translation raw token, set ONLY when
+    # `common_name` above was actually replaced by a verified
+    # translation -- `None` means `common_name` IS the original text
+    # (already English/Bulgarian, or not yet processed).
+    original_text: str | None = None
+    # BCP-47-ish short code for `original_text`'s language ("ro", ...).
+    source_language: str | None = None
+    translation_confidence: float | None = None
+
 
 def _synthetic_id(name: str) -> str:
     """Deterministic, collision-resistant, length-bounded id for an

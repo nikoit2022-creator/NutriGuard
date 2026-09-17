@@ -26,6 +26,26 @@ class Product(Base):
     # OCR normalizer for tokens that don't match the scientific database
     # (API Contract 7.3) — intentionally NOT a foreign key for that reason.
     ingredient_ids: Mapped[str] = mapped_column("ingredient_ids", Text, nullable=False, default="")
+    # The label/OCR ingredient text exactly as extracted, BEFORE any
+    # language policy/translation was applied -- kept separately from
+    # `raw_ingredient_text` (which stays the CANONICAL, identity-bearing
+    # text `reconstruct_synthetic_ingredient` re-tokenizes on every read;
+    # see `app.services.ingredient_catalog.materialize_ingredients` and
+    # `app.services.food_analysis`'s two `_finalize_*` functions). Never
+    # used for matching/identity -- provenance/display only. Empty when
+    # no label/OCR text was ever extracted for this product (e.g. a
+    # barcode-only discovery).
+    original_ingredient_text: Mapped[str] = mapped_column(
+        "original_ingredient_text", Text, nullable=False, default=""
+    )
+    # Detected/declared language of `original_ingredient_text` ("en",
+    # "bg", "en+bg", another ISO-ish code, "other", or "unknown") -- see
+    # `app.services.language_detection.detect_language` /
+    # `app.services.label_language.LabelTextResult.detected_language`.
+    # `None` when no label/OCR text was ever extracted.
+    ingredient_text_source_language: Mapped[str | None] = mapped_column(
+        "ingredient_text_source_language", String(16), nullable=True
+    )
 
     health_score: Mapped[int] = mapped_column("health_score", Integer, nullable=False)
     nova_group: Mapped[int] = mapped_column("nova_group", Integer, nullable=False)

@@ -1067,6 +1067,16 @@
             "type": "string",
             "title": "Allergens"
           },
+          "effectConditions": {
+            "type": "string",
+            "title": "Effectconditions",
+            "default": ""
+          },
+          "dietaryGuidance": {
+            "type": "string",
+            "title": "Dietaryguidance",
+            "default": ""
+          },
           "riskRationale": {
             "type": "string",
             "title": "Riskrationale"
@@ -1215,6 +1225,16 @@
           "references": {
             "type": "string",
             "title": "References"
+          },
+          "effectConditions": {
+            "type": "string",
+            "title": "Effectconditions",
+            "default": ""
+          },
+          "dietaryGuidance": {
+            "type": "string",
+            "title": "Dietaryguidance",
+            "default": ""
           },
           "riskLevel": {
             "$ref": "#/components/schemas/RiskLevel"
@@ -1398,6 +1418,22 @@
             "type": "boolean",
             "title": "Badforhighcholesterol"
           },
+          "identityUncertain": {
+            "type": "boolean",
+            "title": "Identityuncertain",
+            "default": false
+          },
+          "uncertaintyReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uncertaintyreason"
+          },
           "needsRefresh": {
             "type": "boolean",
             "title": "Needsrefresh",
@@ -1464,6 +1500,19 @@
             "description": "The verified citation backing the numeric ADI range, only\never populated alongside an actual parsed, GATED number (see\n`adi_min_mg_per_kg_bw_per_day`). PR #13 review round 3: also\ngated on `references` itself having COMPATIBLE trusted\nprovenance -- a genuinely regulatory-confirmed ADI number\npaired with an older/untouched, still-untrusted `references`\nstring (e.g. only `acceptableDailyIntake` was independently\nmerged, never `references`) must not present that citation as\nif it also backed this specific ADI figure.",
             "readOnly": true
           },
+          "adiPopulationScope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adipopulationscope",
+            "description": "`\"PER_KG_BODY_WEIGHT\"` exactly when `adiMinMgPerKgBwPerDay`/\n`adiMaxMgPerKgBwPerDay` carry a real gated number, else `None` --\nmakes explicit, on the wire, that this is a per-kilogram-\nbodyweight limit, never a universal daily amount (task: \"a\nper-body-weight limit is not a universal daily amount\"), and\nnever a male/female-specific figure the source text doesn't\nitself distinguish.",
+            "readOnly": true
+          },
           "insNumberVerified": {
             "type": "boolean",
             "title": "Insnumberverified",
@@ -1512,6 +1561,7 @@
           "adiMinMgPerKgBwPerDay",
           "adiMaxMgPerKgBwPerDay",
           "adiSource",
+          "adiPopulationScope",
           "insNumberVerified",
           "localizations"
         ],
@@ -1752,6 +1802,22 @@
           "rawIngredientText": {
             "type": "string",
             "title": "Rawingredienttext"
+          },
+          "originalIngredientText": {
+            "type": "string",
+            "title": "Originalingredienttext",
+            "default": ""
+          },
+          "ingredientTextSourceLanguage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ingredienttextsourcelanguage"
           },
           "ingredientIds": {
             "type": "string",

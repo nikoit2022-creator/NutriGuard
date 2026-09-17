@@ -141,9 +141,20 @@ def test_ingredient_out_field_set_is_purely_additive():
     # module docstring -- INS is only ever mechanically derived, never an
     # independently-verified identifier).
     review_fix_fields = {"insNumberVerified", "localizations"}
-    assert (
-        dumped.keys()
-        == original_camel_fields | data_quality_task_fields | knowledge_cache_task_fields | review_fix_fields
+    # "ingredient-language-diagnostics" task: additive info-contract
+    # fields (effectConditions/dietaryGuidance/adiPopulationScope) and
+    # identity-uncertainty fields (task: "return structured information
+    # allowing Android to offer another label photo when necessary").
+    language_and_info_contract_fields = {
+        "effectConditions", "dietaryGuidance", "adiPopulationScope",
+        "identityUncertain", "uncertaintyReason",
+    }
+    assert dumped.keys() == (
+        original_camel_fields
+        | data_quality_task_fields
+        | knowledge_cache_task_fields
+        | review_fix_fields
+        | language_and_info_contract_fields
     )
 
 

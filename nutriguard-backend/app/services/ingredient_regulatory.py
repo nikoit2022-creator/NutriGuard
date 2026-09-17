@@ -60,6 +60,13 @@ _ADI_SINGLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# The only population scope this module ever parses out of free text --
+# both ADI regexes above match nothing but a "mg/kg (bw|body weight)"
+# expression, so a successfully-parsed numeric ADI is ALWAYS this scope,
+# never a universal per-day amount, and never a male/female-specific
+# figure (the source text carries no such distinction to parse).
+ADI_POPULATION_SCOPE_PER_KG_BODY_WEIGHT = "PER_KG_BODY_WEIGHT"
+
 
 def derive_approval_status(status_text: str | None) -> ApprovalStatus:
     """Map a free-text regulatory-status string to a compact status.
@@ -151,3 +158,26 @@ def derive_gated_adi_range_mg_per_kg_bw_per_day(
     if not is_authoritative_regulatory_source(verification_status, source):
         return None, None
     return derive_adi_range_mg_per_kg_bw_per_day(adi_text)
+
+
+def derive_gated_adi_population_scope(
+    adi_text: str | None,
+    *,
+    verification_status: IngredientVerificationStatus,
+    source: IngredientSource | None,
+) -> str | None:
+    """Makes explicit, for the client, that a numeric ADI is a
+    per-kilogram-bodyweight figure -- never a universal daily amount
+    (task: "a per-body-weight limit is not a universal daily amount").
+    Returns `ADI_POPULATION_SCOPE_PER_KG_BODY_WEIGHT` exactly when
+    `derive_gated_adi_range_mg_per_kg_bw_per_day` would return a real
+    number for the SAME inputs (both regexes only ever match that one
+    expression shape), else `None`. Never distinguishes a male/female
+    figure -- the source text this module parses draws no such
+    distinction, so none is invented here either."""
+    min_value, _ = derive_gated_adi_range_mg_per_kg_bw_per_day(
+        adi_text, verification_status=verification_status, source=source
+    )
+    if min_value is None:
+        return None
+    return ADI_POPULATION_SCOPE_PER_KG_BODY_WEIGHT

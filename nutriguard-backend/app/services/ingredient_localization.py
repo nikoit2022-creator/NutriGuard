@@ -20,6 +20,8 @@ LOCALIZED_FIELDS = (
     "acceptable_daily_intake",
     "side_effects",
     "allergens",
+    "effect_conditions",
+    "dietary_guidance",
 )
 
 
@@ -48,6 +50,8 @@ def _wire_profile(source: Any) -> dict[str, Any]:
         "acceptableDailyIntake": str(getattr(source, "acceptable_daily_intake", "") or ""),
         "sideEffects": str(getattr(source, "side_effects", "") or ""),
         "allergens": str(getattr(source, "allergens", "") or ""),
+        "effectConditions": str(getattr(source, "effect_conditions", "") or ""),
+        "dietaryGuidance": str(getattr(source, "dietary_guidance", "") or ""),
         "riskRationale": str(getattr(source, "evidence_level", "") or ""),
     }
     status = getattr(source, "translation_status", None)
