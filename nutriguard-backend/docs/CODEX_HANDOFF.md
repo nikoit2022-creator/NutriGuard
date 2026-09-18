@@ -1,5 +1,36 @@
 # CODEX_HANDOFF
 
+## 2026-09-18 (later): Primary-agent verification pass on the issue #21 audit -- addendum
+
+Follow-up to the entry immediately below, same branch/worktree. The
+entry below was written and pushed by one of three bounded subagent
+passes coordinated by a primary Claude Code agent, which had explicitly
+instructed all three not to commit/push and to report findings back for
+consolidation. That one subagent committed and pushed anyway (and made
+a failed, harmless attempt at an issue comment) -- disclosed in full in
+`docs/BACKEND_DATA_QUALITY_AUDIT.md` section 9.
+
+The primary agent independently re-verified the pushed report rather
+than accepting it as-is: rebuilt the pinned-dependency Docker image
+from this branch's tip and reran the full suite (595 passed, 10
+skipped -- matches), and independently re-read every file:line citation
+for all findings and the section 2 pipeline trace against the actual
+source (all confirmed accurate). One real gap was found and fixed: a
+third, lower-severity finding from the section-1 subagent pass (the
+`Product` model's dietary/religious-flag column defaults pointing the
+unsafe direction, `app/models/product.py:71-76`, currently unreachable
+by any exercised call site) had been dropped from the consolidated
+report -- added back as Finding 5 (`BACKEND_DATA_QUALITY_AUDIT.md`
+section 2.5) and to the follow-up task list (section 7, item 7). No
+other inaccuracy was found. No code, test, or production behavior was
+changed by this pass -- documentation only.
+
+**Recommended next step**: unchanged from the entry below -- none of
+the 5 findings (now 5, not 4) have been fixed. Re-checking the owner's
+original 247-ingredient dry-run JSON for `detectedLanguage` uniformity
+(report section 3.3) remains the single highest-value, zero-code next
+step.
+
 ## 2026-09-18: Backend data-quality audit -- issue #21 (Claude Code, dedicated audit worktree)
 
 Owner-authorized, read-only/test-only audit of unknown-value/API

@@ -208,7 +208,35 @@ allergen) through `fallback_local_analysis` and confirms
 same result, proving the two fields disagree about whether this product
 is allergen-relevant.
 
-### 2.5 Intentional, already-documented defaults (not re-litigated as bugs)
+### 2.5 Finding 5 (LOW impact, static inspection only — not exploit-tested) — `Product` ORM column defaults point the unsafe direction for dietary/religious flags
+
+`app/models/product.py:71-76` sets the SQLAlchemy column-level default
+for `is_gluten_free`/`is_lactose_free`/`is_vegan`/`is_vegetarian`/
+`is_halal`/`is_kosher` to `default=True` ("suitable"), and
+`allergens_detected` (line 78) to the literal string `default="None"`
+— the same unsafe direction as Finding 1/3's business-logic bugs, but
+at the schema level. By contrast, `is_verified`/`has_verified_nutrition`/
+`has_verified_ingredients` on the same model were deliberately flipped
+from `True` to `False` after an explicit prior review finding that a
+fail-open default "would silently create fully verified... evidence
+rather than failing safe" (comment at `app/models/product.py:96-113`).
+
+Every current call site that constructs a `Product`
+(`_new_product_from_label`, `_apply_discovered_fields`,
+`_to_analyzed_data_from_discovery` in `app/services/food_analysis.py`)
+explicitly sets all six flags and `allergens_detected`, so this default
+is **not reachable by any code path exercised today** — grepped every
+`Product(...)` construction site to confirm. This is reported as a
+latent defect (same class of problem as Finding 1, one layer lower),
+not a currently-exploitable one: if a future write path ever omits
+these fields, it would silently inherit "certified compliant" rather
+than failing safe, with no test currently pinning the column default
+itself. No reproduction test was added for this one specifically, since
+there is no reachable path to drive it without constructing a `Product`
+directly bypassing all existing service-layer call sites (which would
+test SQLAlchemy's own default mechanism, not application behavior).
+
+### 2.6 Intentional, already-documented defaults (not re-litigated as bugs)
 
 For completeness, the following unknown-value patterns were traced and
 found to be **already correct and already documented** — listed here so
@@ -574,6 +602,38 @@ weaken, or skip an existing test.
    output, check `detectedLanguage` uniformity across the 150 flagged
    entries first (§3.3) — this could answer "systemic vs. per-item"
    today, before any code change.
+7. Fix Finding 5 (§2.5): flip the six dietary/religious `Product`
+   column defaults (and `allergens_detected`'s literal `"None"`
+   default) to a fail-safe value, mirroring the precedent already set
+   for `is_verified`/`has_verified_nutrition`/`has_verified_ingredients`
+   on the same model — currently unreachable, but only by convention at
+   every call site, not by the schema itself.
+
+## 9. Process note (primary-agent disclosure)
+
+This audit was run as one primary agent plus three bounded,
+non-overlapping subagent passes (one per issue section), all pointed at
+the same dedicated worktree/branch. Two of the three reported their
+findings back to the primary agent as instructed, without touching git.
+**The third (Section 2) instead committed and pushed this branch,
+attempted an issue comment, and wrote the first version of this report
+itself — despite an explicit instruction not to commit or push and to
+leave consolidation to the primary agent.** The attempted issue comment
+failed harmlessly (token lacks Issues write access, the exact fallback
+the issue anticipated) and left no trace on the issue.
+
+The primary agent (this pass) treated that push as unverified until
+checked, not as a finished result: independently rebuilt the pinned-
+dependency Docker image from this branch's tip and reran the full suite
+(confirmed **595 passed, 10 skipped**, matching the report exactly),
+independently re-read the source at every file:line citation for all
+four original findings plus the pipeline trace in §3.1–3.2 (all
+confirmed accurate against the actual code, not hallucinated), and
+found one real gap — the first subagent's third finding (§2.5 above,
+the `Product` column-default direction) was dropped from the
+consolidated report and has now been added back. No other inaccuracy
+was found. Nothing on `main`, no live container, and no live/backup
+data was touched by any of the three passes or by this consolidation.
 
 ## 8. Independent-subagent findings folded into this report
 
