@@ -1,5 +1,100 @@
 # CODEX_HANDOFF
 
+## 2026-09-18: Backend data-quality audit -- issue #21 (Claude Code, dedicated audit worktree)
+
+Owner-authorized, read-only/test-only audit of unknown-value/API
+semantics, the ingredient-language repair tool's "150
+translation-unreliable" bucket, and scientific-content coverage. Full
+report: `docs/BACKEND_DATA_QUALITY_AUDIT.md` (this same worktree). Base
+commit `32bd7efc05750470da6f48eab7c4111e45db1d26` confirmed as
+`origin/main`'s exact HEAD (no drift) before starting. Work done in a
+dedicated `git worktree`
+(`/home/vboxuser/nutriguard-worktrees/audit-backend-data-quality-issue-21`,
+branch `audit/backend-data-quality-issue-21`), entirely separate from
+the live checkout (`/home/vboxuser/nutrigard`, whose own uncommitted
+`docs/CODEX_HANDOFF.md` entry was left untouched) and from the live
+Docker Compose stack (never entered/restarted/migrated). No merge, no
+deploy, no live data touched, no `--apply`/live repair run.
+
+- **Baseline**: pinned `requirements.txt` deps have no prebuilt wheel
+  for this VM's Python 3.14 and no local C toolchain
+  (`asyncpg`/`psycopg2-binary`) -- built a disposable
+  `Dockerfile.audit-test` from this worktree's own `Dockerfile` base
+  (`python:3.12-slim`) instead of loosening pins; `pip freeze` inside
+  matches `requirements.txt` exactly (47/47 packages). `docker run --rm
+  --network none` against that image: **590 passed, 10 skipped** before
+  any audit test was added; **595 passed, 10 skipped** after adding 5
+  new audit-reproduction tests (none existing weakened/modified).
+- **4 confirmed findings**, each with a passing reproduction test and
+  exact file:line references -- full detail in the committed report:
+  1. Product-level dietary/religious suitability flags
+     (`is_gluten_free`/`is_vegan`/`is_halal`/`is_kosher`/etc.) default
+     to `True` ("suitable") on English-keyword *absence* in the
+     OCR/label/`/scan/ocr-text` fallback path
+     (`app/services/fallback_analysis.py:85-90`) -- not gated by
+     detected language, not cross-checked against the correctly
+     tri-state per-ingredient catalog fields. Confirmed with a real
+     Bulgarian-text reproduction that gets zero warnings for a
+     genuinely non-compliant product.
+  2. `ProductOut.health_score` (`GET /products/{barcode}`, plain
+     lookup) is non-nullable `int` and returns the literal `0`
+     placeholder for a persisted-but-never-verified discovery row --
+     the exact "0 means both unknown and a real bad score" ambiguity
+     `FullProductAnalysisOut.healthScore` was already fixed for
+     (README section 6 item 11) but `ProductOut` was not.
+  3. `allergensDetected="None"` from the same fallback heuristic only
+     ever checks 2 of 14 EU-regulated allergens (soy/milk).
+  4. A `VERIFIED`, human-reviewed curated seed record
+     (`e471_mono_diglycerides`) hardcodes
+     `isVegan`/`isVegetarian`/`isHalal`/`isKosher=true` while its own
+     curated text says sourcing verification is required for exactly
+     those claims -- a genuine content self-contradiction, not a code
+     bug.
+- **Section 2 (translation-repair tool)**: traced
+  `app/seed/repair_ingredient_language.py` +
+  `app/services/ingredient_translation.py` end to end; the owner's
+  20/47/26/4/150 dry-run totals map exactly onto the tool's 5
+  categories (confirms this is the right tool). Found that the 150
+  "translation-unreliable" rows all currently collapse to one flat
+  reason string (`TRANSLATION_UNRELIABLE`) even though up to 8
+  structurally distinct code paths can produce that result (provider
+  unavailable/auth/timeout, malformed response, no matching response
+  entry, low confidence, language/catalog rejection, E-number/number
+  invariant mismatch) -- explicitly did NOT attribute the 150 to model
+  mistranslation, since the current code cannot distinguish that from a
+  single misconfigured/unavailable provider in whatever environment
+  produced that dry run. Proposed (description only, not implemented) a
+  minimal internal-only reason-code counter; clarified that the "1 MiB
+  + 1 backup budget" referenced in the task belongs to a different,
+  unrelated subsystem (`app/core/scan_diagnostics.py`'s live per-scan
+  journal) that this offline CLI tool doesn't use at all today (it's a
+  bare stdout `print(json.dumps(...))`).
+- **Section 3 (scientific coverage)**: inventoried the actual seed data
+  -- 12 fully curated/`VERIFIED` ingredients (10 E-number, 2 ordinary
+  food) with full field coverage and reviewed (machine-translated,
+  human-reviewed) Bulgarian localization; up to 43 `LIMITED_DATA`
+  "starter" E-number identity rows with deliberately no risk/ADI/
+  allergen claims; the remainder of the ~247-ingredient catalog is
+  OCR-discovered/synthetic with no scientific content, by design.
+- Two bounded, non-overlapping subagent audit passes ran concurrently
+  on this same worktree (one already converged independently on finding
+  2 above via a different reproduction and additionally surfaced
+  finding 3; the results were verified against the cited code before
+  being folded into the committed report rather than taken on faith). A
+  third pass (section 2 territory) may still be in flight -- if it
+  returns additional material after this commit, it should be folded
+  into `BACKEND_DATA_QUALITY_AUDIT.md` in a follow-up commit on this
+  same branch, not a new branch.
+
+**Unresolved / recommended next step**: none of the 4 findings above
+were fixed (out of scope for this audit) -- see
+`BACKEND_DATA_QUALITY_AUDIT.md` section 7 for the proposed minimal
+follow-up tasks, ranked by impact. The single highest-value, zero-code
+next step is re-checking the owner's original 247-ingredient dry-run
+JSON (if still available) for `detectedLanguage` uniformity across the
+150 flagged rows, per the report's section 3.3, before writing any new
+counters.
+
 ## 2026-09-17 (later): code-review follow-up -- translation correctness, EN/BG contract, diagnostic accuracy (Claude Code, isolated worktree)
 
 Continuation of the entry immediately below, addressing a code review of commit `8ca0119fac1fbffb47bb64b5cb50a0f5ada83fb7` on the same branch (`feat/backend-ingredient-language-diagnostics`). Also tracked as GitHub issue #19 (shared Claude/Codex task record); a copy of this report was intended to be posted there, with a fallback to committing it into this repo when API/comment access isn't available in this session -- see `docs/INGREDIENT_LANGUAGE_REVIEW.md` if present. Worked in the same isolated worktree as before; live checkout/database/containers untouched throughout. One subagent used (issue 3, non-overlapping file ownership: `app/services/ingredient_segmentation.py` + its test file only).
