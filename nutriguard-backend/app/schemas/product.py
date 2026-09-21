@@ -37,7 +37,7 @@ class ProductOut(ORMModel):
     # nullable default. See `app.services.language_detection.detect_language`.
     ingredient_text_source_language: str | None = None
     ingredient_ids: str
-    # CONTRACT CHANGE (documented, README section 6 item 16): now
+    # CONTRACT CHANGE (documented, README section 6 item 17): now
     # `int | None`, matching `FullProductAnalysisOut.health_score`.
     # `null` = "no Health Score available" -- the product is not
     # `isVerified` (nutrition and/or ingredient evidence incomplete).
@@ -57,7 +57,7 @@ class ProductOut(ORMModel):
     has_artificial_sweeteners: bool
     has_preservatives: bool
 
-    # CONTRACT CHANGE (documented, README section 6 item 16): TRI-STATE
+    # CONTRACT CHANGE (documented, README section 6 item 17): TRI-STATE
     # `bool | None` (key always present, value may be `null`):
     #   null  = unknown / insufficient evidence -- show NOTHING (no badge,
     #           no claim, no warning),
