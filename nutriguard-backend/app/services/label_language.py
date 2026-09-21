@@ -31,6 +31,10 @@ from app.core.exceptions import TranslationUnreliableError
 from app.integrations.gemini import GeminiUnavailableError, gemini_service
 from app.services.barcode_text_safety import is_placeholder
 from app.services.language_detection import detect_language
+from app.services.translation_rejection import (
+    TranslationRejection,
+    provider_failure_category,
+)
 
 # Splits raw label text into candidate per-language sections BEFORE
 # per-segment language detection: multi-market packaging typically
@@ -118,6 +122,14 @@ class LabelTextResult:
     translation_model: str | None
     translation_confidence: float | None
     status: str  # "ok" | "translated"
+    # INTERNAL, diagnostics-only (never persisted or exposed publicly --
+    # see `app.services.translation_rejection`): set ONLY on the
+    # non-strict `translation_unreliable_fallback` result, to the
+    # closed-vocabulary `TranslationRejection` value (and, for a provider
+    # failure, the coarse `ProviderFailureCategory` value) that made the
+    # whole-label translation unreliable. `None` for every other status.
+    translation_failure_reason: str | None = None
+    translation_provider_failure_category: str | None = None
 
 
 class _TranslationPayload(BaseModel):
@@ -223,6 +235,42 @@ def _describe_counter_mismatch(source: Counter[str], translated: Counter[str], n
     return f"Translation altered {noun}(s) -- {'; '.join(parts)}."
 
 
+def _first_invariant_failure(
+    source_text: str, translated_text: str
+) -> tuple[TranslationRejection, str] | None:
+    """`(internal reason, human-readable message)` for the FIRST failing
+    invariant check below, or `None` if every check passes. The checks
+    and their order are exactly those `_verify_translation_invariants`
+    has always run -- the reason is diagnostics-only (see
+    `app.services.translation_rejection`) and never affects the verdict."""
+    if is_placeholder(translated_text) or not translated_text.strip():
+        return TranslationRejection.EMPTY_TRANSLATION, "Translation produced no usable text."
+
+    if detect_language(translated_text) != "en":
+        return (
+            TranslationRejection.LANGUAGE_REJECTED,
+            "Translated text does not independently verify as English.",
+        )
+
+    source_e_numbers = _extract_e_numbers(source_text)
+    translated_e_numbers = _extract_e_numbers(translated_text)
+    if source_e_numbers != translated_e_numbers:
+        return (
+            TranslationRejection.E_NUMBER_MISMATCH,
+            _describe_counter_mismatch(source_e_numbers, translated_e_numbers, "E-number"),
+        )
+
+    source_numbers = _extract_numeric_tokens(source_text)
+    translated_numbers = _extract_numeric_tokens(translated_text)
+    if source_numbers != translated_numbers:
+        return (
+            TranslationRejection.NUMERIC_MISMATCH,
+            _describe_counter_mismatch(source_numbers, translated_numbers, "numeric value/unit"),
+        )
+
+    return None
+
+
 def _verify_translation_invariants(source_text: str, translated_text: str) -> str | None:
     """
     Returns `None` if `translated_text` is a trustworthy translation of
@@ -239,46 +287,53 @@ def _verify_translation_invariants(source_text: str, translated_text: str) -> st
       - the MULTISET of numeric values/percentages/units in source and
         result must match exactly -- same coverage for numbers.
     """
-    if is_placeholder(translated_text) or not translated_text.strip():
-        return "Translation produced no usable text."
+    failure = _first_invariant_failure(source_text, translated_text)
+    return None if failure is None else failure[1]
 
-    if detect_language(translated_text) != "en":
-        return "Translated text does not independently verify as English."
 
-    source_e_numbers = _extract_e_numbers(source_text)
-    translated_e_numbers = _extract_e_numbers(translated_text)
-    if source_e_numbers != translated_e_numbers:
-        return _describe_counter_mismatch(source_e_numbers, translated_e_numbers, "E-number")
-
-    source_numbers = _extract_numeric_tokens(source_text)
-    translated_numbers = _extract_numeric_tokens(translated_text)
-    if source_numbers != translated_numbers:
-        return _describe_counter_mismatch(source_numbers, translated_numbers, "numeric value/unit")
-
-    return None
+def _unreliable_error(
+    message: str,
+    reason: TranslationRejection,
+    *,
+    details: dict | None = None,
+    provider_category: str | None = None,
+) -> TranslationUnreliableError:
+    """Builds the (public-message) `TranslationUnreliableError`, attaching
+    the internal `TranslationRejection` via `diagnostic_metadata` -- the
+    existing INTERNAL side channel `app.main`'s error envelope never
+    reads, so the reason can never reach a client (see
+    `AppError.diagnostic_metadata`). `message`/`details` are unchanged."""
+    metadata = {"label_translation_failure_reason": reason.value}
+    if provider_category is not None:
+        metadata["label_translation_provider_failure_category"] = provider_category
+    return TranslationUnreliableError(message, details, diagnostic_metadata=metadata)
 
 
 async def _translate_other_language_text(source_text: str) -> _TranslationPayload:
     try:
         raw_response = await gemini_service.translate_label_text(source_text)
     except GeminiUnavailableError as exc:
-        raise TranslationUnreliableError(
+        raise _unreliable_error(
             "The label text could not be translated: the AI translation service is unavailable. "
             "Please try again or rescan a clearer label.",
+            TranslationRejection.PROVIDER_UNAVAILABLE,
+            provider_category=provider_failure_category(exc).value,
         ) from exc
 
     try:
         payload = json.loads(raw_response)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise TranslationUnreliableError(
+        raise _unreliable_error(
             "The label text could not be reliably translated. Please rescan a clearer label.",
+            TranslationRejection.MALFORMED_RESPONSE,
         ) from exc
 
     try:
         parsed = _TranslationPayload.model_validate(payload)
     except ValidationError as exc:
-        raise TranslationUnreliableError(
+        raise _unreliable_error(
             "The label text could not be reliably translated. Please rescan a clearer label.",
+            TranslationRejection.MALFORMED_RESPONSE,
         ) from exc
 
     # Belt-and-braces alongside the Pydantic `ge`/`le` constraints (which
@@ -286,25 +341,28 @@ async def _translate_other_language_text(source_text: str) -> _TranslationPayloa
     # implementation detail of Pydantic's float validator, not something
     # to rely on silently) -- confidence must be an actual finite number.
     if not math.isfinite(parsed.confidence):
-        raise TranslationUnreliableError(
+        raise _unreliable_error(
             "The label text could not be reliably translated. Please rescan a clearer label.",
+            TranslationRejection.LOW_CONFIDENCE,
         )
 
     if parsed.confidence < _MIN_TRANSLATION_CONFIDENCE:
-        raise TranslationUnreliableError(
+        raise _unreliable_error(
             "The label text could not be translated with sufficient confidence. "
             "Please rescan a clearer, more complete label.",
+            TranslationRejection.LOW_CONFIDENCE,
             details={
                 "confidence": parsed.confidence,
                 "minimumRequired": _MIN_TRANSLATION_CONFIDENCE,
             },
         )
 
-    failure_reason = _verify_translation_invariants(source_text, parsed.translatedText)
-    if failure_reason is not None:
-        raise TranslationUnreliableError(
+    failure = _first_invariant_failure(source_text, parsed.translatedText)
+    if failure is not None:
+        raise _unreliable_error(
             "The label text could not be reliably translated. Please rescan a clearer label.",
-            details={"reason": failure_reason},
+            failure[0],
+            details={"reason": failure[1]},
         )
 
     return parsed
@@ -385,9 +443,10 @@ async def resolve_label_text(raw_text: str | None, *, strict: bool = True) -> La
         source_text = "; ".join(other_parts)
         try:
             translated = await _translate_other_language_text(source_text)
-        except TranslationUnreliableError:
+        except TranslationUnreliableError as exc:
             if strict:
                 raise
+            failure_metadata = exc.diagnostic_metadata or {}
             return LabelTextResult(
                 original_text=text,
                 canonical_text=text,
@@ -396,6 +455,10 @@ async def resolve_label_text(raw_text: str | None, *, strict: bool = True) -> La
                 translation_model=None,
                 translation_confidence=None,
                 status="translation_unreliable_fallback",
+                translation_failure_reason=failure_metadata.get("label_translation_failure_reason"),
+                translation_provider_failure_category=failure_metadata.get(
+                    "label_translation_provider_failure_category"
+                ),
             )
         return LabelTextResult(
             original_text=text,

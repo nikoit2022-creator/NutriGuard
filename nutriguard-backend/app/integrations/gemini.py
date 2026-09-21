@@ -17,11 +17,52 @@ from app.core.config import settings
 logger = structlog.get_logger(__name__)
 
 
+# Coarse, closed set of failure categories a `GeminiUnavailableError`
+# may carry (INTERNAL diagnostics only -- see
+# `app.services.translation_rejection.ProviderFailureCategory`, which
+# maps these exact strings; never sent to a client). Deliberately just a
+# category label: never the exception message, response body, status
+# text, URL, key or any request/response content.
+FAILURE_NOT_CONFIGURED = "notConfigured"
+FAILURE_TIMEOUT = "timeout"
+FAILURE_TRANSPORT = "transport"
+FAILURE_HTTP_AUTH = "httpAuth"
+FAILURE_HTTP_RATE_LIMITED = "httpRateLimited"
+FAILURE_HTTP_CLIENT_ERROR = "httpClientError"
+FAILURE_HTTP_SERVER_ERROR = "httpServerError"
+FAILURE_HTTP_OTHER = "httpOther"
+FAILURE_UNPARSABLE_RESPONSE = "unparsableResponse"
+FAILURE_UNKNOWN = "unknown"
+
+
+def _http_failure_category(status_code: int) -> str:
+    if status_code in (401, 403):
+        return FAILURE_HTTP_AUTH
+    if status_code == 429:
+        return FAILURE_HTTP_RATE_LIMITED
+    if 400 <= status_code < 500:
+        return FAILURE_HTTP_CLIENT_ERROR
+    if 500 <= status_code < 600:
+        return FAILURE_HTTP_SERVER_ERROR
+    return FAILURE_HTTP_OTHER
+
+
 class GeminiUnavailableError(Exception):
     """Raised for any Gemini failure: network error, timeout, non-2xx,
     or an unparsable/empty response. Callers MUST catch this and fall
     back to the deterministic local analysis (API Contract 7.4) rather
-    than propagating it to the client."""
+    than propagating it to the client.
+
+    `category` (one of the `FAILURE_*` constants above; `FAILURE_UNKNOWN`
+    when a raise site supplies none) is an INTERNAL, non-sensitive
+    sub-classification for diagnostics only -- it lets an operator tell
+    "key not configured" from "network/timeout" from "HTTP 4xx/5xx" from
+    "response not parsable" without the message text ever being
+    retained or logged."""
+
+    def __init__(self, message: str = "", *, category: str = FAILURE_UNKNOWN) -> None:
+        super().__init__(message)
+        self.category = category
 
 
 _TEXT_PROMPT_TEMPLATE = """
@@ -201,7 +242,9 @@ class GeminiService:
 
     async def _call(self, parts: list[dict]) -> str:
         if not self.is_configured:
-            raise GeminiUnavailableError("Gemini API key is not configured on the server.")
+            raise GeminiUnavailableError(
+                "Gemini API key is not configured on the server.", category=FAILURE_NOT_CONFIGURED
+            )
 
         payload = {"contents": [{"parts": parts}]}
 
@@ -210,11 +253,17 @@ class GeminiService:
                 response = await client.post(self._endpoint(), json=payload)
         except httpx.HTTPError as exc:
             logger.warning("gemini_call_failed", reason=str(exc))
-            raise GeminiUnavailableError("Network error calling Gemini API.") from exc
+            raise GeminiUnavailableError(
+                "Network error calling Gemini API.",
+                category=FAILURE_TIMEOUT if isinstance(exc, httpx.TimeoutException) else FAILURE_TRANSPORT,
+            ) from exc
 
         if response.status_code != 200:
             logger.warning("gemini_non_200", status_code=response.status_code)
-            raise GeminiUnavailableError(f"Gemini API returned status {response.status_code}.")
+            raise GeminiUnavailableError(
+                f"Gemini API returned status {response.status_code}.",
+                category=_http_failure_category(response.status_code),
+            )
 
         try:
             body = response.json()
@@ -229,7 +278,9 @@ class GeminiService:
                 raise ValueError("empty text")
         except (ValueError, KeyError, IndexError, AttributeError) as exc:
             logger.warning("gemini_unparsable_response")
-            raise GeminiUnavailableError("Gemini API response could not be parsed.") from exc
+            raise GeminiUnavailableError(
+                "Gemini API response could not be parsed.", category=FAILURE_UNPARSABLE_RESPONSE
+            ) from exc
 
         return text.replace("```json", "").replace("```", "").strip()
 

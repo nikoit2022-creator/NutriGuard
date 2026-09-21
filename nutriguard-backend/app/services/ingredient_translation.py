@@ -32,6 +32,11 @@ from app.integrations.gemini import GeminiUnavailableError, gemini_service
 from app.services.barcode_text_safety import is_placeholder
 from app.services.ingredient_normalization import normalize_ingredient_name
 from app.services.language_detection import detect_language
+from app.services.translation_rejection import (
+    ProviderFailureCategory,
+    TranslationRejection,
+    provider_failure_category,
+)
 
 _MIN_TRANSLATION_CONFIDENCE = 0.55
 
@@ -82,6 +87,13 @@ class IngredientTokenTranslation:
     ORIGINAL text and mark the ingredient identity-uncertain rather than
     persist a guess. `translated_text` is `None` whenever `reliable` is
     `False`.
+
+    `rejection_reason` / `provider_failure_category` are INTERNAL,
+    diagnostics-only (see `app.services.translation_rejection`): `None`
+    whenever `reliable` is `True`; otherwise the closed-vocabulary reason
+    this entry was rejected (and, only for `PROVIDER_UNAVAILABLE`, the
+    coarse provider sub-category). They never change which translation
+    is accepted and are never persisted or exposed publicly.
     """
 
     original_text: str
@@ -89,6 +101,8 @@ class IngredientTokenTranslation:
     detected_language: str
     confidence: float | None
     reliable: bool
+    rejection_reason: TranslationRejection | None = None
+    provider_failure_category: ProviderFailureCategory | None = None
 
 
 class _TranslationEntry(BaseModel):
@@ -120,18 +134,25 @@ def _extract_numeric_tokens(text: str) -> Counter[str]:
     return tokens
 
 
-def _translation_is_reliable(
+def _first_rejection(
     source_text: str,
     translated_text: str,
     confidence: float,
     *,
     known_normalized_names: frozenset[str],
-) -> bool:
+) -> TranslationRejection | None:
     """Every check is deterministic and independent of what Gemini
     itself claimed -- mirrors `label_language._verify_translation_invariants`,
     applied per-entry rather than to a whole blob (closing the gap where
     a whole-blob aggregate check can pass even though one embedded
     fragment stayed untranslated).
+
+    Returns the FIRST failing check's reason (checks run in a fixed
+    order, each one an early return -- so an entry failing two checks is
+    always attributed to the earlier one), or `None` when every check
+    passes. `_translation_is_reliable` is `_first_rejection(...) is
+    None`; splitting the checks out changes ONLY what is reported,
+    never which translations are accepted.
 
     `known_normalized_names` -- see the module docstring's note above
     `_E_NUMBER_RE` -- is the narrow, evidence-based fallback for short
@@ -140,28 +161,50 @@ def _translation_is_reliable(
     independently-verifiable path to the same "genuinely English"
     conclusion."""
     if confidence < _MIN_TRANSLATION_CONFIDENCE or not math.isfinite(confidence):
-        return False
+        return TranslationRejection.LOW_CONFIDENCE
     if is_placeholder(translated_text) or not translated_text.strip():
-        return False
+        return TranslationRejection.EMPTY_TRANSLATION
     if (
         detect_language(translated_text) != "en"
         and normalize_ingredient_name(translated_text) not in known_normalized_names
     ):
-        return False
+        return TranslationRejection.LANGUAGE_REJECTED
     if _extract_e_numbers(source_text) != _extract_e_numbers(translated_text):
-        return False
+        return TranslationRejection.E_NUMBER_MISMATCH
     if _extract_numeric_tokens(source_text) != _extract_numeric_tokens(translated_text):
-        return False
-    return True
+        return TranslationRejection.NUMERIC_MISMATCH
+    return None
 
 
-def _unreliable(original_text: str) -> IngredientTokenTranslation:
+def _translation_is_reliable(
+    source_text: str,
+    translated_text: str,
+    confidence: float,
+    *,
+    known_normalized_names: frozenset[str],
+) -> bool:
+    """Boolean wrapper over `_first_rejection` -- see its docstring."""
+    return (
+        _first_rejection(
+            source_text, translated_text, confidence, known_normalized_names=known_normalized_names
+        )
+        is None
+    )
+
+
+def _unreliable(
+    original_text: str,
+    reason: TranslationRejection,
+    provider_category: ProviderFailureCategory | None = None,
+) -> IngredientTokenTranslation:
     return IngredientTokenTranslation(
         original_text=original_text,
         translated_text=None,
         detected_language="other",
         confidence=None,
         reliable=False,
+        rejection_reason=reason,
+        provider_failure_category=provider_category,
     )
 
 
@@ -234,39 +277,59 @@ async def translate_ingredient_tokens(
 
     try:
         raw_response = await gemini_service.translate_ingredient_list(targets, context=context)
-    except GeminiUnavailableError:
-        return [_unreliable(t) for t in targets]
+    except GeminiUnavailableError as exc:
+        category = provider_failure_category(exc)
+        return [_unreliable(t, TranslationRejection.PROVIDER_UNAVAILABLE, category) for t in targets]
 
     try:
         payload = json.loads(raw_response)
     except (json.JSONDecodeError, TypeError, ValueError):
-        return [_unreliable(t) for t in targets]
+        return [_unreliable(t, TranslationRejection.MALFORMED_RESPONSE) for t in targets]
 
     if not isinstance(payload, list):
-        return [_unreliable(t) for t in targets]
+        return [_unreliable(t, TranslationRejection.MALFORMED_RESPONSE) for t in targets]
 
     entries: list[_TranslationEntry] = []
+    # Per-entry schema failures are remembered BY `originalText` (when
+    # that much is still readable) so that a target whose only response
+    # entry was schema-invalid is reported as `MALFORMED_RESPONSE`
+    # ("the model answered, in a bad shape") rather than
+    # `NO_MATCHING_ENTRY` ("the model never answered for this target") --
+    # two different failure classes with different remedies. An invalid
+    # entry with no readable `originalText` cannot be attributed to any
+    # target, so it just leaves its target unmatched. Either way the
+    # entry is discarded exactly as before (verdict unchanged).
+    malformed_by_text: Counter[str] = Counter()
     for raw_entry in payload:
         try:
             entries.append(_TranslationEntry.model_validate(raw_entry))
         except ValidationError:
-            continue  # one malformed response entry never invalidates the rest
+            # one malformed response entry never invalidates the rest
+            original = raw_entry.get("originalText") if isinstance(raw_entry, dict) else None
+            if isinstance(original, str):
+                malformed_by_text[original] += 1
+            continue
 
     matched = _match_responses_to_targets(targets, entries)
 
     results: list[IngredientTokenTranslation] = []
     for original_text, entry in zip(targets, matched):
         if entry is None:
-            results.append(_unreliable(original_text))
+            if malformed_by_text[original_text] > 0:
+                malformed_by_text[original_text] -= 1
+                results.append(_unreliable(original_text, TranslationRejection.MALFORMED_RESPONSE))
+            else:
+                results.append(_unreliable(original_text, TranslationRejection.NO_MATCHING_ENTRY))
             continue
 
         confidence = entry.confidence
         translated = entry.translatedText.strip()
         detected_language = entry.detectedLanguage.strip().lower() or "other"
 
-        if not _translation_is_reliable(
+        rejection = _first_rejection(
             original_text, translated, confidence, known_normalized_names=known_normalized_names
-        ):
+        )
+        if rejection is not None:
             results.append(
                 IngredientTokenTranslation(
                     original_text=original_text,
@@ -274,6 +337,7 @@ async def translate_ingredient_tokens(
                     detected_language=detected_language,
                     confidence=round(confidence, 3) if math.isfinite(confidence) else None,
                     reliable=False,
+                    rejection_reason=rejection,
                 )
             )
             continue
