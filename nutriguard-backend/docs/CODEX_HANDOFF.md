@@ -30,7 +30,7 @@ Code: `app/services/dietary_suitability.py`, `alembic/versions/d7e8f9a0b1c2_tris
 ### API / migration / rollout implications
 No wire or schema change. Behavioural: fewer confirmed flags/allergens/warnings for qualified ingredient text (unknown instead of a claim). Migration policy reads the same rules (frozen). Android impact unchanged from the previous entry. Nothing merged, deployed or repaired.
 
-## 2026-09-21 (latest): PR #22 owner review follow-up -- unsupported negative claims and substring heuristics (Claude Code, isolated worktree, NOT merged/deployed)
+## 2026-09-21: PR #22 owner review follow-up -- unsupported negative claims and substring heuristics (Claude Code, isolated worktree, NOT merged/deployed)
 
 Branch `feat/backend-truthful-unknowns-diagnostics`, continued from reviewed snapshot `11ddaca48376b66c1e582ea0a0d0a5566a28e4a4` (local HEAD == `origin/<branch>` at start and again immediately before this commit; no drift, no newer work to preserve; the only PR comment is the owner's review). Implements the owner-approved comment `issuecomment-5757681001` (two blockers). Backend only; Android, live checkout, live database, live containers, secrets: untouched (the live checkout's own uncommitted handoff edit was left as found; all work in this worktree; tests only in `--network none` containers and a disposable PostgreSQL 16 on a throwaway Docker network, removed afterwards). PR #22 left open and unmerged; nothing deployed.
 
