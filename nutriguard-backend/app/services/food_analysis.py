@@ -139,7 +139,7 @@ from app.repositories import (
     product_source_repository,
     scan_history_repository,
 )
-from app.services import barcode_discovery, gemini_image_parser, health_score, warning_engine
+from app.services import barcode_discovery, dietary_suitability, gemini_image_parser, health_score, warning_engine
 from app.services import barcode_validation
 from app.services import ingredient_catalog
 from app.services import ingredient_regulatory
@@ -220,7 +220,12 @@ def _to_product_model(
         original_ingredient_text=data.original_ingredient_text,
         ingredient_text_source_language=data.ingredient_text_source_language,
         ingredient_ids=_ingredient_ids_string(ingredients),
-        health_score=0,  # placeholder, recomputed live on every read (see module docstring)
+        # `None` = "no Health Score available" (V14, migration d7e8f9a0b1c2)
+        # -- never a stored `0` placeholder, which would read as a real,
+        # very poor score. The verified paths overwrite this with the
+        # real computed score (see `analyze_barcode` and the two
+        # `_finalize_*` functions); an unverified row keeps `None`.
+        health_score=None,
         nova_group=data.nova_group,
         sugar_grams=data.sugar_grams,
         sodium_mg=data.sodium_mg,
@@ -246,6 +251,21 @@ def _to_product_model(
         discovered_at=now if source != "label_scan" else None,
         last_verified_at=now,
     )
+
+
+def _apply_dietary_flags(existing: Product, data: AnalyzedProductData) -> None:
+    """Copies an incoming attempt's tri-state dietary flags onto `existing`
+    WITHOUT letting an UNKNOWN erase evidence: an incoming `None` leaves
+    whatever supported value the row already holds (`True` from a
+    provider/label claim, or `False` from positive incompatibility
+    evidence) untouched; an incoming explicit `True`/`False` replaces it
+    (newer, supported evidence). Used by every path that overwrites an
+    existing row's flags (see `_apply_discovered_fields`,
+    `_apply_label_enrichment`)."""
+    for name in dietary_suitability.FLAG_NAMES:
+        incoming = getattr(data, name)
+        if incoming is not None:
+            setattr(existing, name, incoming)
 
 
 def _apply_discovered_fields(
@@ -278,13 +298,11 @@ def _apply_discovered_fields(
     existing.serving_unit = data.serving_unit
     existing.has_artificial_sweeteners = data.has_artificial_sweeteners
     existing.has_preservatives = data.has_preservatives
-    existing.is_gluten_free = data.is_gluten_free
-    existing.is_lactose_free = data.is_lactose_free
-    existing.is_vegan = data.is_vegan
-    existing.is_vegetarian = data.is_vegetarian
-    existing.is_halal = data.is_halal
-    existing.is_kosher = data.is_kosher
-    existing.allergens_detected = data.allergens_detected
+    _apply_dietary_flags(existing, data)
+    # Same evidence-preservation rule as the flags: an unknown ("")
+    # incoming allergen list never erases a list already established.
+    if _is_meaningful_identity(data.allergens_detected):
+        existing.allergens_detected = data.allergens_detected
     existing.source = source
     existing.source_confidence = confidence
     existing.has_verified_nutrition = has_verified_nutrition
@@ -316,18 +334,20 @@ def _to_analyzed_data_from_discovery(
     Health Score on `product.is_verified` (both true), never on either
     flag alone, so neither is scored in isolation.
 
-    Dietary flags/allergens: OFF's own structured tags (`dietary_flags`/
-    `allergens` on `DiscoveredProduct`) are used where present. Anything
-    OFF did NOT state defaults to False (NOT True) for every one of
-    is_gluten_free/is_lactose_free/is_vegan/is_vegetarian/is_halal/
-    is_kosher — "unknown" must never be presented as a positive
-    certification claim. False is the conservative direction here: for
-    a health- or religion-relevant dietary flag, a false negative
-    (a genuinely gluten-free product not marked as such) is far safer
-    than a false positive (a product silently claimed gluten-free/halal/
-    kosher with zero evidence for it) — the same asymmetry the
-    Personalized Warning Engine already assumes when it warns a user off
-    a product that isn't flagged as meeting their requirement.
+    Dietary flags/allergens (V14 -- supersedes the V6 "unknown defaults
+    to False" rule): TRI-STATE, see `app.services.dietary_suitability`.
+    The provider's own structured tags (`dietary_flags` on
+    `DiscoveredProduct`) are used where present; anything the provider
+    did NOT state is UNKNOWN (`None`), no longer `False`. V6's `False`
+    was the safe direction for the warning engine but silently meant
+    BOTH "unknown" and "proven unsuitable"; that ambiguity is what
+    changed. An unknown flag may still become `False` from positive
+    incompatibility evidence in the provider's ingredient text or a
+    matched curated ingredient (so a product whose ingredients name
+    wheat is still reported not gluten-free) -- and is never turned into
+    `True` from the absence of a keyword. `allergens_detected` is the
+    provider's declared allergen list, `""` (unknown) when it lists none
+    -- never "None".
     """
     nutrition_known = discovered.nutrition_known
     ingredients_known = discovered.ingredients_known
@@ -374,13 +394,12 @@ def _to_analyzed_data_from_discovery(
         saturated_fat_grams=n.saturated_fat_grams if n.saturated_fat_grams is not None else 0.0,
         has_artificial_sweeteners=bool(n.has_artificial_sweeteners),
         has_preservatives=bool(n.has_preservatives),
-        is_gluten_free=flags.get("is_gluten_free", False),
-        is_lactose_free=flags.get("is_lactose_free", False),
-        is_vegan=flags.get("is_vegan", False),
-        is_vegetarian=flags.get("is_vegetarian", False),
-        is_halal=flags.get("is_halal", False),
-        is_kosher=flags.get("is_kosher", False),
         allergens_detected=allergens_text,
+        **dietary_suitability.resolve_flags(
+            flags,
+            discovered.raw_ingredient_text if ingredients_known else "",
+            ingredient_list,
+        ),
         nutrition_basis="PER_100_G" if nutrition_known else "UNKNOWN",
     )
     return data, ingredient_list, nutrition_known, ingredients_known
@@ -1158,12 +1177,10 @@ def _apply_label_enrichment(
             existing.nova_group = data.nova_group
         existing.has_artificial_sweeteners = data.has_artificial_sweeteners
         existing.has_preservatives = data.has_preservatives
-        existing.is_gluten_free = data.is_gluten_free
-        existing.is_lactose_free = data.is_lactose_free
-        existing.is_vegan = data.is_vegan
-        existing.is_vegetarian = data.is_vegetarian
-        existing.is_halal = data.is_halal
-        existing.is_kosher = data.is_kosher
+        # Dietary flags: tri-state, evidence-preserving -- an UNKNOWN
+        # (`None`) incoming value never overwrites a supported existing
+        # one (see `_apply_dietary_flags`).
+        _apply_dietary_flags(existing, data)
         # Allergen text: only overwritten when this attempt actually
         # names something -- an unknown/unreadable answer ("", see
         # `gemini_image_parser._extract_allergens_text`) must never

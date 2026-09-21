@@ -47,7 +47,12 @@ def _discovered(**overrides) -> DiscoveredProduct:
 # --- Finding 1: unknown dietary flags must not become positive claims -------
 
 
-def test_unknown_dietary_flags_default_to_false_not_true():
+def test_unknown_dietary_flags_are_unknown_not_true_and_not_false():
+    """V14 (issue #21): SUPERSEDES the V6 rule "unknown defaults to False".
+    The safety intent is unchanged -- unknown must NEVER become a positive
+    (`True`) certification claim -- but `False` now means only "supported
+    incompatibility", so a flag the provider did not state (and that no
+    ingredient evidence contradicts) is `None`, not `False`."""
     discovered = _discovered(
         raw_ingredient_text="sugar, water, salt",
         nutrition=NutritionFacts(sugar_grams=1.0, sodium_mg=1.0, saturated_fat_grams=1.0),
@@ -60,12 +65,12 @@ def test_unknown_dietary_flags_default_to_false_not_true():
     )
     assert nutrition_known is True
     assert ingredients_known is True
-    assert data.is_vegan is False
-    assert data.is_vegetarian is False
-    assert data.is_gluten_free is False
-    assert data.is_lactose_free is False
-    assert data.is_halal is False
-    assert data.is_kosher is False
+    assert data.is_vegan is None
+    assert data.is_vegetarian is None
+    assert data.is_gluten_free is None
+    assert data.is_lactose_free is None
+    assert data.is_halal is None
+    assert data.is_kosher is None
 
 
 def test_explicit_dietary_flags_from_provider_are_honored():
@@ -82,8 +87,8 @@ def test_explicit_dietary_flags_from_provider_are_honored():
     assert data.is_vegan is True
     assert data.is_gluten_free is True
     assert data.is_halal is False  # explicit False is honored too, not overridden
-    # still not claimed, since the provider never stated it:
-    assert data.is_kosher is False
+    # still not claimed, since the provider never stated it (V14: unknown, not False):
+    assert data.is_kosher is None
 
 
 # --- Finding 2: materially incomplete data must not be scored ---------------

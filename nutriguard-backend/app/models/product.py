@@ -47,7 +47,15 @@ class Product(Base):
         "ingredient_text_source_language", String(16), nullable=True
     )
 
-    health_score: Mapped[int] = mapped_column("health_score", Integer, nullable=False)
+    # Nullable (migration d7e8f9a0b1c2): `NULL` = "no Health Score
+    # available" -- the product is not `is_verified` (nutrition and/or
+    # ingredient evidence incomplete), so there is nothing to score. It
+    # is NEVER a stored `0` placeholder: a genuine computed score of 0
+    # is a real, very poor score and must stay distinguishable. Availability
+    # is decided by the verified-data contract (`is_verified`, see below
+    # and `app.services.food_analysis._score_and_warnings`' callers), not
+    # by the numeric value -- `ProductOut` re-applies that gate on read.
+    health_score: Mapped[int | None] = mapped_column("health_score", Integer, nullable=True)
     nova_group: Mapped[int] = mapped_column("nova_group", Integer, nullable=False)
 
     sugar_grams: Mapped[float] = mapped_column("sugar_grams", Numeric(6, 2), nullable=False, default=0)
@@ -68,14 +76,31 @@ class Product(Base):
     )
     has_preservatives: Mapped[bool] = mapped_column("has_preservatives", Boolean, default=False)
 
-    is_gluten_free: Mapped[bool] = mapped_column("is_gluten_free", Boolean, default=True)
-    is_lactose_free: Mapped[bool] = mapped_column("is_lactose_free", Boolean, default=True)
-    is_vegan: Mapped[bool] = mapped_column("is_vegan", Boolean, default=True)
-    is_vegetarian: Mapped[bool] = mapped_column("is_vegetarian", Boolean, default=True)
-    is_halal: Mapped[bool] = mapped_column("is_halal", Boolean, default=True)
-    is_kosher: Mapped[bool] = mapped_column("is_kosher", Boolean, default=True)
+    # Product-level dietary/religious suitability -- TRI-STATE (migration
+    # d7e8f9a0b1c2), same convention as the per-ingredient columns:
+    #   NULL  = unknown / insufficient evidence (the default: the safe
+    #           direction -- never a fabricated positive certification),
+    #   False = SUPPORTED incompatibility,
+    #   True  = SUPPORTED suitability (an explicit provider/label claim).
+    # The absence of a keyword is never evidence of suitability; see
+    # `app.services.dietary_suitability`. These previously defaulted to
+    # `True` at the ORM level -- the dangerous direction, and the reason
+    # a future write path that forgot one of them would have silently
+    # inherited "certified compliant".
+    is_gluten_free: Mapped[bool | None] = mapped_column("is_gluten_free", Boolean, nullable=True, default=None)
+    is_lactose_free: Mapped[bool | None] = mapped_column("is_lactose_free", Boolean, nullable=True, default=None)
+    is_vegan: Mapped[bool | None] = mapped_column("is_vegan", Boolean, nullable=True, default=None)
+    is_vegetarian: Mapped[bool | None] = mapped_column("is_vegetarian", Boolean, nullable=True, default=None)
+    is_halal: Mapped[bool | None] = mapped_column("is_halal", Boolean, nullable=True, default=None)
+    is_kosher: Mapped[bool | None] = mapped_column("is_kosher", Boolean, nullable=True, default=None)
 
-    allergens_detected: Mapped[str] = mapped_column("allergens_detected", Text, nullable=False, default="None")
+    # Comma-separated allergens POSITIVELY detected/declared. `""` means
+    # "none detected OR unknown" -- NOT a confirmed-allergen-free claim
+    # (the heuristics only ever look for a couple of the 14 regulated
+    # categories, and a provider/model that lists none has not certified
+    # absence). The literal string "None" used to be the default here;
+    # it read as an absence guarantee and is migrated to "" (d7e8f9a0b1c2).
+    allergens_detected: Mapped[str] = mapped_column("allergens_detected", Text, nullable=False, default="")
     timestamp: Mapped[int] = mapped_column(BigInteger, default=_now_ms)
 
     created_at: Mapped[datetime] = mapped_column(

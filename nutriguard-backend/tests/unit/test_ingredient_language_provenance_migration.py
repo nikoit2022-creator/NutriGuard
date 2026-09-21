@@ -16,7 +16,12 @@ def test_ingredient_language_provenance_migration_is_the_single_head_and_reversi
 
     assert revision is not None
     assert revision.down_revision == "b5c6d7e8f9a0"
-    assert scripts.get_current_head() == REVISION
+    # Still ONE linear head (a later migration may legitimately sit on top
+    # of this one -- the current head is pinned by the newest migration's
+    # own test, see test_tristate_product_flags_migration.py), and this
+    # revision is still part of that chain.
+    assert len(scripts.get_heads()) == 1
+    assert REVISION in {rev.revision for rev in scripts.walk_revisions()}
 
     source = (
         BACKEND_ROOT / "alembic" / "versions" / f"{REVISION}_ingredient_language_provenance.py"
