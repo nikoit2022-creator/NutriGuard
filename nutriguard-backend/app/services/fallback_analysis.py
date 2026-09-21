@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.services import dietary_suitability
 from app.services.ocr_normalizer import (
     create_synthetic_ingredient,
     match_against_database,
@@ -34,12 +35,18 @@ class AnalyzedProductData:
     saturated_fat_grams: float
     has_artificial_sweeteners: bool
     has_preservatives: bool
-    is_gluten_free: bool
-    is_lactose_free: bool
-    is_vegan: bool
-    is_vegetarian: bool
-    is_halal: bool
-    is_kosher: bool
+    # Tri-state (see `app.services.dietary_suitability`): `None` =
+    # unknown/insufficient evidence, `False` = supported incompatibility,
+    # `True` = supported suitability (only ever from an explicit source
+    # value, never from keyword absence).
+    is_gluten_free: bool | None
+    is_lactose_free: bool | None
+    is_vegan: bool | None
+    is_vegetarian: bool | None
+    is_halal: bool | None
+    is_kosher: bool | None
+    # Comma-separated allergens positively found; "" = unknown (never
+    # the literal "None" -- see `dietary_suitability.detect_allergens_text`).
     allergens_detected: str
     nutrition_basis: str = "UNKNOWN"
     serving_size: float | None = None
@@ -69,6 +76,15 @@ def fallback_local_analysis(
     has_preservatives = any(kw in lower for kw in ("benzoate", "nitrit", "sorbate"))
     nova = 4 if (len(ingredient_list) > 5 or has_sweeteners or has_preservatives) else 3
 
+    # Tri-state product dietary flags: `False` only from positive
+    # incompatibility evidence (a TRUSTED catalog ingredient's own flag, or
+    # an ingredient entry that IS an unambiguous identity such as "pork" /
+    # "skimmed milk powder" -- never a substring like "coconut milk");
+    # NEVER `True` from the absence of a keyword -- a Bulgarian/mixed/empty
+    # label must not read as gluten-free/vegan/halal. See
+    # `app.services.dietary_suitability`.
+    flags = dietary_suitability.resolve_flags(None, raw_text, ingredient_list)
+
     product = AnalyzedProductData(
         barcode=f"ocr_{int(time.time() * 1000)}",
         product_name=title,
@@ -82,13 +98,8 @@ def fallback_local_analysis(
         saturated_fat_grams=3.5 if ("oil" in lower or "fat" in lower) else 0.5,
         has_artificial_sweeteners=has_sweeteners,
         has_preservatives=has_preservatives,
-        is_gluten_free=not ("wheat" in lower or "gluten" in lower),
-        is_lactose_free=not ("milk" in lower or "whey" in lower or "lactose" in lower),
-        is_vegan=not ("pork" in lower or "gelatin" in lower or "milk" in lower),
-        is_vegetarian=not ("pork" in lower or "gelatin" in lower or "bacon" in lower),
-        is_halal=not ("pork" in lower or "alcohol" in lower),
-        is_kosher=not ("pork" in lower),
-        allergens_detected="Soy" if "soy" in lower else ("Milk" if "milk" in lower else "None"),
+        allergens_detected=dietary_suitability.detect_allergens_text(raw_text),
+        **flags,
     )
 
     return product, ingredient_list

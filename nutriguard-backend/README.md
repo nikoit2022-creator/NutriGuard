@@ -12,6 +12,22 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V21 (truthful unknown values + actionable translation diagnostics,
+issue #21 follow-up):** Product dietary suitability (`isGlutenFree`/
+`isLactoseFree`/`isVegan`/`isVegetarian`/`isHalal`/`isKosher`) is now
+tri-state -- `null` unknown, `false` supported incompatibility, `true`
+supported suitability -- and the absence of an English keyword is never
+suitability (a Bulgarian/mixed/empty label used to read as
+gluten-free/vegan/halal). `ProductOut.healthScore` is `int | null`
+(`null` = not verified; a genuine 0 stays 0), consistently at the top
+level and in the nested `product`. `allergensDetected` `""` means none
+detected *or unknown* -- the literal `"None"` is never produced. The
+curated E471 seed no longer claims source-dependent vegan/vegetarian/
+halal/kosher. Internal, closed-vocabulary translation-rejection reasons
+feed bounded repair-dry-run and scan-diagnostics counters. Migration
+`d7e8f9a0b1c2`; see section 6 items 17-18 and
+[`docs/TRUTHFUL_UNKNOWN_VALUES.md`](docs/TRUTHFUL_UNKNOWN_VALUES.md).
+
 **V20 (reviewed EN/BG ingredient profiles):** Ingredient scientific
 copy now supports additive, persistent localizations. Canonical English
 fields and every existing API field remain unchanged. A new
@@ -347,6 +363,7 @@ merge:
    missing/null/malformed value — same "unknown must never read as a
    positive certification" bug the barcode-discovery bridge already
    fixed for external providers (V6). Now defaults to `false`.
+   **[Superseded by V21 / item 17: unknown is now `null`, not `false`.]**
 2. `nutrition_fields_present` accepted anything `float()` didn't raise
    on — a JSON boolean, `NaN`/`Infinity`, a negative number, an
    out-of-range number, or a numeric string all passed. Now rejects all
@@ -423,7 +440,9 @@ no Alembic migration was needed (see 11.5).
 barcode discovery feature, fixed before merge:
 1. Unknown dietary flags (vegan/vegetarian/gluten-free/lactose-free/
    halal/kosher) now default to `false`, never `true` — missing data is
-   never shown as a positive certification claim.
+   never shown as a positive certification claim. **[Superseded by V21 /
+   section 6 item 17: unknown is now `null`; `false` means only a supported
+   incompatibility. "Never `true`" is unchanged.]**
 2. A discovery whose nutrition/ingredients are materially incomplete
    (identity-only UPCitemdb fallback, or an Open Food Facts entry with
    no `nutriments`/`ingredients_text`) no longer gets a Health Score
@@ -836,7 +855,8 @@ than silently resolved:
    did — they correct *internal* logic that was silently wrong:
    - Unknown dietary flags now default `false` (see
      `_to_analyzed_data_from_discovery`), never `true` — a missing
-     value must never read as a positive certification.
+     value must never read as a positive certification. **[Superseded by
+     item 17: unknown is now `null`; still never `true`.]**
    - A materially incomplete discovery
      (`Product.has_verified_nutrition=False`) never reaches the Health
      Score Calculator — not on first discovery, not on any later cache
@@ -1380,6 +1400,113 @@ than silently resolved:
       (`requirements.txt`) regeneration of `openapi.json` — only two
       computed-field descriptions changed text (documenting the new
       `riskRationale`/`adiSource` gating), no field/type/shape changed.
+
+17. **Truthful unknown values: tri-state product dietary flags, nullable
+    `healthScore`, honest `allergensDetected` (issue #21 follow-up; migration
+    `d7e8f9a0b1c2`; CONTRACT CHANGE, widening on the wire).**
+    - **What changed.** `ProductOut.isGlutenFree`/`isLactoseFree`/`isVegan`/
+      `isVegetarian`/`isHalal`/`isKosher` are `boolean | null` (key always
+      present): `null` = unknown/insufficient evidence, `false` = *supported*
+      incompatibility, `true` = *supported* suitability (an explicit provider
+      tag or explicit structured label claim only). `ProductOut.healthScore` is
+      `int | null`: `null` whenever the product is not `isVerified` (enforced in
+      the serializer, so the nested `product.healthScore` agrees with the
+      top-level `healthScore` on every path); a genuine computed `0` is preserved.
+      `allergensDetected` stays a `string`, but `""` = none detected **or**
+      unknown (never an absence guarantee) and the literal `"None"` is no longer
+      produced. Gemini/Open Food Facts
+      placeholder strings ("None", "N/A", `en:none`) are filtered too. The dietary warnings fire only on an explicit `false`.
+    - **Why.** Missing/unknown data was being encoded as `true` (English-only
+      keyword *absence* over Bulgarian/mixed/empty text), as `false` (provider/
+      model defaults, so `false` meant both "unknown" and "unsuitable"), as `0`
+      (a stored score placeholder for unverified products on `GET /products`), and
+      as `"None"` (a soy/milk-only heuristic). Full audit and evidence rules:
+      `docs/TRUTHFUL_UNKNOWN_VALUES.md`.
+    - **Alternatives considered.** (a) Adding more keywords/languages: rejected --
+      it only moves the blind spot; suitability is never derived from text (and,
+      per the PR #22 review, a *substring* is not an ingredient identity either: see
+      "Review follow-up" below). (b)
+      Keeping `false` for unknown (the V6 rule, item 6): rejected -- it cannot be
+      told apart from a supported incompatibility. (c) A separate
+      `dietaryFlagsKnown` field or a nullable/`"UNKNOWN"` allergens field:
+      rejected as heavier than the tri-state the per-ingredient flags already use
+      and as an unnecessary type change for `allergensDetected`. (d) An
+      informational "could not confirm" warning for unknown flags: not added
+      (would change the warnings list; open product decision).
+    - **Evidence preservation.** Barcode+label enrichment and higher-confidence
+      rediscovery never overwrite a supported existing flag/allergen list with an
+      unknown incoming value. Curated `e471_mono_diglycerides` now has
+      `isVegan`/`isVegetarian`/`isHalal`/`isKosher` = `null` (its own text says
+      source verification is required); seed reloads clear the old `true`s.
+    - **Legacy data.** Documented conservative policy (provider-sourced `true`s not
+      contradicted by evidence, and `false`s that are *re-supported* by exact
+      ingredient-entry identity in the stored text or by a linked trusted catalog
+      row, kept; other `true`s and unsupported `false`s reset to `NULL`; unverified
+      stored scores reset to `NULL`; `"None"` -> `""`) and a lossy, documented
+      downgrade -- see the migration docstring and the doc above.
+    - **Review follow-up (PR #22): no promotion from substring keyword hits.**
+      Raw text used to turn any substring hit into a confirmed claim (`coconut milk`
+      -> not vegan, not lactose-free, allergen `Milk`; `gluten-free` inside a
+      legacy `false` -> a "supported" incompatibility). Now a claim/allergen comes
+      from raw text only when an ingredient *entry* is exactly an unambiguous
+      identity (`milk`, `skimmed milk powder`, `whey`, `lactose`, `pork`,
+      `gelatin`, `wheat flour`, `gluten`, `soy lecithin`, ...) outside a
+      precautionary/negating header; a milk entry does not establish lactose;
+      halal/kosher come only from pork or a trusted catalog row; catalog-row flags
+      count only for `VERIFIED` curated/regulatory rows that an exact entry names (the matcher's
+      substring link is not identity). Everything else is `null`
+      / no allergen entry (never a suitability or allergen-free claim). Deviation
+      from the previous behaviour, deliberately: an unknown produces no warning
+      where a keyword hit used to (`milk chocolate`, `buttermilk`, `wheat starch`
+      and non-English text are unknown). Migration `d7e8f9a0b1c2` was amended in
+      place (not yet applied beyond disposable databases -- verify with `alembic
+      current` before deploying). A parenthetical qualifier stays attached to
+      its parent (`Milk (plant-based)`, `Milk (coconut)` are not a `milk` entry,
+      in the resolver and in the frozen migration copy); only quantity,
+      precautionary, `with ...` additive and identity-composing qualifiers
+      (`Milk (3%)`, `Milk (skimmed)`) keep the parent's identity, and a genuine
+      sublist keeps its own entries. Alternatives rejected: a plant-milk blacklist
+      (open-ended, and the same substring mistake), keeping the substring hits as
+      "documented heuristics" (incompatible with `false` = supported), a
+      corrective second migration (cannot restore values the first policy reset;
+      unnecessary while the first is unapplied). Tests:
+      `tests/unit/test_text_evidence_identity.py`,
+      `tests/integration/test_evidence_semantics_e2e.py`, the rewritten
+      `test_tristate_product_flags_migration.py` and the PostgreSQL round trip.
+    - **Tests.** `tests/unit/test_dietary_suitability.py`,
+      `test_tristate_evidence_preserving_merge.py`,
+      `test_tristate_product_flags_migration.py`,
+      `tests/integration/test_truthful_unknown_values_e2e.py`,
+      `test_seed_unknown_dietary_flags.py`, and the opt-in
+      `tests/postgres/test_tristate_product_flags_migration_postgres.py`. Six
+      existing tests that pinned the superseded "unknown -> `false`" rule were
+      updated (intent kept: unknown is never `true`).
+    - **`openapi.json`** regenerated with pinned dependencies: exactly seven
+      changes, all widening `T` -> `T | null` on `ProductOut`
+      (`healthScore` + the six flags); `required` lists and paths unchanged.
+    - **Android impact.** See "Compatibility implications for Android" in
+      `docs/TRUTHFUL_UNKNOWN_VALUES.md` (notably: an Android build without
+      nullable-flag handling parses a JSON `null` as `false`).
+
+18. **Bounded, privacy-safe translation-rejection diagnostics (issue #21).**
+    The count of 150 "translation-unreliable" rows does not establish a provider
+    failure (`detectedLanguage="other"` is not evidence of a missing key or a
+    transport error). Every rejected translation now carries an INTERNAL,
+    closed-vocabulary reason (`providerUnavailable`, `malformedResponse`,
+    `noMatchingEntry`, `lowConfidence`, `emptyTranslation`, `languageRejected`,
+    `eNumberMismatch`, `numericMismatch`, `unspecified`; provider failures are
+    sub-classified from a category label, never the message) that is aggregated
+    into additive counters in the repair dry-run report and the existing
+    per-scan diagnostics line. Reasons never change which translation is
+    accepted (check order unchanged), are never persisted, and never appear in a
+    public response (`uncertaintyReason` stays `TRANSLATION_UNRELIABLE`). The
+    diagnostics keep the existing 1 MiB + one-backup, `flock`-serialised,
+    fail-open journal; attempts (`ingredientTranslationBatches`), partial
+    outcomes and the final `translationOutcome` are reported separately. No
+    schema/OpenAPI change. Tests: `tests/unit/test_translation_rejection_reasons.py`,
+    `test_translation_diagnostic_fields.py`,
+    `tests/integration/test_repair_translation_reasons.py`,
+    `test_translation_diagnostics_endpoints.py`.
 
 ### Android nullable-dietary-flags contract check (PR #13 review rounds 2 + 3)
 

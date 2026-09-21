@@ -23,6 +23,7 @@ from app.integrations.barcode_providers.base import (
     ProviderMetadata,
     ProviderProductResult,
 )
+from app.services import dietary_suitability
 from app.services.barcode_validation import BarcodeInfo
 
 logger = structlog.get_logger(__name__)
@@ -95,7 +96,9 @@ def _dietary_flags(product: dict) -> dict[str, bool]:
 
 def _allergens(product: dict) -> list[str]:
     tags = product.get("allergens_tags") or []
-    return sorted({t.split(":", 1)[-1].strip().title() for t in tags if isinstance(t, str) and t.strip()})
+    names = [t.split(":", 1)[-1].strip().title() for t in tags if isinstance(t, str) and t.strip()]
+    # "en:none"-style tags are an absence marker, not an allergen.
+    return sorted(set(dietary_suitability.clean_allergen_names(names)))
 
 
 def _additive_flags(product: dict) -> tuple[bool | None, bool | None]:

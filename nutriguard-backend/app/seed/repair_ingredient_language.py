@@ -142,10 +142,34 @@ run as `python -m app.seed.repair_ingredient_language`::
           "proposedTranslation": "<verified English translation, only"
                                    " when category == TRANSLATED, else null>",
           "applied": <bool -- true only when category == TRANSLATED AND"
-                      " apply=True actually wrote it>
+                      " apply=True actually wrote it>,
+          "translationFailureReason": "<closed-vocabulary internal reason,"
+                     " only when category == FLAGGED_UNRESOLVED_TRANSLATION_FAILED,"
+                     " else null -- see translationFailureReasons below>",
+          "translationProviderFailureCategory": "<closed-vocabulary provider"
+                     " sub-category, only when the reason is providerUnavailable,"
+                     " else null>"
         },
         ...
       ],
+      "translationFailureReasons": {   # additive; ALWAYS every key, zeros included
+        "providerUnavailable": <int>, "malformedResponse": <int>,
+        "noMatchingEntry": <int>, "lowConfidence": <int>,
+        "emptyTranslation": <int>, "languageRejected": <int>,
+        "eNumberMismatch": <int>, "numericMismatch": <int>,
+        "unspecified": <int>
+      },
+      "translationProviderFailureCategories": {   # additive; every key;
+        "notConfigured": <int>, "timeout": <int>, "transport": <int>,  # sums to
+        "httpAuth": <int>, "httpRateLimited": <int>,                    # providerUnavailable
+        "httpClientError": <int>, "httpServerError": <int>,
+        "httpOther": <int>, "unparsableResponse": <int>, "unknown": <int>
+      },
+      "translationAttempt": {   # additive; the ONE batched call this run makes
+        "batches": <0 or 1>, "targets": <int>, "reliable": <int>,
+        "rejected": <int>,
+        "outcome": "not_attempted" | "succeeded" | "partial" | "failed"
+      },
       "productFlaggedCount": <int>,
       "productFlags": [
         {
@@ -156,6 +180,17 @@ run as `python -m app.seed.repair_ingredient_language`::
         ...
       ]
     }
+
+The `translationFailureReasons` values always sum to
+`ingredientCounts.flaggedUnresolvedTranslationFailed` (every such entry
+carries exactly one reason; `translationProviderFailureCategories` sums
+to `providerUnavailable`). They are aggregate counters/enums only --
+never ingredient text, responses, exception messages or secrets -- so a
+dry run explains WHY entries were flagged (provider not configured vs
+transport/HTTP failure vs malformed/omitted response vs low confidence
+vs language/E-number/number rejection) without re-running a paid
+translation. `TRANSLATION_UNRELIABLE` remains the (only) per-entry
+`reason` string, unchanged.
 
 Only `ALREADY_FINE` rows are omitted from `ingredientCounts` being
 `0` when there is genuinely nothing else to report -- every row from
@@ -184,6 +219,14 @@ from app.services.ingredient_normalization import normalize_ingredient_name
 from app.services.ingredient_segmentation import detect_ambiguous_segmentation
 from app.services.ingredient_translation import translate_ingredient_tokens
 from app.services.language_detection import detect_language
+from app.services.translation_rejection import (
+    PROVIDER_FAILURE_KEYS,
+    REJECTION_KEYS,
+    ProviderFailureCategory,
+    TranslationRejection,
+    component_outcome,
+    zero_filled_counts,
+)
 
 _logger = structlog.get_logger(__name__)
 
@@ -223,6 +266,11 @@ class IngredientRepairEntry:
     reason: str | None = None
     proposed_translation: str | None = None
     applied: bool = False
+    # INTERNAL diagnostics only (see `app.services.translation_rejection`):
+    # closed-vocabulary enum strings, never text. Set only for
+    # `FLAGGED_UNRESOLVED_TRANSLATION_FAILED` entries.
+    translation_failure_reason: str | None = None
+    translation_provider_failure_category: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -235,6 +283,8 @@ class IngredientRepairEntry:
             "reason": self.reason,
             "proposedTranslation": self.proposed_translation,
             "applied": self.applied,
+            "translationFailureReason": self.translation_failure_reason,
+            "translationProviderFailureCategory": self.translation_provider_failure_category,
         }
 
 
@@ -264,6 +314,48 @@ class RepairReport:
         counts = Counter(entry.category for entry in self.ingredient_details)
         return {category: counts.get(category, 0) for category in _ALL_CATEGORIES}
 
+    @property
+    def translation_failure_reasons(self) -> dict[str, int]:
+        """Zero-filled per-reason counts over every entry flagged
+        `TRANSLATION_UNRELIABLE`; sums to
+        `ingredient_counts[CATEGORY_FLAGGED_UNRESOLVED_TRANSLATION_FAILED]`
+        by construction (each such entry carries exactly one reason)."""
+        observed = Counter(
+            entry.translation_failure_reason
+            for entry in self.ingredient_details
+            if entry.category == CATEGORY_FLAGGED_UNRESOLVED_TRANSLATION_FAILED
+        )
+        return zero_filled_counts(REJECTION_KEYS, observed)
+
+    @property
+    def translation_provider_failure_categories(self) -> dict[str, int]:
+        observed = Counter(
+            entry.translation_provider_failure_category
+            for entry in self.ingredient_details
+            if entry.category == CATEGORY_FLAGGED_UNRESOLVED_TRANSLATION_FAILED
+            and entry.translation_provider_failure_category is not None
+        )
+        return zero_filled_counts(PROVIDER_FAILURE_KEYS, observed)
+
+    @property
+    def translation_attempt(self) -> dict:
+        """Attempt/partial/final summary of this run's single batched
+        translation call, derived from the entries (so it can never
+        disagree with `ingredientCounts`): `targets` = entries sent,
+        `reliable` = verified, `rejected` = flagged; `outcome` is
+        `not_attempted` / `succeeded` / `partial` / `failed`."""
+        counts = self.ingredient_counts
+        reliable = counts[CATEGORY_TRANSLATED]
+        rejected = counts[CATEGORY_FLAGGED_UNRESOLVED_TRANSLATION_FAILED]
+        targets = reliable + rejected
+        return {
+            "batches": 1 if targets else 0,
+            "targets": targets,
+            "reliable": reliable,
+            "rejected": rejected,
+            "outcome": component_outcome(reliable, rejected) if targets else "not_attempted",
+        }
+
     def to_dict(self) -> dict:
         counts = self.ingredient_counts
         return {
@@ -277,6 +369,9 @@ class RepairReport:
                 "skippedTrustedSource": counts[CATEGORY_SKIPPED_TRUSTED_SOURCE],
             },
             "ingredientDetails": [entry.to_dict() for entry in self.ingredient_details],
+            "translationFailureReasons": self.translation_failure_reasons,
+            "translationProviderFailureCategories": self.translation_provider_failure_categories,
+            "translationAttempt": self.translation_attempt,
             "productFlaggedCount": len(self.product_flags),
             "productFlags": [flag.to_dict() for flag in self.product_flags],
         }
@@ -461,6 +556,23 @@ async def run_repair(db: AsyncSession, *, apply: bool) -> RepairReport:
                         detected_language=detected,
                         category=CATEGORY_FLAGGED_UNRESOLVED_TRANSLATION_FAILED,
                         reason=_REASON_TRANSLATION_UNRELIABLE,
+                        translation_failure_reason=(
+                            result.rejection_reason.value
+                            if result.rejection_reason is not None
+                            else TranslationRejection.UNSPECIFIED.value
+                        ),
+                        # Keeps `translationProviderFailureCategories`
+                        # summing to `providerUnavailable` even for a
+                        # translator that gave a reason but no category.
+                        translation_provider_failure_category=(
+                            result.provider_failure_category.value
+                            if result.provider_failure_category is not None
+                            else (
+                                ProviderFailureCategory.UNKNOWN.value
+                                if result.rejection_reason is TranslationRejection.PROVIDER_UNAVAILABLE
+                                else None
+                            )
+                        ),
                     )
                 )
 

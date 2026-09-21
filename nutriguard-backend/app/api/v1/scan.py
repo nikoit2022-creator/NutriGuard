@@ -15,6 +15,12 @@ from app.database.session import get_db
 from app.schemas.scan import BarcodeScanRequest, FullProductAnalysisOut, OcrTextScanRequest
 from app.services import food_analysis
 from app.services.barcode_text_safety import clean_optional
+from app.services.translation_rejection import (
+    PROVIDER_FAILURE_KEYS,
+    REJECTION_KEYS,
+    component_outcome,
+    sparse_counts,
+)
 
 router = APIRouter(prefix="/scan", tags=["scan"])
 
@@ -104,14 +110,100 @@ def _ingredient_language_counts(ingredients: list[Any]) -> dict:
 # available, rather than inferring it solely from Product.source").
 # "ok" means no foreign-language text was ever found -- no attempt was
 # needed, never "translation succeeded trivially".
+#
+# `translation_unreliable_error` is never produced by
+# `label_language.resolve_label_text` itself: `_translation_fields`
+# synthesizes it when a STRICT whole-label translation raised
+# `TranslationUnreliableError` (barcode-linked paths) -- the request then
+# fails, and its internal `diagnostic_metadata` carries the closed-
+# vocabulary reason (see `app.services.translation_rejection`) instead of
+# a `LabelTextResult`.
+_LABEL_TRANSLATION_ERROR_STATUS = "translation_unreliable_error"
 _TRANSLATION_RESULT_BY_STATUS = {
     "ok": "not_needed",
     "translated": "translated",
     "translation_unreliable_fallback": "unreliable_fallback",
+    _LABEL_TRANSLATION_ERROR_STATUS: "unreliable_error",
 }
 
 
+def _closed_value(value: Any, allowed: tuple[str, ...]) -> str | None:
+    """`value` only if it is one of the closed-vocabulary strings in
+    `allowed` -- diagnostics never pass an arbitrary string through."""
+    return value if isinstance(value, str) and value in allowed else None
+
+
+def _translation_outcome(status: str | None, summary: Any) -> str:
+    """The FINAL translation outcome of THIS request, kept separate from
+    (a) attempts (`ingredientTranslationBatches`, `translationAttempted`)
+    and (b) partial outcomes (`ingredientTranslationPartialBatches`,
+    the reliable/unreliable entry counts) and from the request-level
+    `outcome` field (which is about the scan/product, not translation):
+
+      - `not_attempted`: neither the whole-label pass nor the per-
+        ingredient pass ran a translation.
+      - `succeeded`: every translation that was attempted was verified.
+      - `failed`: none of the attempted translations was verified.
+      - `partial`: a mix -- across the two passes, or within the
+        per-ingredient pass (some entries verified, some rejected).
+
+    The whole-label pass and the per-ingredient pass are two components;
+    entry counts come from the per-ingredient summary, so nothing is
+    counted twice."""
+    components: list[str] = []
+    if status is not None and status != "ok":
+        components.append("succeeded" if status == "translated" else "failed")
+    if summary is not None and summary.attempted:
+        components.append(component_outcome(summary.reliable, summary.unreliable))
+    if not components:
+        return "not_attempted"
+    if all(component == "succeeded" for component in components):
+        return "succeeded"
+    if all(component == "failed" for component in components):
+        return "failed"
+    return "partial"
+
+
+def _ingredient_reason_fields(summary: Any) -> dict:
+    """Batch-level attempt/partial counters plus the closed-vocabulary
+    rejection reason counters (sparse: only non-zero keys, to keep the
+    single per-scan line small) for the per-ingredient pass. Counters and
+    enum keys only -- never text."""
+    if summary is None:
+        return {
+            "ingredientTranslationBatches": None,
+            "ingredientTranslationPartialBatches": None,
+            "ingredientTranslationFailedBatches": None,
+            "ingredientTranslationReasons": None,
+            "ingredientTranslationProviderFailures": None,
+        }
+    return {
+        "ingredientTranslationBatches": summary.batches,
+        "ingredientTranslationPartialBatches": summary.partial_batches,
+        "ingredientTranslationFailedBatches": summary.failed_batches,
+        "ingredientTranslationReasons": sparse_counts(REJECTION_KEYS, dict(summary.rejection_counts)) or None,
+        "ingredientTranslationProviderFailures": sparse_counts(
+            PROVIDER_FAILURE_KEYS, dict(summary.provider_failure_counts)
+        )
+        or None,
+    }
+
+
 def _translation_fields(result: dict) -> dict:
+    """Fail-open wrapper around `_build_translation_fields`: this is
+    evaluated as an ARGUMENT of `_safe_record_scan_diagnostic(...)`, i.e.
+    OUTSIDE its try block -- an exception while building counters would
+    otherwise replace the real response/error with an unrelated 500 (task:
+    "an exception while building counters cannot fail or alter a scan").
+    A failure here just drops the translation fields from the line."""
+    try:
+        return _build_translation_fields(result)
+    except Exception:  # noqa: BLE001
+        _logger.warning("scan_translation_diagnostic_fields_failed")
+        return {}
+
+
+def _build_translation_fields(result: dict) -> dict:
     """`result` is the raw dict `app.services.food_analysis` returns.
     `label_language_status` is present only on paths that actually ran
     the language policy (the barcode-linked-enrichment and standalone
@@ -139,6 +231,9 @@ def _translation_fields(result: dict) -> dict:
     `food_analysis` (`label_detected_language`) but never surfaced here
     before -- now included whenever the whole-label pass ran."""
     status = result.get("label_language_status")
+    label_failure_reason = _closed_value(result.get("label_translation_failure_reason"), REJECTION_KEYS)
+    if status is None and label_failure_reason is not None:
+        status = _LABEL_TRANSLATION_ERROR_STATUS
     summary = result.get("ingredient_translation_summary")
     ingredient_attempted = bool(summary.attempted) if summary is not None else False
     ingredient_reliable = summary.reliable if summary is not None else None
@@ -155,6 +250,8 @@ def _translation_fields(result: dict) -> dict:
             "ingredientTranslationReliableCount": ingredient_reliable,
             "ingredientTranslationUnreliableCount": ingredient_unreliable,
             "ingredientTranslationLanguages": ingredient_languages,
+            **_ingredient_reason_fields(summary),
+            "translationOutcome": None if summary is None else _translation_outcome(status, summary),
         }
 
     whole_label_attempted = status is not None and (
@@ -169,6 +266,15 @@ def _translation_fields(result: dict) -> dict:
         "ingredientTranslationReliableCount": ingredient_reliable,
         "ingredientTranslationUnreliableCount": ingredient_unreliable,
         "ingredientTranslationLanguages": ingredient_languages,
+        **_ingredient_reason_fields(summary),
+        # Whole-label failure reason (closed vocabulary; only when that
+        # pass itself failed) -- distinct from the per-ingredient
+        # counters above so a caller can tell which pass failed and why.
+        "labelTranslationFailureReason": label_failure_reason,
+        "labelTranslationProviderFailureCategory": _closed_value(
+            result.get("label_translation_provider_failure_category"), PROVIDER_FAILURE_KEYS
+        ),
+        "translationOutcome": _translation_outcome(status, summary),
     }
 
 
@@ -371,6 +477,11 @@ async def scan_ocr_text(
             **diagnostic_base,
             outcome="failed",
             errorCode=exc.code,
+            # A strict whole-label `TranslationUnreliableError` carries
+            # its internal closed-vocabulary reason here (see
+            # `label_language._unreliable_error`); `None`/absent for any
+            # other AppError -- `_translation_fields` then yields nothing.
+            **_translation_fields(exc.diagnostic_metadata or {}),
             durationMs=round((time.perf_counter() - started) * 1000, 2),
         )
         raise
@@ -502,6 +613,8 @@ async def scan_label_image(
             **diagnostic_base,
             outcome="failed",
             errorCode=exc.code,
+            # See the identical note in `scan_ocr_text`.
+            **_translation_fields(exc.diagnostic_metadata or {}),
             durationMs=round((time.perf_counter() - started) * 1000, 2),
         )
         raise

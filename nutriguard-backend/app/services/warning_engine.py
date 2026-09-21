@@ -9,6 +9,13 @@ lightweight fixtures instead of full ORM sessions.
 
 Product-like object needs: sugar_grams, sodium_mg, saturated_fat_grams,
     is_gluten_free, is_lactose_free, is_vegan, is_halal, is_kosher
+    (each `bool | None`, TRI-STATE -- V14, see
+    `app.services.dietary_suitability`: the dietary/religious rules fire
+    ONLY on an explicit `False` (supported incompatibility). `None`
+    (unknown / insufficient evidence) never produces a "confirmed
+    incompatibility" warning -- `not None` is truthy, so the checks are
+    deliberately `is False`, never a truthiness test -- and `True` never
+    does either.)
 Ingredient-like object needs: common_name, e_number, bad_for_diabetes,
     bad_for_hypertension, bad_for_kidney_disease, bad_for_gout,
     bad_for_pregnancy, bad_for_children, bad_for_high_cholesterol
@@ -205,7 +212,7 @@ def generate_warnings(product: Any, ingredients: list[Any], profile: Any) -> lis
                 )
 
     # 8. Custom allergen & dietary rules
-    if profile.avoid_gluten and not product.is_gluten_free:
+    if profile.avoid_gluten and product.is_gluten_free is False:
         warnings.append(
             HealthWarning(
                 title="Gluten Violation",
@@ -216,7 +223,7 @@ def generate_warnings(product: Any, ingredients: list[Any], profile: Any) -> lis
             )
         )
 
-    if profile.avoid_lactose and not product.is_lactose_free:
+    if profile.avoid_lactose and product.is_lactose_free is False:
         warnings.append(
             HealthWarning(
                 title="Lactose Contained",
@@ -227,7 +234,7 @@ def generate_warnings(product: Any, ingredients: list[Any], profile: Any) -> lis
             )
         )
 
-    if profile.require_vegan and not product.is_vegan:
+    if profile.require_vegan and product.is_vegan is False:
         warnings.append(
             HealthWarning(
                 title="Non-Vegan Product",
@@ -238,7 +245,7 @@ def generate_warnings(product: Any, ingredients: list[Any], profile: Any) -> lis
             )
         )
 
-    if profile.require_halal and not product.is_halal:
+    if profile.require_halal and product.is_halal is False:
         warnings.append(
             HealthWarning(
                 title="Halal Compliance Alert",
@@ -249,7 +256,7 @@ def generate_warnings(product: Any, ingredients: list[Any], profile: Any) -> lis
             )
         )
 
-    if profile.require_kosher and not product.is_kosher:
+    if profile.require_kosher and product.is_kosher is False:
         warnings.append(
             HealthWarning(
                 title="Kosher Compliance Alert",

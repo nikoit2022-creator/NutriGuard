@@ -22,7 +22,11 @@ def test_fallback_local_analysis_low_risk_defaults_when_no_keywords():
 def test_fallback_local_analysis_gluten_and_lactose_detection():
     product, _ = fallback_local_analysis("Bread", "Wheat Flour, Milk, Salt", [])
     assert product.is_gluten_free is False
-    assert product.is_lactose_free is False
+    assert product.is_vegan is False  # a "Milk" ingredient entry is dairy
+    # ...but a milk entry alone is not evidence of LACTOSE (lactose-free milk exists): unknown, not False.
+    assert product.is_lactose_free is None
+    lactose, _ = fallback_local_analysis("Sweet", "Sugar, Lactose", [])
+    assert lactose.is_lactose_free is False
 
 
 def test_fallback_local_analysis_creates_synthetic_ingredients_for_unknown_tokens():

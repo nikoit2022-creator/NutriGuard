@@ -31,6 +31,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from app.services import dietary_suitability
 from app.services.fallback_analysis import AnalyzedProductData
 from app.services.ocr_normalizer import (
     create_synthetic_ingredient,
@@ -340,20 +341,9 @@ def _extract_allergens_text(payload: dict) -> str:
     raw = payload.get("allergens")
     if not isinstance(raw, list):
         return ""
-    names = []
-    seen: set[str] = set()
-    for item in raw:
-        if not isinstance(item, str):
-            continue
-        cleaned = item.strip()
-        if not cleaned:
-            continue
-        key = cleaned.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        names.append(cleaned)
-    return ", ".join(names)
+    # Placeholder / "no allergens" strings ("None", "N/A", "No allergens")
+    # are dropped, never stored as an absence claim.
+    return ", ".join(dietary_suitability.clean_allergen_names(raw))
 
 
 def parse_gemini_image_json_result(
@@ -407,22 +397,26 @@ def parse_gemini_image_json_result(
         saturated_fat_grams=_safe_nutrition_value(payload, "saturatedFatGrams", _MAX_SATURATED_FAT_GRAMS_PER_100G),
         has_artificial_sweeteners=_as_bool(payload, "hasArtificialSweeteners", False),
         has_preservatives=_as_bool(payload, "hasPreservatives", False),
-        # Safe-default rule: an unknown/missing/null/malformed dietary
-        # flag defaults to False, NEVER True. A positive certification
-        # claim (gluten-free, vegan, halal, ...) is only ever set when
-        # Gemini's response explicitly and reliably states it as a real
-        # JSON boolean `true` -- `_as_bool` already falls back to the
-        # given default for anything that isn't a genuine bool (missing
-        # key, null, a string, a number), so passing `False` here is
-        # the entire fix: "unknown" must never read as a positive
-        # certification (same asymmetry `_to_analyzed_data_from_discovery`
-        # already documents for barcode-discovery dietary flags).
-        is_gluten_free=_as_bool(payload, "isGlutenFree", False),
-        is_lactose_free=_as_bool(payload, "isLactoseFree", False),
-        is_vegan=_as_bool(payload, "isVegan", False),
-        is_vegetarian=_as_bool(payload, "isVegetarian", False),
-        is_halal=_as_bool(payload, "isHalal", False),
-        is_kosher=_as_bool(payload, "isKosher", False),
+        # Tri-state dietary flags (see `app.services.dietary_suitability`):
+        # a flag is `True`/`False` ONLY when Gemini's response states it
+        # as a real JSON boolean; missing/null/string/number/malformed
+        # is UNKNOWN (`None`) -- never silently `False` (which now means
+        # "supported incompatibility") and never `True`. A flag Gemini
+        # left unknown may still be set `False` from positive
+        # incompatibility evidence in the label text / matched curated
+        # ingredients; unknown is never turned into `True`.
+        **dietary_suitability.resolve_flags(
+            {
+                "is_gluten_free": payload.get("isGlutenFree"),
+                "is_lactose_free": payload.get("isLactoseFree"),
+                "is_vegan": payload.get("isVegan"),
+                "is_vegetarian": payload.get("isVegetarian"),
+                "is_halal": payload.get("isHalal"),
+                "is_kosher": payload.get("isKosher"),
+            },
+            raw_text,
+            ingredients,
+        ),
         # Review finding 3: "" (unknown/not stated), never the string
         # "None" as a fabricated confirmed-absence claim -- see
         # `_extract_allergens_text`.

@@ -132,10 +132,11 @@ def test_missing_optional_fields_use_sane_defaults():
     assert data.nova_group == 0
     assert data.sugar_grams == 0.0
     assert data.has_artificial_sweeteners is False
-    # Safe-default rule (review finding 1): an unknown dietary flag must
-    # default to False, never True -- see the dedicated
-    # test_dietary_flag_safe_defaults_* tests below for full coverage.
-    assert data.is_vegan is False
+    # Safe-default rule (review finding 1, amended V14/issue #21): an
+    # unknown dietary flag is unknown (None) -- never True, and no longer
+    # False either (False now means a SUPPORTED incompatibility) -- see
+    # the dedicated test_dietary_flag_safe_default_* tests below.
+    assert data.is_vegan is None
     # Safe-unknown rule (review finding 3): absent allergen data must
     # never be represented as a confirmed "no allergens" claim -- see
     # test_gemini_allergens_* below.
@@ -144,12 +145,14 @@ def test_missing_optional_fields_use_sane_defaults():
 
 # --- Safe dietary-flag defaults (review finding 1) -------------------------
 #
-# isGlutenFree/isLactoseFree/isVegan/isVegetarian/isHalal/isKosher must
-# default to False for anything that isn't an explicit, reliable `true`
-# -- missing key, JSON null, a malformed (non-bool) value, or an
-# explicit `false` all read as False; only an explicit `true` reads as
-# True. A positive dietary/religious certification claim must never be
-# presented on missing or ambiguous data.
+# isGlutenFree/isLactoseFree/isVegan/isVegetarian/isHalal/isKosher are
+# TRI-STATE (V14, issue #21; supersedes the original "default to False"
+# rule): only a real JSON boolean is an explicit value -- `true` reads as
+# True, `false` as False -- and a missing key, JSON null or a malformed
+# (non-bool) value is UNKNOWN (None). `False` now means only "supported
+# incompatibility", so unknown must not be encoded as False; and a
+# positive dietary/religious certification claim must still never be
+# presented on missing or ambiguous data (never True).
 
 _DIETARY_FLAG_KEYS = {
     "isGlutenFree": "is_gluten_free",
@@ -177,20 +180,20 @@ _MISSING = object()
 def test_dietary_flag_safe_default_when_key_missing():
     for json_key, attr in _DIETARY_FLAG_KEYS.items():
         data = _parse_with_single_flag(json_key, _MISSING)
-        assert getattr(data, attr) is False, json_key
+        assert getattr(data, attr) is None, json_key
 
 
 def test_dietary_flag_safe_default_when_null():
     for json_key, attr in _DIETARY_FLAG_KEYS.items():
         data = _parse_with_single_flag(json_key, None)
-        assert getattr(data, attr) is False, json_key
+        assert getattr(data, attr) is None, json_key
 
 
 def test_dietary_flag_safe_default_when_malformed():
     for json_key, attr in _DIETARY_FLAG_KEYS.items():
         for bad_value in ("true", 1, 0, "yes", [], {}):
             data = _parse_with_single_flag(json_key, bad_value)
-            assert getattr(data, attr) is False, (json_key, bad_value)
+            assert getattr(data, attr) is None, (json_key, bad_value)
 
 
 def test_dietary_flag_true_when_explicit():
