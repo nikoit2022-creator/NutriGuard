@@ -115,12 +115,39 @@ def test_resolve_flags_keeps_explicit_true_false_and_unknown():
     assert resolved["is_vegetarian"] is None  # absent -> unknown
 
 
-def test_resolve_flags_never_lets_a_heuristic_override_an_explicit_value():
-    """Explicit source value wins over derived evidence in BOTH directions."""
-    resolved = ds.resolve_flags({"is_vegan": True, "is_halal": False}, raw_text="pork, milk")
-    assert resolved["is_vegan"] is True  # explicit True not overwritten by the "milk"/"pork" hit
+def test_explicit_false_is_authoritative_and_derived_evidence_fills_unknowns():
+    resolved = ds.resolve_flags({"is_halal": False, "is_vegan": None}, raw_text="pork, milk")
     assert resolved["is_halal"] is False
+    assert resolved["is_vegan"] is False  # unknown -> filled from the "pork"/"milk" hit
     assert resolved["is_kosher"] is False  # unknown -> filled from the "pork" hit
+    # explicit False with NO contradicting evidence is kept as stated
+    assert ds.resolve_flags({"is_vegan": False}, raw_text="water")["is_vegan"] is False
+
+
+def test_explicit_true_contradicted_by_incompatibility_evidence_becomes_unknown():
+    """A positive claim that positive evidence contradicts is not 'supported
+    suitability' -- and a conflict is never resolved in favour of the claim.
+    (Reviewer finding F1: a model saying vegan/halal/kosher for 'gelatin, pork fat'.)"""
+    resolved = ds.resolve_flags(
+        {"is_vegan": True, "is_halal": True, "is_kosher": True, "is_gluten_free": True}, raw_text="gelatin, pork fat, sugar"
+    )
+    assert resolved["is_vegan"] is None
+    assert resolved["is_halal"] is None
+    assert resolved["is_kosher"] is None
+    assert resolved["is_gluten_free"] is True  # nothing contradicts it: explicit claim kept
+    # catalog evidence contradicts an explicit true as well, in any language
+    assert ds.resolve_flags({"is_gluten_free": True}, "Пшенично брашно", [_ing(is_gluten=True)])["is_gluten_free"] is None
+
+
+def test_explicit_vegan_beside_explicit_not_vegetarian_is_unknown():
+    resolved = ds.resolve_flags({"is_vegan": True, "is_vegetarian": False}, raw_text="")
+    assert resolved["is_vegetarian"] is False
+    assert resolved["is_vegan"] is None
+
+
+def test_explicit_true_with_no_contradiction_is_still_honored():
+    resolved = ds.resolve_flags({name: True for name in ds.FLAG_NAMES}, raw_text="rice flour, water")
+    assert all(value is True for value in resolved.values())
 
 
 def test_resolve_flags_with_no_arguments_is_all_unknown():
@@ -179,6 +206,21 @@ def test_allergens_known_positive_evidence_is_preserved_and_complete():
 def test_negated_allergen_mentions_are_not_positive_evidence():
     product, _ = fallback_local_analysis("X", "soy-free, milk free", [])
     assert product.allergens_detected == ""
+
+
+@pytest.mark.parametrize(
+    "items, expected",
+    [
+        (["None"], []),
+        (["none", "Milk"], ["Milk"]),
+        (["No allergens", "N/A", "null", "-", "  ", ""], []),
+        (["Allergen-free"], []),
+        (["Milk", "milk", "Soy", 3, None], ["Milk", "Soy"]),
+        (['"None"'], []),
+    ],
+)
+def test_clean_allergen_names_drops_absence_placeholders_and_keeps_real_allergens(items, expected):
+    assert ds.clean_allergen_names(items) == expected
 
 
 # --- unknown never triggers a confirmed-incompatibility warning ---------------

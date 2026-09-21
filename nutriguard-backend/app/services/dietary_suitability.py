@@ -41,10 +41,17 @@ positive evidence, both of which are meaningful in any language mix:
      is exactly why it can only ever produce the conservative
      direction; it is documented in README section 6.
 
-Precedence when combining sources (`resolve_flags`): an explicit source
-value (True/False) always wins; derived incompatibility only fills flags
-the explicit source left unknown. An explicit value is never overwritten
-by a heuristic, and an unknown never becomes True.
+Precedence when combining sources (`resolve_flags`):
+  * an explicit `False` is authoritative (never overwritten);
+  * derived incompatibility fills flags the source left unknown;
+  * an explicit `True` that positive incompatibility evidence CONTRADICTS
+    (e.g. a model says `isVegan: true` for "gelatin, pork fat") is not a
+    supported suitability claim, so it becomes unknown (`None`) -- two
+    conflicting claims support neither; a conflict is never resolved in
+    favour of the positive claim;
+  * "not vegetarian" implies "not vegan": an explicit `is_vegan=True`
+    beside `is_vegetarian=False` is likewise unknown;
+  * an unknown never becomes True.
 """
 import re
 from collections.abc import Iterable, Mapping
@@ -154,7 +161,18 @@ def resolve_flags(
     """
     stated = {name: coerce_tri_state((explicit or {}).get(name)) for name in FLAG_NAMES}
     derived = derive_incompatibilities(raw_text, ingredients)
-    return {name: stated[name] if stated[name] is not None else derived.get(name) for name in FLAG_NAMES}
+    resolved: dict[str, bool | None] = {}
+    for name in FLAG_NAMES:
+        value = stated[name]
+        if value is None:
+            resolved[name] = derived.get(name)
+        elif value is True and derived.get(name) is False:
+            resolved[name] = None  # a positive claim contradicted by evidence is not "supported"
+        else:
+            resolved[name] = value
+    if resolved["is_vegetarian"] is False and resolved["is_vegan"] is True:
+        resolved["is_vegan"] = None  # vegan implies vegetarian; the two explicit claims conflict
+    return resolved
 
 
 _ALLERGEN_KEYWORDS: tuple[tuple[str, str], ...] = (("Soy", "soy"), ("Milk", "milk"))
@@ -172,3 +190,31 @@ def detect_allergens_text(raw_text: str | None) -> str:
     """
     lower = (raw_text or "").lower()
     return ", ".join(name for name, keyword in _ALLERGEN_KEYWORDS if keyword_present(lower, keyword))
+
+
+# Strings a provider/model sometimes sends INSTEAD of an allergen name to
+# mean "no allergens" (or nothing at all). None of them is an allergen and
+# none may be stored as a confirmed-absence claim.
+_NO_ALLERGEN_PHRASES = {
+    "no allergens", "no allergen", "no known allergens", "allergen free", "allergen-free",
+    "none declared", "none reported", "not applicable",
+}
+_PLACEHOLDER_ALLERGEN_NAMES = {"", "null", "none", "n/a", "na", "nil", "undefined", "-", "unknown"}
+
+
+def clean_allergen_names(items: Iterable[Any]) -> list[str]:
+    """The positive allergen names in `items`: strings that are not blank,
+    not a placeholder ("None", "N/A", "null", ...) and not a "no allergens"
+    phrase, de-duplicated case-insensitively in first-seen order."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        cleaned = item.strip()
+        key = cleaned.strip("\"'").strip().lower()
+        if key in _PLACEHOLDER_ALLERGEN_NAMES or key in _NO_ALLERGEN_PHRASES or key in seen:
+            continue
+        seen.add(key)
+        names.append(cleaned)
+    return names

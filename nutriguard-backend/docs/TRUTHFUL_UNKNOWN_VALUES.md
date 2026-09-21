@@ -84,12 +84,30 @@ Implemented in `app/services/dietary_suitability.py` (pure, unit-tested).
   "coconut milk" → not vegan): that is why it can only ever produce the
   conservative direction.
 * **`null` otherwise** — including Bulgarian, mixed-language, foreign-language,
-  empty and truncated text. An explicit source value always wins over derived
-  evidence; derived evidence only fills what the source left unknown.
+  empty and truncated text.
+* **Precedence when sources disagree** (`resolve_flags`): an explicit `false` is
+  authoritative; derived evidence fills only what the source left unknown; an
+  explicit `true` that positive incompatibility evidence *contradicts* (e.g. a
+  model says `isVegan: true` for "gelatin, pork fat", or a curated ingredient
+  says it contains gluten) becomes `null` — two conflicting claims support
+  neither, and a conflict is never resolved in favour of the positive claim;
+  explicit `isVegan=true` beside `isVegetarian=false` is likewise `null`. (Cost:
+  a plant product whose text trips the over-reporting keyword heuristic, e.g.
+  "coconut milk", loses its explicit `true` and reads as unknown.)
 * **Merges never erase evidence with an unknown**: barcode+label enrichment and
   higher-confidence rediscovery overwrite a flag/allergen list only when the
   incoming value is explicit/known; an incoming `null`/`""` leaves the supported
   existing value alone. A newer explicit value does replace an older one.
+  *Known trade-off (review F3):* a label re-scan replaces the stored ingredient
+  text, but an unknown incoming flag leaves an older supported flag (e.g. a
+  provider's `isVegan: true`) untouched, so a flag can describe evidence that is
+  no longer the stored text. This follows the owner's rule ("do not overwrite
+  supported existing evidence with an unknown incoming value"); any *explicit*
+  contradicting value from the new scan does replace it. Resetting `true`s on
+  every text replacement is a possible follow-up if the owner prefers it.
+* **Allergen placeholders**: Gemini's and Open Food Facts' allergen lists are
+  filtered (`clean_allergen_names`) so "None", "N/A", "null", "No allergens",
+  `en:none` etc. are never stored as allergens.
 * **Gemini label extraction**: only real JSON booleans count (`"true"`, `1`,
   missing, `null` → unknown). The prompt now asks for `null` when unknown and for
   `false` only on explicit contradiction (previously it asked for `false` on
@@ -122,7 +140,15 @@ round-tripped on real PostgreSQL 16):
 | `health_score` | the product `is_verified` (a genuine `0` survives) | reset to `NULL` (was only a placeholder) |
 | `allergens_detected` `"None"`/`"N/A"`/`"null"`/… | never (placeholder set) → `""` | positive allergen names untouched |
 
-Limitations: the SQL keyword re-check does not replicate the runtime negation
+Known limitations (documented, not fixable from stored data): (a) `source` is
+only rewritten when an enrichment newly *completes* an evidence group, so a
+provider-sourced row whose flags were later overwritten by an old-code label
+scan that completed no group keeps `source = open_food_facts` and its guessed
+`true`s survive as "provider evidence"; (b) a verified row's stored score is kept,
+so a placeholder `0` left by the old code between the discovery commit and the
+first scoring write (a request that died in that window) would survive — there is
+no evidence such rows exist, but the surviving `0`s are not *proven* genuine.
+Also: the SQL keyword re-check does not replicate the runtime negation
 guard, so a legacy `false` whose only hit is a negated phrase is preserved rather
 than destroyed; a provider's explicit `false` with no surviving keyword is reset
 to unknown (a rediscovery/label re-scan restores it). Trustworthy data is not

@@ -1414,7 +1414,8 @@ than silently resolved:
       top-level `healthScore` on every path); a genuine computed `0` is preserved.
       `allergensDetected` stays a `string`, but `""` = none detected **or**
       unknown (never an absence guarantee) and the literal `"None"` is no longer
-      produced. The dietary warnings fire only on an explicit `false`.
+      produced. Gemini/Open Food Facts
+      placeholder strings ("None", "N/A", `en:none`) are filtered too. The dietary warnings fire only on an explicit `false`.
     - **Why.** Missing/unknown data was being encoded as `true` (English-only
       keyword *absence* over Bulgarian/mixed/empty text), as `false` (provider/
       model defaults, so `false` meant both "unknown" and "unsuitable"), as `0`

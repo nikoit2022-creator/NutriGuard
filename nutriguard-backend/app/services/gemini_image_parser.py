@@ -341,20 +341,9 @@ def _extract_allergens_text(payload: dict) -> str:
     raw = payload.get("allergens")
     if not isinstance(raw, list):
         return ""
-    names = []
-    seen: set[str] = set()
-    for item in raw:
-        if not isinstance(item, str):
-            continue
-        cleaned = item.strip()
-        if not cleaned:
-            continue
-        key = cleaned.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        names.append(cleaned)
-    return ", ".join(names)
+    # Placeholder / "no allergens" strings ("None", "N/A", "No allergens")
+    # are dropped, never stored as an absence claim.
+    return ", ".join(dietary_suitability.clean_allergen_names(raw))
 
 
 def parse_gemini_image_json_result(
