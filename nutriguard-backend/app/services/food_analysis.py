@@ -1488,6 +1488,11 @@ def _translation_diagnostic_fields(
         "label_translation_used": label_result.translation_used,
         "label_detected_language": label_result.detected_language,
         "ingredient_translation_summary": ingredient_translation_summary,
+        # INTERNAL closed-vocabulary reasons (see
+        # `app.services.translation_rejection`) -- set only for the
+        # non-strict whole-label `translation_unreliable_fallback`.
+        "label_translation_failure_reason": label_result.translation_failure_reason,
+        "label_translation_provider_failure_category": label_result.translation_provider_failure_category,
     }
 
 

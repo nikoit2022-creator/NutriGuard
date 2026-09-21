@@ -72,6 +72,7 @@ from app.services.ingredient_segmentation import detect_ambiguous_segmentation
 from app.services.ingredient_translation import translate_ingredient_tokens
 from app.services.language_detection import detect_language
 from app.services.ocr_normalizer import SyntheticIngredient, create_synthetic_ingredient
+from app.services.translation_rejection import count_pairs, merge_count_pairs
 
 _logger = structlog.get_logger(__name__)
 
@@ -1039,12 +1040,36 @@ class IngredientTranslationSummary:
     detected LANGUAGE CODES, never original or translated ingredient
     text -- so it is always safe to fold into request diagnostics
     without violating `app.core.scan_diagnostics`'s no-raw-content rule.
+
+    Semantics (kept distinct so nothing is double-counted or mislabeled):
+
+      - `attempted`/`reliable`/`unreliable` count ENTRIES (targets),
+        summed across this request's passes; `reliable + unreliable ==
+        attempted`. A target is not re-attempted by a later pass in
+        practice (a rejected entry is persisted -- with an alias -- by
+        the first pass, so the second pass finds it already known).
+      - `batches` counts provider CALLS (one batched call per pass that
+        had targets); each is classified by its own outcome:
+        `failed_batches` (no entry of the batch was reliable),
+        `partial_batches` (some reliable, some rejected), or neither
+        (every entry reliable). Batch counts are attempts/partials;
+        the FINAL request outcome is derived from the entry counts (see
+        `app.api.v1.scan._translation_fields`).
+      - `rejection_counts`/`provider_failure_counts` are sorted
+        `(closed-vocabulary key, count)` pairs (see
+        `app.services.translation_rejection`) over the REJECTED entries
+        only -- `sum(rejection_counts) == unreliable`.
     """
 
     attempted: int = 0
     reliable: int = 0
     unreliable: int = 0
     detected_languages: tuple[str, ...] = ()
+    batches: int = 0
+    partial_batches: int = 0
+    failed_batches: int = 0
+    rejection_counts: tuple[tuple[str, int], ...] = ()
+    provider_failure_counts: tuple[tuple[str, int], ...] = ()
 
     def merged_with(self, other: "IngredientTranslationSummary") -> "IngredientTranslationSummary":
         """`food_analysis`'s finalize functions call `materialize_ingredients`
@@ -1065,6 +1090,13 @@ class IngredientTranslationSummary:
             detected_languages=tuple(
                 sorted(set(self.detected_languages) | set(other.detected_languages))
             )[:_MAX_DETECTED_LANGUAGES],
+            batches=self.batches + other.batches,
+            partial_batches=self.partial_batches + other.partial_batches,
+            failed_batches=self.failed_batches + other.failed_batches,
+            rejection_counts=merge_count_pairs(self.rejection_counts, other.rejection_counts),
+            provider_failure_counts=merge_count_pairs(
+                self.provider_failure_counts, other.provider_failure_counts
+            ),
         )
 
 
@@ -1180,6 +1212,8 @@ async def _resolve_ingredient_languages(
     reliable_count = 0
     unreliable_count = 0
     detected_languages: set[str] = set()
+    rejection_counts: dict[str, int] = {}
+    provider_failure_counts: dict[str, int] = {}
     for (idx, ing, lang), result in zip(to_translate, translations):
         # Code-review fix: normalize through the finite ISO 639-1
         # allowlist BEFORE this ever reaches a diagnostic field -- see
@@ -1206,12 +1240,27 @@ async def _resolve_ingredient_languages(
                 source_language=result.detected_language or lang,
             )
             unreliable_count += 1
+            # Internal reason only (never persisted, never public); a
+            # translator that reported none is bucketed "unspecified" so
+            # `sum(rejection_counts) == unreliable` always holds.
+            reason_key = (
+                result.rejection_reason.value if result.rejection_reason is not None else "unspecified"
+            )
+            rejection_counts[reason_key] = rejection_counts.get(reason_key, 0) + 1
+            if result.provider_failure_category is not None:
+                category_key = result.provider_failure_category.value
+                provider_failure_counts[category_key] = provider_failure_counts.get(category_key, 0) + 1
 
     summary = IngredientTranslationSummary(
         attempted=len(to_translate),
         reliable=reliable_count,
         unreliable=unreliable_count,
         detected_languages=tuple(sorted(detected_languages))[:_MAX_DETECTED_LANGUAGES],
+        batches=1,
+        partial_batches=1 if reliable_count and unreliable_count else 0,
+        failed_batches=1 if unreliable_count and not reliable_count else 0,
+        rejection_counts=count_pairs(rejection_counts),
+        provider_failure_counts=count_pairs(provider_failure_counts),
     )
     return prepared, translation_occurred, summary
 
