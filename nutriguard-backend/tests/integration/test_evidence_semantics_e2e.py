@@ -64,6 +64,9 @@ def _catalog_row(id_: str, name: str, **overrides) -> Ingredient:
     "text",
     [
         "Coconut milk (58%), water, guar gum",
+        "Milk (plant-based), rice flour",  # PR #22 owner follow-up: a qualifier stays attached to its parent
+        "Rice flour, milk (coconut), sugar",
+        "Ingredients: sugar, milk (plant-based), salt",
         "Oat milk, almond milk, sea salt",
         "Gluten-free oat flour, sugar",
         "Free from milk, free from gluten. Water, sugar",

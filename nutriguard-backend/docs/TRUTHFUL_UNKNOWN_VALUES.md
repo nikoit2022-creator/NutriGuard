@@ -129,7 +129,31 @@ Implemented in `app/services/dietary_suitability.py` (pure, unit-tested).
      occurrences globally. Also not ingredient occurrences: the bare nouns before a
      trailing `free` (`Wheat, gluten and dairy free`, `Milk/lactose free`), a
      `key: value` line (`Gluten: none`, `Lactose: free`), and an entry followed by a
-     quantity qualifier (`Gluten (<20 ppm)`, `Milk (0%)`). Abbreviation periods
+     quantity qualifier (`Gluten (<20 ppm)`, `Milk (0%)`). **A parenthesis group
+     right after an entry is a qualifier of that entry and stays attached to it**
+     (PR #22 owner follow-up): `Milk (plant-based)`, `Milk (coconut)`, `Milk
+     (dairy-free)`, `Milk (coconut, almond)` (several qualifiers), `Milk
+     (plant-based (oat))` (nested) leave the identity uncertain, so the bare
+     `milk` is *not* an occurrence -- no flag, no `Milk` allergen, no trusted-row
+     match -- and an explicit `isVegan: true` beside it is not contradicted. The
+     parent keeps its identity only for a closed list of identity-*preserving*
+     forms: a quantity that is *only* a number, unit or fat/protein word (`Milk
+     (3.5% fat)`, `Milk (250 ml)`; `Milk (100% plant-based)` and `milk (3% coconut)`
+     are not quantities), a precautionary statement (`Wheat flour (may contain
+     traces of milk)`), an additive list introduced by
+     `with|including|plus|added|containing|fortified/enriched with` (`Wheat flour
+     (with calcium, iron, niacin)`), an E-number synonym (`Cochineal (E120)`) and a
+     qualifier that composes with the parent into a known identity **of the same
+     family** (`Milk (skimmed)` -> `skimmed milk`, `Gelatin (bovine)`; `milk
+     (sugar)` does *not* become `milk sugar`), whereupon the consumed qualifier is
+     not read again (`soy (milk)` is soy milk: `Soy`, not `Milk`). Several adjacent
+     groups (`milk (3%) (plant-based)`) qualify the same entry and any uncertain
+     one leaves it uncertain. This is deliberately *not* a plant-word blacklist:
+     whatever is not recognised is unknown. The group's own entries are still
+     read, so a genuine compound-ingredient sublist (`Chocolate (sugar, whole milk
+     powder)`, `Emulsifier (soy lecithin)`) keeps its evidence, while a qualified
+     entry inside it (`Chocolate (milk (plant-based), sugar)`) stays withheld.
+     Abbreviation periods
      (`e.g.`, `max.`) and decimals do not end a sentence. The text examined is
      bounded (100,000 characters; evidence beyond it is ignored, never invented) and
      every step is linear -- an earlier draft had a quadratic regex that stalled a
@@ -375,9 +399,16 @@ up as `languageRejected` in a dry run — an existing limitation, not changed he
   yields no catalog evidence either -- unknown, the conservative direction.)
 * Known imprecision of the entry rules (all err to *unknown*, none to a claim):
   a precautionary/negating phrase suppresses the rest of its sentence (`salt without
-  additives, wheat flour` loses `wheat flour`); a parenthetical qualifier after an
-  entry is not interpreted (`Milk (plant-based)` still reads as milk -- rare; the
-  qualifier list would be an open-ended blacklist); numbered lists (`1. Milk 2. Wheat
+  additives, wheat flour` loses `wheat flour`); a parenthetical qualifier that is not
+  recognised as identity-preserving withholds its parent (`Milk (plant-based)`,
+  `Milk (organic)`, `Wheat flour (calcium carbonate, iron)` without a `with`
+  introducer, `Milk (3%, organic)` are unknown -- over-suppression, never a
+  claim); a qualifier that reads as a *parent* rather than a sublist is
+  ambiguous in the other direction: the entries inside a group are still read, so
+  `oat (milk)` / `sugar (milk)` (a food name qualified by `milk`) yields the child
+  `milk` -- structurally identical to `Emulsifier (soy lecithin)`, which must keep
+  its evidence, and not separable without a lexicon; `milk (with coconut)` is read
+  as milk *plus* coconut (an additive list); numbered lists (`1. Milk 2. Wheat
   flour`) are not split; non-English text yields nothing; there is no
   precautionary-allergen ("may contain") channel on the wire.
 * `gemini_call_failed` logs `str(exc)` of the transport error in the ordinary

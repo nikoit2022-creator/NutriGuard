@@ -1460,7 +1460,12 @@ than silently resolved:
       where a keyword hit used to (`milk chocolate`, `buttermilk`, `wheat starch`
       and non-English text are unknown). Migration `d7e8f9a0b1c2` was amended in
       place (not yet applied beyond disposable databases -- verify with `alembic
-      current` before deploying). Alternatives rejected: a plant-milk blacklist
+      current` before deploying). A parenthetical qualifier stays attached to
+      its parent (`Milk (plant-based)`, `Milk (coconut)` are not a `milk` entry,
+      in the resolver and in the frozen migration copy); only quantity,
+      precautionary, `with ...` additive and identity-composing qualifiers
+      (`Milk (3%)`, `Milk (skimmed)`) keep the parent's identity, and a genuine
+      sublist keeps its own entries. Alternatives rejected: a plant-milk blacklist
       (open-ended, and the same substring mistake), keeping the substring hits as
       "documented heuristics" (incompatible with `false` = supported), a
       corrective second migration (cannot restore values the first policy reset;

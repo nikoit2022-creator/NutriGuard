@@ -99,7 +99,8 @@ def _seed_pre_migration_rows(sync_url) -> None:
 
     linked_ids = {"off-verified": "e951_aspartame", "catalog-supported": "test_trusted_gluten",
                   "catalog-untrusted": "test_untrusted_gluten", "catalog-gemini": "test_gemini_gluten",
-                  "catalog-substring": "test_milk_row", "catalog-milk-real": "test_milk_row"}
+                  "catalog-substring": "test_milk_row", "catalog-milk-real": "test_milk_row",
+                  "qualified-catalog": "test_milk_row"}
 
     def product(barcode, source, text, verified, score, allergens="None", **flags):
         values = {flag: False for flag in FLAGS}
@@ -154,6 +155,12 @@ def _seed_pre_migration_rows(sync_url) -> None:
             product("catalog-substring", "label_scan", "Coconut milk, water", False, 0),  # linked to trusted "Milk" by substring
             product("catalog-milk-real", "label_scan", "Water, Milk", False, 0),
             product("wrapped-negated", "label_scan", "Gluten-\nfree oat flour. May contain\nmilk, soy", False, 0),
+            # --- PR #22 owner follow-up: a qualifier stays attached to its parent -----------------------------
+            product("qualified-plant", "label_scan", "Ingredients: sugar, milk (plant-based), salt", False, 0),
+            product("qualified-provider-true", "open_food_facts", "Milk (coconut)", False, 0, is_vegan=True),
+            product("qualified-catalog", "label_scan", "Milk (plant-based), water", False, 0),  # trusted "Milk" row linked
+            product("qualified-quantity", "label_scan", "Milk (3%), sugar", False, 0),
+            product("qualified-sublist", "label_scan", "Chocolate (sugar, whole milk powder)", False, 0),
         ])
         session.flush()
         session.add(ProductSource(barcode="off-verified", provider="open_food_facts", confidence=0.75))
@@ -212,6 +219,12 @@ def _assert_review_policy(rows: dict) -> None:
     assert _known(rows["catalog-substring"]) == {}  # "coconut milk" reaches the trusted "Milk" row only by substring
     assert _known(rows["catalog-milk-real"]) == {"is_lactose_free": False, "is_vegan": False}  # an exact "Milk" entry
     assert _known(rows["wrapped-negated"]) == {}  # line-wrapped "gluten-free" / "may contain" are not ingredients
+    # PR #22 owner follow-up: "milk (plant-based)" is not a dairy entry -- not from the text, not via a trusted "Milk" row
+    assert _known(rows["qualified-plant"]) == {}
+    assert _known(rows["qualified-provider-true"]) == {"is_vegan": True}  # explicit provider claim not erased by it
+    assert _known(rows["qualified-catalog"]) == {}
+    assert _known(rows["qualified-quantity"]) == {"is_vegan": False}  # an ordinary quantity qualifier keeps the identity
+    assert _known(rows["qualified-sublist"]) == {"is_vegan": False}  # a genuine compound sublist keeps its evidence
 
 
 def _assert_links_and_text_preserved(sync_url, pre: dict) -> None:
@@ -245,7 +258,7 @@ def test_upgrade_downgrade_upgrade_round_trip_with_representative_data(fresh_dat
     other_tables = ("ingredients", "ingredient_aliases", "scan_history", "product_sources", "users")
     counts_before = {table: _scalar(sync_url, f"SELECT COUNT(*) FROM {table}") for table in other_tables}
     assert all(count >= 1 for count in counts_before.values()), counts_before
-    assert _scalar(sync_url, "SELECT COUNT(*) FROM products") == 15
+    assert _scalar(sync_url, "SELECT COUNT(*) FROM products") == 20
     pre = _products(sync_url)
 
     # --- upgrade -----------------------------------------------------------
@@ -310,4 +323,4 @@ def test_upgrade_downgrade_upgrade_round_trip_with_representative_data(fresh_dat
     assert again["post-upgrade"]["health_score"] is None
     _assert_review_policy(again)  # the actual policy, re-run on the round-tripped (backfilled) data
     _assert_links_and_text_preserved(sync_url, pre)
-    assert _scalar(sync_url, "SELECT COUNT(*) FROM products") == 16
+    assert _scalar(sync_url, "SELECT COUNT(*) FROM products") == 21

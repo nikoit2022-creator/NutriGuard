@@ -44,7 +44,11 @@ migration never imports application code):
     powder", "whey", "lactose", "pork", "gelatin", "bacon", "wheat flour",
     "gluten", ...), outside any precautionary/negating header ("may
     contain:", "free from:", "produced in a facility that handles:"),
-    whose scope ends at the sentence / parenthesis group -- so a genuine
+    whose scope ends at the sentence / parenthesis group (a qualifier in
+    parentheses stays attached to its parent: "milk (plant-based)" /
+    "milk (coconut)" do not count as "milk", whereas quantity, precautionary,
+    "with ..." additive and identity-composing qualifiers such as "milk (3%)"
+    or "milk (skimmed)" do; the group's own entries are still read) -- so a genuine
     "wheat flour" next to "gluten-free oats" is kept and "coconut milk",
     "gluten-free" (also line-wrapped), "free from milk", "wheat, gluten and
     dairy free", "Gluten: none", "without wheat", "buttermilk", Bulgarian
@@ -129,9 +133,10 @@ _PLACEHOLDER_ALLERGEN_VALUES = ("", "null", "none", "n/a", "na", "nil", "undefin
 # --- frozen evidence rules ---------------------------------------------------
 # A FROZEN copy of the ingredient-entry identity rules in
 # `app.services.dietary_suitability` at the time of this revision (verbatim,
-# including its tokenizer, scope handling and the length bound). It must not
-# track later changes to application code: a historical migration keeps the
-# meaning it shipped with.
+# including its tokenizer, scope handling, qualifier attachment and the length
+# bound). It must not track later changes to application code: a historical
+# migration keeps the meaning it shipped with. (The qualifier-attachment rule
+# was added before this revision was released, in the PR #22 owner follow-up.)
 # Ingredient-entry identities (FROZEN copy of app.services.dietary_suitability at this revision) (matched with `fullmatch` against ONE
 # normalized ingredient entry, never searched inside a longer text). Each
 # is a food that is animal-derived / gluten-containing / soy by definition
@@ -201,7 +206,29 @@ _PERCENT_RE = re.compile(r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*%")
 _ZERO_RE = re.compile(r"0+(?:[.,]0+)?")
 _NEWLINE_RE = re.compile(r"[\r\n]+")
 _DASH_RE = re.compile(r"[-\u2010-\u2015_]+")
-_DECORATION_RE = re.compile(r"[*\u2020\u2021\"\u201c\u201d`]")
+_QTY = "\ue000"  # private marker left by `_prepare` where a non-zero percentage was removed
+_DECORATION_RE = re.compile(r"[*\u2020\u2021\"\u201c\u201d`\ue000]")
+# A parenthesis group attached to an entry ("Milk (plant-based)") is a QUALIFIER of that entry. The entry keeps its
+# own identity only when the group is positively recognised as identity-preserving: a quantity ("3.5% fat", "250 ml"),
+# a precautionary statement ("may contain traces of ..."), an ADDITIVE list ("with calcium, iron") or a qualifier that
+# composes with the entry into a known identity ("milk (skimmed)" -> "skimmed milk"). Anything else -- "(plant-based)",
+# "(coconut)", "(dairy-free)", several or nested qualifiers -- leaves the identity uncertain, so the bare parent is NOT an
+# occurrence of that ingredient. Deliberately a closed list of identity-PRESERVING forms, never a list of plant words:
+# whatever it does not recognise is unknown. The group's own entries are still read (a genuine sublist such as
+# "Chocolate (sugar, milk powder)" keeps its evidence).
+_QUANTITY_CHUNK_RE = re.compile(
+    r"(?:(?:min|max|approx|ca|about|at least|up to)\s+)*[<>\u2264\u2265~]?\s*\d[\d.,]*"
+    r"(?:\s*(?:mg|\u00b5g|ug|g|kg|ml|cl|dl|l|ppm|ppb|kcal|kj|fat|proteins?|solids|dry matter|by weight|total))*"
+)
+# "Cochineal (E120)": an E-number after a name is a synonym of it, not a qualifier of its identity.
+_E_NUMBER_CHUNK_RE = re.compile(r"e\s?\d{3,4}[a-z]?")
+_ADDITIVE_INTRO_RE = re.compile(
+    r"^(?:with|including|incl|plus|added|containing|fortified\s+with|enriched\s+with)\b(?!\s+(?:no|non|none|not|neither)\b)"
+)
+_PRECAUTION_RE = re.compile(
+    r"\b(?:may|might|could)\s+(?:also\s+)?contain\b|\btraces?\s+of\b|\bcross\s+contact\b"
+    r"|\b(?:facility|factory|premises|equipment|bakery|production\s+line)\b"
+)
 _LEADING_FILLER_RE = re.compile(r"^(?:(?:and|&)\s+)?(?:(?:ingredients?|contains?)\s+)?")
 
 
@@ -223,11 +250,11 @@ def _normalize_entry(chunk: str) -> str:
 def _percent_replacement(match: "re.Match[str]") -> str:
     # A real quantity ("milk 3%") is dropped; a zero quantity ("milk (0%)") is kept as "0"
     # so the entry is recognised as a nutrient/claim line.
-    return " 0 " if _ZERO_RE.fullmatch(match.group(1)) else " "
+    return " 0 " if _ZERO_RE.fullmatch(match.group(1)) else f" {_QTY} "
 
 
 def _prepare(raw_text: str) -> str:
-    text = raw_text[:_MAX_TEXT_CHARS].lower().replace("\u2019", "'")
+    text = raw_text[:_MAX_TEXT_CHARS].lower().replace("\u2019", "'").replace("\uff05", "%").replace(_QTY, " ")
     text = _NEWLINE_RE.sub(" ", text)  # a line wrap ("gluten-<newline>free") is whitespace, never a sentence/scope boundary
     text = _PERCENT_RE.sub(_percent_replacement, text)
     text = re.sub(r"\be\.g\.?", "eg", text)  # abbreviations must not end a sentence (and its scope)
@@ -235,8 +262,21 @@ def _prepare(raw_text: str) -> str:
     return re.sub(r"\b(?:max|min|approx|ca|etc|vs)\.", lambda m: m.group(0)[:-1], text)
 
 
+class _Group:
+    """A parenthesis group: its direct chunks (raw, so a quantity marker survives), the entries read from them, whether
+    it contains a nested group, and the entry it qualifies (if any)."""
+
+    __slots__ = ("direct", "children", "nested", "owner")
+
+    def __init__(self, owner: "_Record | None") -> None:
+        self.direct: list[str] = []
+        self.children: list[_Record] = []
+        self.nested = False
+        self.owner = owner
+
+
 class _Record:
-    __slots__ = ("chunk", "depth", "delimiter", "negated", "ends_free")
+    __slots__ = ("chunk", "depth", "delimiter", "negated", "ends_free", "groups", "consumed")
 
     def __init__(self, chunk: str, depth: int, delimiter: str, negated: bool) -> None:
         self.chunk = chunk
@@ -244,6 +284,54 @@ class _Record:
         self.delimiter = delimiter
         self.negated = negated
         self.ends_free = bool(_FREE_END_RE.search(chunk))
+        self.groups: list[_Group] = []  # every parenthesis group directly after the entry ("milk (3%) (coconut)")
+        self.consumed = False  # read as (part of) the qualifier of an earlier entry, so not an entry of its own
+
+
+def _identity_rows(entry: str) -> frozenset[int]:
+    return frozenset(index for index, (pattern, _, _) in enumerate(_ENTRY_EVIDENCE) if pattern.fullmatch(entry))
+
+
+def _is_quantity(raw: str) -> bool:
+    """A chunk that is ONLY a quantity: a number (a removed percentage counts as one), optionally a unit or a
+    fat/protein word. "3.5% fat" is; "100% plant-based" and "3% coconut" are not."""
+    return bool(_QUANTITY_CHUNK_RE.fullmatch(_normalize_entry(raw.replace(_QTY, " 0 "))))
+
+
+def _qualifier_entries(record: _Record, part: str, single_part: bool) -> tuple[str, ...]:
+    """The entries an ingredient `part` stands for, given the qualifier group(s) attached to it: the part itself when
+    its identity is preserved, the composed identity ("skimmed milk"; only within the part's own identity family, so
+    "milk (sugar)" is not "milk sugar"), or only the opaque joined form ("milk (plant based)") when the qualifier
+    leaves the identity uncertain."""
+    groups = record.groups
+    if not groups:
+        return (part,)
+    qualifiers: list[str] = []
+    for group in groups:
+        for raw in group.direct:
+            chunk = _normalize_entry(raw)
+            if (
+                chunk
+                and not _is_quantity(raw)
+                and not _PRECAUTION_RE.search(chunk)
+                and not _E_NUMBER_CHUNK_RE.fullmatch(chunk)
+            ):
+                qualifiers.append(chunk)
+    nested = any(group.nested for group in groups)
+    if len(groups) == 1 and qualifiers and _ADDITIVE_INTRO_RE.match(qualifiers[0]):
+        return (part,)
+    if not qualifiers:
+        return (part,) if not nested else ()
+    if len(qualifiers) == 1 and not nested and single_part:
+        base = _identity_rows(part)
+        for composed in (f"{qualifiers[0]} {part}", f"{part} {qualifiers[0]}"):
+            if base & _identity_rows(composed):
+                for group in groups:  # the qualifier is consumed by the composed identity ("soy (milk)" is not milk)
+                    for child in group.children:
+                        child.consumed = True
+                return (composed,)
+        return (f"{part} ({qualifiers[0]})",)
+    return ()
 
 
 def _sentence_entries(sentence: str) -> Iterator[str]:
@@ -252,20 +340,34 @@ def _sentence_entries(sentence: str) -> Iterator[str]:
     depth = 0
     scope_depth: int | None = None
     previous = ""
+    groups: list[_Group] = []  # the open parenthesis groups, innermost last
+    owner: _Record | None = None  # the entry a "(" right now would qualify
     for index, token in enumerate(tokens):
         if token in ("(", "["):
             depth += 1
+            group = _Group(owner)
+            if owner is not None:
+                owner.groups.append(group)
+            if groups:
+                groups[-1].nested = True
+            groups.append(group)
+            owner = None
             continue
         if token in (")", "]"):
             depth = max(depth - 1, 0)
+            owner = groups.pop().owner if groups else None  # a second adjacent group qualifies the same entry
             if scope_depth is not None and depth < scope_depth:
                 scope_depth = None
             continue
         if token in (",", ";", ":", "/", "|"):
+            owner = None
             continue
         chunk = _normalize_entry(token)
         if not chunk:
             continue
+        owner = None
+        if groups:
+            groups[-1].direct.append(token)
         opens_scope = _SCOPE_MARKER_RE.search(chunk) or (
             previous in _CONTAINS_HEADERS and _NEGATION_START_RE.match(chunk)
         )
@@ -279,7 +381,11 @@ def _sentence_entries(sentence: str) -> Iterator[str]:
         quantified = delimiter in ("(", "[") and index + 2 < len(tokens) and _QUANTITY_QUALIFIER_RE.match(tokens[index + 2])
         label = delimiter == ":"  # "Gluten: none", "Lactose: 0.0 g" -- a key, not an ingredient
         negated = bool(quantified or label or _NEGATION_START_RE.match(chunk) or _FREE_END_RE.search(chunk))
-        records.append(_Record(chunk, depth, delimiter, negated))
+        record = _Record(chunk, depth, delimiter, negated)
+        records.append(record)
+        if groups:
+            groups[-1].children.append(record)
+        owner = record
 
     # "Wheat, gluten and dairy free": the trailing "free" negates the bare nouns before it.
     for position, record in enumerate(records):
@@ -297,11 +403,11 @@ def _sentence_entries(sentence: str) -> Iterator[str]:
             before -= 1
 
     for record in records:
-        if record.negated:
+        if record.negated or record.consumed:
             continue
-        for part in _AND_SPLIT_RE.split(_LEADING_FILLER_RE.sub("", record.chunk, count=1)):
-            if part:
-                yield part
+        parts = [part for part in _AND_SPLIT_RE.split(_LEADING_FILLER_RE.sub("", record.chunk, count=1)) if part]
+        for part in parts:
+            yield from _qualifier_entries(record, part, len(parts) == 1)
 
 
 def _evidential_entries(raw_text: str) -> Iterator[str]:
