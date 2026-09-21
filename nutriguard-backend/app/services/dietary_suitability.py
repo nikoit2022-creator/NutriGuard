@@ -12,34 +12,46 @@ Contract (the same one `Product`/`ProductOut` document): for every one of
             actually states it -- a provider's structured tag, or a
             structured label extraction)
 
-The ABSENCE of a keyword is never evidence of suitability. Earlier code
+The ABSENCE of a keyword is never evidence of suitability, and the
+PRESENCE of a substring is never evidence of an ingredient. Earlier code
 computed e.g. `is_vegan = not ("pork" in text or "gelatin" in text or
-"milk" in text)` over the raw label text: an English-only substring
-check that returned `True` ("suitable") for Bulgarian, mixed-language,
-foreign-language, empty or truncated text simply because none of the
-English words happened to appear. Adding more keywords would not fix
-that -- it would only move the blind spot. This module therefore NEVER
-derives `True` from text or from a matched ingredient list: a named
-ingredient is not sufficient to infer suitability (lactose status,
-certification, manufacturing cross-contact, source-dependent additives
-all matter). `True` only ever enters through an EXPLICIT source value
-(see `resolve_flags`'s `explicit` argument).
+"milk" in text)` (suitable because no English word matched) and later
+`"milk" in text` -> not vegan / not lactose-free / allergen "Milk"
+(so "coconut milk" was a dairy product). Both are the same mistake: a
+mention is not an identity. This module therefore NEVER derives `True`
+from text or from a matched ingredient list, and derives `False` / a
+positive allergen from raw text ONLY through the two narrow routes below.
 
-What this module CAN derive is `False`, from two independent kinds of
-positive evidence, both of which are meaningful in any language mix:
+Evidence that may support `False` (or a positive allergen):
 
-  1. Curated catalog evidence: a matched ingredient whose own (already
-     tri-state) flag explicitly says it contains gluten/lactose or is
-     not vegan/vegetarian/halal/kosher. Ingredient flags of `None`
-     (every OCR-only/synthetic ingredient) contribute nothing.
-  2. The legacy English keyword hits (`_INCOMPATIBILITY_KEYWORDS`,
-     unchanged from the previous heuristic -- NOT extended), now treated
-     purely as an incompatibility signal, with an explicit-negation
-     guard so "gluten-free" / "milk free" / "no alcohol" are not read as
-     the presence of the thing being negated. A keyword hit is a
-     heuristic (it can over-report, e.g. a plant "coconut milk"), which
-     is exactly why it can only ever produce the conservative
-     direction; it is documented in README section 6.
+  1. Explicit source values (a provider's structured tags, a structured
+     label extraction's JSON booleans) -- see `resolve_flags`'s `explicit`.
+  2. Trusted catalog evidence: a matched ingredient row that is itself
+     evidence -- `VERIFIED` and from a curated/regulatory source (see
+     `_is_trusted_catalog_row`) -- that an exact ingredient ENTRY of the text
+     names (common/scientific name or E-number; the upstream matcher's
+     substring link "coconut milk" -> "Milk" is not identity), and whose own
+     tri-state flag says it contains gluten/lactose or is not vegan/
+     vegetarian/halal/kosher. An UNVERIFIED / OCR- or Gemini-observed /
+     unknown-provenance row contributes nothing, whatever booleans it holds.
+  3. Raw-text ENTRY IDENTITY (`derive_text_evidence`): the text is split
+     into ingredient entries and an entry counts only when it is EXACTLY a
+     small, closed set of unambiguous ingredient identities ("milk",
+     "skimmed milk powder", "whey", "lactose", "pork", "gelatin",
+     "wheat flour", "gluten", "soy lecithin", ...). Anything else is
+     "unknown": "coconut milk", "oat milk", "buttermilk", "gluten-free
+     wheat starch", "no milk" are not entries of that set, so nothing
+     needs a negation or a plant-milk blacklist to stay out. Entries
+     under a precautionary or negating header ("may contain: ...",
+     "free from: ...", "produced in a facility that handles: ...") are not
+     ingredient occurrences either; that scope ends at the sentence (or
+     the parenthesis group) so a genuine occurrence elsewhere in the same
+     text is never discarded globally. Deliberately NOT inferred from
+     text: lactose from a "milk" entry (a lactose-free milk is still
+     milk), halal/kosher from anything but pork (alcohol, gelatin source
+     and certification are not determinable from an ingredient name),
+     and anything from Bulgarian or other non-English text (unknown, not
+     "suitable").
 
 Precedence when combining sources (`resolve_flags`):
   * an explicit `False` is authoritative (never overwritten);
@@ -52,10 +64,17 @@ Precedence when combining sources (`resolve_flags`):
   * "not vegetarian" implies "not vegan": an explicit `is_vegan=True`
     beside `is_vegetarian=False` is likewise unknown;
   * an unknown never becomes True.
+
+Allergens (`detect_allergens_text`): a name is listed only when the same
+entry-identity rules found it; "" means UNKNOWN / none detected, never
+an allergen-free guarantee (only soy and milk are looked for at all).
 """
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass
 from typing import Any
+
+from app.models.enums import TRUSTED_INGREDIENT_SOURCES, IngredientVerificationStatus
 
 FLAG_NAMES: tuple[str, ...] = (
     "is_gluten_free",
@@ -66,24 +85,204 @@ FLAG_NAMES: tuple[str, ...] = (
     "is_kosher",
 )
 
-# The exact keyword sets the previous `fallback_local_analysis` used
-# (kept verbatim so no incompatibility signal that existed before is
-# lost) -- now only ever evidence for `False`.
-_INCOMPATIBILITY_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "is_gluten_free": ("wheat", "gluten"),
-    "is_lactose_free": ("milk", "whey", "lactose"),
-    "is_vegan": ("pork", "gelatin", "milk"),
-    "is_vegetarian": ("pork", "gelatin", "bacon"),
-    "is_halal": ("pork", "alcohol"),
-    "is_kosher": ("pork",),
-}
+# Ingredient-entry identities (matched with `fullmatch` against ONE
+# normalized ingredient entry, never searched inside a longer text). Each
+# is a food that is animal-derived / gluten-containing / soy by definition
+# once it stands alone as an ingredient. Every deliberate omission is
+# listed in the module docstring; do not add a pattern without a source
+# that makes the identity unambiguous, and never add a plant-milk exclusion
+# list instead of tightening the pattern.
+_MILK = re.compile(
+    r"(?:(?:whole|skimmed|skim|semi skimmed|dried|dry|powdered|full cream|pasteurised|pasteurized|"
+    r"cow'?s?|condensed|evaporated)\s+)*milk(?:\s+(?:powder|solids|protein|proteins|fat))?"
+)
+_WHEY = re.compile(r"(?:sweet\s+)?whey(?:\s+(?:powder|protein))?")
+_LACTOSE = re.compile(r"lactose|milk sugar")
+_PORK = re.compile(r"pork(?:\s+(?:meat|fat|gelatin|gelatine))?")
+_BACON = re.compile(r"bacon")
+_GELATIN = re.compile(r"(?:(?:beef|bovine|fish)\s+)?gelatine?")
+_GLUTEN_GRAIN = re.compile(
+    r"gluten|(?:(?:whole|wholemeal|whole meal|durum)\s+)?wheat(?:\s+(?:flour|semolina|bran|germ|gluten))?"
+)
+_SOY = re.compile(r"(?:soy|soya|soja)(?:\s?beans?)?(?:\s+(?:flour|protein|lecithin|sauce|milk|powder))?")
 
-# A keyword immediately followed by "free"/"-free" ("gluten-free",
-# "milk free", "alcoholfree"), or preceded by an explicit negation
-# ("free from milk", "without wheat", "no alcohol", "non-alcoholic"),
-# is a statement that the thing is ABSENT -- not evidence it is present.
-_NEGATED_SUFFIX_RE = re.compile(r"^[\s\-]*free\b")
-_NEGATED_PREFIX_RE = re.compile(r"(?:free\s+(?:from|of)|without|\bno|\bnon)[\s\-]*$")
+# (identity, flags it supports as `False`, positive allergens it declares)
+_ENTRY_EVIDENCE: tuple[tuple["re.Pattern[str]", frozenset[str], frozenset[str]], ...] = (
+    (_MILK, frozenset({"is_vegan"}), frozenset({"Milk"})),
+    (_WHEY, frozenset({"is_vegan"}), frozenset({"Milk"})),
+    (_LACTOSE, frozenset({"is_lactose_free", "is_vegan"}), frozenset({"Milk"})),
+    (_PORK, frozenset({"is_vegetarian", "is_vegan", "is_halal", "is_kosher"}), frozenset()),
+    (_BACON, frozenset({"is_vegetarian", "is_vegan"}), frozenset()),
+    (_GELATIN, frozenset({"is_vegetarian", "is_vegan"}), frozenset()),
+    (_GLUTEN_GRAIN, frozenset({"is_gluten_free"}), frozenset()),
+    (_SOY, frozenset(), frozenset({"Soy"})),
+)
+
+# Allergen names in the (stable) order `detect_allergens_text` reports them.
+_ALLERGEN_ORDER: tuple[str, ...] = ("Soy", "Milk")
+
+# Hard bound on the text examined. A real ingredient list is a few hundred
+# characters; the bound only exists so that adversarial input cannot make a
+# scan (or a migration) slow. Truncation can only DROP evidence (it never
+# turns a scoped-out entry into an evidential one).
+_MAX_TEXT_CHARS = 100_000
+
+# Phrases that open a precautionary ("may contain", cross-contact, shared
+# facility) or negating ("free from", "without", "contains no", "does not
+# contain", "none of") statement. Everything after such a phrase in the same
+# sentence / parenthesis group is a statement ABOUT the product, not an
+# ingredient occurrence. Adjectival "gluten-free" / "no artificial colours"
+# inside a single entry deliberately do not open a scope (they cannot match
+# an identity anyway and must not hide genuine entries after them).
+_SCOPE_MARKER_RE = re.compile(
+    r"\b(?:may|might|could)\s+(?:also\s+)?contain\b|\btraces?\s+of\b|\bcross\s+contact\b"
+    r"|\b(?:facility|factory|premises|equipment|bakery|production\s+line)\b"
+    r"|\bfree\s+(?:from|of)\b|\bwithout\b|\bcontains?\s+(?:no|none)\b|\bnone\s+of\b|\bneither\b"
+    r"|\bdoes(?:n't|\s+not)\s+contain\b|\bnot\s+contain(?:ing)?\b"
+)
+# Label words that may directly precede a "no X" list ("Contains: no wheat, milk").
+_CONTAINS_HEADERS = frozenset({"contains", "contain", "allergens", "allergen", "allergen information", "allergy advice"})
+_NEGATION_START_RE = re.compile(r"^(?:no|non|none|not|neither|nor)\b")
+_FREE_END_RE = re.compile(r"\bfree$")
+# A quantity qualifier right after an entry -- "gluten (<20 ppm)", "milk (0%)" -- makes the
+# entry a nutrient/claim line, not an ingredient occurrence.
+_QUANTITY_QUALIFIER_RE = re.compile(r"^\s*(?:[<>\u2264\u2265]|0+(?:[.,]0+)?(?:\s|$))")
+_AND_SPLIT_RE = re.compile(r"\s+(?:and|&|or)\s+")
+_SENTENCE_BREAK_RE = re.compile(r"(?<!\d)\.(?!\d)|[!?]+")
+_TOKEN_RE = re.compile(r"[()\[\]]|[,;:/|]|[^,;:/|()\[\]]+")
+_PERCENT_RE = re.compile(r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*%")
+_ZERO_RE = re.compile(r"0+(?:[.,]0+)?")
+_NEWLINE_RE = re.compile(r"[\r\n]+")
+_DASH_RE = re.compile(r"[-\u2010-\u2015_]+")
+_DECORATION_RE = re.compile(r"[*\u2020\u2021\"\u201c\u201d`]")
+_LEADING_FILLER_RE = re.compile(r"^(?:(?:and|&)\s+)?(?:(?:ingredients?|contains?)\s+)?")
+
+
+@dataclass(frozen=True)
+class TextEvidence:
+    """What raw ingredient text SUPPORTS via entry identity: flags with a
+    supported incompatibility (`False`) and positively declared allergens.
+    Empty means "unknown", never "suitable" / "allergen-free"."""
+
+    flags: frozenset[str] = frozenset()
+    allergens: frozenset[str] = frozenset()
+
+
+def _normalize_entry(chunk: str) -> str:
+    entry = _DECORATION_RE.sub("", _DASH_RE.sub(" ", chunk))
+    return re.sub(r"\s+", " ", entry).strip()
+
+
+def _percent_replacement(match: "re.Match[str]") -> str:
+    # A real quantity ("milk 3%") is dropped; a zero quantity ("milk (0%)") is kept as "0"
+    # so the entry is recognised as a nutrient/claim line.
+    return " 0 " if _ZERO_RE.fullmatch(match.group(1)) else " "
+
+
+def _prepare(raw_text: str) -> str:
+    text = raw_text[:_MAX_TEXT_CHARS].lower().replace("\u2019", "'")
+    text = _NEWLINE_RE.sub(" ", text)  # a line wrap ("gluten-<newline>free") is whitespace, never a sentence/scope boundary
+    text = _PERCENT_RE.sub(_percent_replacement, text)
+    text = re.sub(r"\be\.g\.?", "eg", text)  # abbreviations must not end a sentence (and its scope)
+    text = re.sub(r"\bi\.e\.?", "ie", text)
+    return re.sub(r"\b(?:max|min|approx|ca|etc|vs)\.", lambda m: m.group(0)[:-1], text)
+
+
+class _Record:
+    __slots__ = ("chunk", "depth", "delimiter", "negated", "ends_free")
+
+    def __init__(self, chunk: str, depth: int, delimiter: str, negated: bool) -> None:
+        self.chunk = chunk
+        self.depth = depth
+        self.delimiter = delimiter
+        self.negated = negated
+        self.ends_free = bool(_FREE_END_RE.search(chunk))
+
+
+def _sentence_entries(sentence: str) -> Iterator[str]:
+    tokens = _TOKEN_RE.findall(sentence)
+    records: list[_Record] = []
+    depth = 0
+    scope_depth: int | None = None
+    previous = ""
+    for index, token in enumerate(tokens):
+        if token in ("(", "["):
+            depth += 1
+            continue
+        if token in (")", "]"):
+            depth = max(depth - 1, 0)
+            if scope_depth is not None and depth < scope_depth:
+                scope_depth = None
+            continue
+        if token in (",", ";", ":", "/", "|"):
+            continue
+        chunk = _normalize_entry(token)
+        if not chunk:
+            continue
+        opens_scope = _SCOPE_MARKER_RE.search(chunk) or (
+            previous in _CONTAINS_HEADERS and _NEGATION_START_RE.match(chunk)
+        )
+        previous = chunk
+        if scope_depth is None and opens_scope:
+            scope_depth = depth
+            continue
+        if scope_depth is not None:
+            continue
+        delimiter = tokens[index + 1] if index + 1 < len(tokens) else ""
+        quantified = delimiter in ("(", "[") and index + 2 < len(tokens) and _QUANTITY_QUALIFIER_RE.match(tokens[index + 2])
+        label = delimiter == ":"  # "Gluten: none", "Lactose: 0.0 g" -- a key, not an ingredient
+        negated = bool(quantified or label or _NEGATION_START_RE.match(chunk) or _FREE_END_RE.search(chunk))
+        records.append(_Record(chunk, depth, delimiter, negated))
+
+    # "Wheat, gluten and dairy free": the trailing "free" negates the bare nouns before it.
+    for position, record in enumerate(records):
+        if not record.ends_free:
+            continue
+        before = position - 1
+        while (
+            before >= 0
+            and not records[before].negated
+            and records[before].depth == record.depth
+            and records[before].delimiter in (",", "/", "|")
+            and " " not in records[before].chunk
+        ):
+            records[before].negated = True
+            before -= 1
+
+    for record in records:
+        if record.negated:
+            continue
+        for part in _AND_SPLIT_RE.split(_LEADING_FILLER_RE.sub("", record.chunk, count=1)):
+            if part:
+                yield part
+
+
+def _evidential_entries(raw_text: str) -> Iterator[str]:
+    """The normalized ingredient entries of `raw_text` that are genuine
+    occurrences: not under a precautionary/negating header (scoped to the
+    sentence, or to the parenthesis group the header appeared in), not the
+    subject of a "... free" / "no ..." / "key: value" / quantity line."""
+    for sentence in _SENTENCE_BREAK_RE.split(_prepare(raw_text)):
+        yield from _sentence_entries(sentence)
+
+
+def derive_text_evidence(raw_text: str | None) -> TextEvidence:
+    """Supported incompatibilities / positive allergens in `raw_text`,
+    from exact ingredient-entry identity only (see the module docstring).
+    Substring hits, plant-based/derived names, negations, precautionary
+    statements and non-English text yield nothing (unknown)."""
+    return _evidence_from_entries(_evidential_entries(raw_text) if raw_text and raw_text.strip() else ())
+
+
+def _evidence_from_entries(entries: Iterable[str]) -> TextEvidence:
+    flags: set[str] = set()
+    allergens: set[str] = set()
+    for entry in entries:
+        for pattern, entry_flags, entry_allergens in _ENTRY_EVIDENCE:
+            if pattern.fullmatch(entry):
+                flags |= entry_flags
+                allergens |= entry_allergens
+    return TextEvidence(frozenset(flags), frozenset(allergens))
 
 
 def coerce_tri_state(value: Any) -> bool | None:
@@ -93,26 +292,49 @@ def coerce_tri_state(value: Any) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
-def keyword_present(text: str, keyword: str) -> bool:
-    """True when `keyword` occurs in the (already lower-cased) `text` at
-    least once WITHOUT an explicit negation around it. Substring
-    semantics are kept on purpose (`milk` also matches `buttermilk`):
-    this is an incompatibility heuristic, and over-matching there is
-    the conservative direction."""
-    start = 0
-    while True:
-        index = text.find(keyword, start)
-        if index == -1:
-            return False
-        end = index + len(keyword)
-        if not _NEGATED_SUFFIX_RE.match(text[end:]) and not _NEGATED_PREFIX_RE.search(text[:index]):
+def _is_trusted_catalog_row(ingredient: Any) -> bool:
+    """True only for a catalog row whose own dietary flags are EVIDENCE:
+    `VERIFIED` and sourced from a curated/regulatory source. Booleans on an
+    UNVERIFIED / OCR- or Gemini-observed row (including legacy rows written
+    before the flags became nullable), on a `LIMITED_DATA` row, on a row
+    with unknown provenance, or on a row flagged identity-uncertain are not
+    evidence, however definite they look, and must never become a
+    product-level claim."""
+    return (
+        getattr(ingredient, "verification_status", None) == IngredientVerificationStatus.VERIFIED
+        and getattr(ingredient, "source", None) in TRUSTED_INGREDIENT_SOURCES
+        and getattr(ingredient, "identity_uncertain", False) is not True
+    )
+
+
+def _is_named_by_entries(ingredient: Any, entries: Iterable[str]) -> bool:
+    """True when an exact ingredient ENTRY of the text names this catalog row
+    (its common/scientific name, or its E-number). The upstream catalog matcher
+    links a token to a row by bidirectional SUBSTRING ("coconut milk" -> a row
+    named "Milk"), which is not identity; without an exact entry the row's flags
+    are not evidence about THIS product."""
+    names = set()
+    for attribute in ("common_name", "scientific_name"):
+        value = getattr(ingredient, attribute, None)
+        if isinstance(value, str) and value.strip():
+            lowered = value.lower()
+            names.add(_normalize_entry(lowered))
+            names.add(_normalize_entry(re.sub(r"\s*\([^)]*\)", "", lowered)))
+    names.discard("")
+    e_number = getattr(ingredient, "e_number", None)
+    e_key = re.sub(r"\s+", "", e_number.lower()) if isinstance(e_number, str) and e_number.strip() else None
+    for entry in entries:
+        if entry in names or (e_key is not None and re.sub(r"\s+", "", entry) == e_key):
             return True
-        start = end
+    return False
 
 
-def _catalog_incompatibilities(ingredients: Iterable[Any]) -> set[str]:
+def _catalog_incompatibilities(ingredients: Iterable[Any], entries: Iterable[str] = ()) -> set[str]:
+    entries = list(entries)
     found: set[str] = set()
     for ing in ingredients:
+        if not _is_trusted_catalog_row(ing) or not _is_named_by_entries(ing, entries):
+            continue
         # Note the per-ingredient column semantics (see
         # `app.models.ingredient.Ingredient`): `is_gluten`/`is_lactose`
         # mean "CONTAINS", the other four mean "suitable for".
@@ -135,15 +357,12 @@ def _catalog_incompatibilities(ingredients: Iterable[Any]) -> set[str]:
 
 def derive_incompatibilities(raw_text: str | None, ingredients: Iterable[Any] = ()) -> dict[str, bool]:
     """`{flag: False}` for every flag with SUPPORTED incompatibility
-    evidence in `raw_text`/`ingredients`; flags with no such evidence are
+    evidence -- trusted catalog rows or exact ingredient-entry identity in
+    `raw_text` (see the module docstring); flags with no such evidence are
     simply absent (unknown) -- never `True`."""
-    derived: dict[str, bool] = {name: False for name in _catalog_incompatibilities(ingredients)}
-    lower = (raw_text or "").lower()
-    if lower.strip():
-        for name, keywords in _INCOMPATIBILITY_KEYWORDS.items():
-            if name not in derived and any(keyword_present(lower, kw) for kw in keywords):
-                derived[name] = False
-    return derived
+    entries = list(_evidential_entries(raw_text)) if raw_text and raw_text.strip() else []
+    supported = _catalog_incompatibilities(ingredients, entries) | _evidence_from_entries(entries).flags
+    return {name: False for name in FLAG_NAMES if name in supported}
 
 
 def resolve_flags(
@@ -175,21 +394,19 @@ def resolve_flags(
     return resolved
 
 
-_ALLERGEN_KEYWORDS: tuple[tuple[str, str], ...] = (("Soy", "soy"), ("Milk", "milk"))
-
-
 def detect_allergens_text(raw_text: str | None) -> str:
-    """Comma-separated names of the allergens the keyword heuristic
-    positively FOUND in `raw_text` ("" when none was found).
+    """Comma-separated names of the allergens `raw_text` positively
+    DECLARES as an ingredient entry ("" when none was found).
 
-    "" is UNKNOWN, not "allergen-free": the heuristic only looks for two
-    of the 14 regulated allergen categories (soy, milk), so "found
-    nothing" says nothing about the other twelve -- and nothing about
-    text in any language it does not know. It must therefore never be
-    rendered as the literal string "None" (a confirmed-absence claim).
+    "" is UNKNOWN, not "allergen-free": only two of the 14 regulated
+    allergen categories (soy, milk) are looked for, so "found nothing"
+    says nothing about the other twelve -- nor about text in any language
+    it does not know, nor about a plant-based "coconut milk" (which is
+    neither reported as Milk nor cleared of it). It must therefore never
+    be rendered as the literal string "None" (a confirmed-absence claim).
     """
-    lower = (raw_text or "").lower()
-    return ", ".join(name for name, keyword in _ALLERGEN_KEYWORDS if keyword_present(lower, keyword))
+    found = derive_text_evidence(raw_text).allergens
+    return ", ".join(name for name in _ALLERGEN_ORDER if name in found)
 
 
 # Strings a provider/model sometimes sends INSTEAD of an allergen name to

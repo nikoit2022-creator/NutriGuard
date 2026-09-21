@@ -124,13 +124,14 @@ async def test_english_label_reports_supported_incompatibilities_and_warns_only_
     assert product["isVerified"] is True  # so warnings really were computed
 
     assert product["isGlutenFree"] is False
-    assert product["isLactoseFree"] is False
-    assert product["isVegan"] is False
+    assert product["isVegan"] is False  # whole milk powder is dairy
+    assert product["isLactoseFree"] is None  # a milk entry alone does not establish lactose
     assert product["isVegetarian"] is None  # nothing contradicts it, nothing supports it
     assert product["isHalal"] is None
     assert product["isKosher"] is None
-    # Warnings fire ONLY for the supported incompatibilities (halal/kosher are unknown -> none):
-    assert _dietary_titles(body) == {"Gluten Violation", "Lactose Contained", "Non-Vegan Product"}
+    assert product["allergensDetected"] == ""  # this Gemini payload declared none; text-derived allergens apply to OCR text only
+    # Warnings fire ONLY for the supported incompatibilities (lactose/halal/kosher are unknown -> none):
+    assert _dietary_titles(body) == {"Gluten Violation", "Non-Vegan Product"}
 
 
 @pytest.mark.asyncio

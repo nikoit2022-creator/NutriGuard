@@ -77,10 +77,12 @@ def fallback_local_analysis(
     nova = 4 if (len(ingredient_list) > 5 or has_sweeteners or has_preservatives) else 3
 
     # Tri-state product dietary flags: `False` only from positive
-    # incompatibility evidence (a matched curated ingredient's own flag,
-    # or a legacy English keyword hit); NEVER `True` from the absence of
-    # a keyword -- a Bulgarian/mixed/empty label must not read as
-    # gluten-free/vegan/halal. See `app.services.dietary_suitability`.
+    # incompatibility evidence (a TRUSTED catalog ingredient's own flag, or
+    # an ingredient entry that IS an unambiguous identity such as "pork" /
+    # "skimmed milk powder" -- never a substring like "coconut milk");
+    # NEVER `True` from the absence of a keyword -- a Bulgarian/mixed/empty
+    # label must not read as gluten-free/vegan/halal. See
+    # `app.services.dietary_suitability`.
     flags = dietary_suitability.resolve_flags(None, raw_text, ingredient_list)
 
     product = AnalyzedProductData(

@@ -1,6 +1,7 @@
 # Truthful unknown values and translation diagnostics (issue #21 follow-up)
 
-Backend-only change. Migration `d7e8f9a0b1c2` (single Alembic head). Based on
+Backend-only change. Migration `d7e8f9a0b1c2` (single Alembic head; amended in
+place by the PR #22 review follow-up, see section 3). Based on
 `origin/main` = `32bd7efc05750470da6f48eab7c4111e45db1d26` (PR #20); no drift from
 the previously deployed reviewed head was found at the start of this work.
 Nothing here is merged or deployed, and no live data was touched.
@@ -74,26 +75,95 @@ Implemented in `app/services/dietary_suitability.py` (pure, unit-tested).
   Never from text, and never from a matched ingredient name (lactose status,
   certification and cross-contact are not inferable from a name).
 * **`false` from an explicit source value or from positive incompatibility
-  evidence**: (a) a matched *curated* ingredient's own flag (`isGluten`/`isLactose`
-  true, or `isVegan`/`isVegetarian`/`isHalal`/`isKosher` false; not-vegetarian
-  implies not-vegan), works in any language; (b) the *legacy English keyword hits*
-  (unchanged sets: `wheat|gluten`, `milk|whey|lactose`, `pork|gelatin|milk`,
-  `pork|gelatin|bacon`, `pork|alcohol`, `pork`) with an explicit-negation guard so
-  `gluten-free`, `milk free`, `no alcohol`, `non-alcoholic` are not read as
-  presence. The keyword hit is a heuristic that can over-report (e.g. plant
-  "coconut milk" → not vegan): that is why it can only ever produce the
-  conservative direction.
+  evidence** (PR #22 review follow-up: substring keyword hits are **no longer**
+  evidence). Three routes, and only these:
+  1. an explicit source value (a provider's structured tag, an explicit JSON
+     boolean in a structured label extraction);
+  2. a **trusted** catalog row: a matched ingredient that is `VERIFIED` *and*
+     from `CURATED_SEED`/`REGULATORY_LOOKUP` (`identity_uncertain` false) *and
+     named by an exact ingredient entry of the text* (its common/scientific
+     name or E-number -- the upstream catalog matcher links a token to a row by
+     bidirectional **substring**, so "coconut milk" reaches a row named "Milk";
+     that link is not identity and the row's flags are then ignored), whose
+     own flag says `isGluten`/`isLactose` true or `isVegan`/`isVegetarian`/
+     `isHalal`/`isKosher` false (not-vegetarian implies not-vegan). Booleans on an
+     UNVERIFIED / OCR- or Gemini-observed / `LIMITED_DATA` / provenance-less row
+     (including legacy rows written before the flags became nullable) are **not**
+     evidence, however definite they look; a synthetic OCR ingredient carries
+     none. (Today no curated seed row asserts an incompatibility, so this route
+     only fires for future curated/regulatory rows; the gate exists so a stray
+     boolean can never become a product claim.);
+  3. **exact ingredient-entry identity in the raw text** (`derive_text_evidence`).
+     The text is split into ingredient entries (sentence, comma/semicolon/colon/
+     slash and parenthesis boundaries; percentages, decoration, case and hyphens
+     normalised) and an entry supports a claim only if it is *exactly* one of a
+     small closed set: `milk`/`whole|skimmed|skim|semi-skimmed|dried|dry|powdered|
+     full-cream|pasteurised|cow's|condensed|evaporated milk`/`… milk powder|solids|
+     protein|fat`, `whey`/`sweet whey`/`whey powder|protein` (→ not vegan; allergen Milk), `lactose`/`milk sugar` (→ not lactose-
+     free, not vegan; allergen Milk), `pork`/`pork meat|fat|gelatin` (→ not
+     vegetarian/vegan/halal/kosher), `bacon`, `gelatin(e)`/`beef|bovine|fish gelatin` (→ not vegetarian/
+     vegan), `gluten`/`wheat`/`wheat flour|semolina|bran|germ|gluten` and
+     whole/wholemeal/durum variants (→ not gluten-free), and `soy|soya|soja`
+     (+ `bean(s)`, `flour|protein|lecithin|sauce|milk|powder`) (→ allergen Soy).
+     Everything else is *unknown*: `coconut milk`, `oat milk`, `almond milk`,
+     `buttermilk`, `milk chocolate`, `soy milk` (Soy only, never Milk),
+     `gluten-free …`, `no milk`, `lactose-free milk`, `bacon flavour`, `vegan
+     bacon`, `wheat starch`, `pork sausage`, Bulgarian text. A substring is not an
+     identity, so no negation guard or plant-milk blacklist is needed to keep these
+     out. Entries are split on `and`/`&`/`or` (`Contains milk and soy`), a leading
+     label word (`Contains`, `Ingredients`) is dropped, percentages and case are
+     normalised, and a line wrap is whitespace (`Gluten-<newline>free` is
+     `gluten-free`; a newline never ends a precautionary scope -- OCR text wraps
+     lines).
+     **Precautionary/negating headers scope the rest of the sentence** (or the
+     parenthesis group they appear in): after `may|might|could contain`, `traces
+     of`, `cross contact`, any of `facility|factory|premises|equipment|bakery|
+     production line`, `free from|of`, `without`, `contains no|none`, `none of`,
+     `neither`, `does not|doesn't contain`, `not containing` (and a `no ...` list
+     directly after a `Contains:` / `Allergens:` label), entries are a statement
+     *about* the product, not ingredient occurrences. Adjectival
+     `gluten-free`/`no artificial colours` inside one entry do **not** open a scope,
+     so `Gluten-free oats, wheat flour` still reports not gluten-free and
+     `Wheat flour, milk. Free from soy. May contain: eggs` keeps wheat and milk
+     while dropping the rest -- a negated phrase never discards genuine
+     occurrences globally. Also not ingredient occurrences: the bare nouns before a
+     trailing `free` (`Wheat, gluten and dairy free`, `Milk/lactose free`), a
+     `key: value` line (`Gluten: none`, `Lactose: free`), and an entry followed by a
+     quantity qualifier (`Gluten (<20 ppm)`, `Milk (0%)`). Abbreviation periods
+     (`e.g.`, `max.`) and decimals do not end a sentence. The text examined is
+     bounded (100,000 characters; evidence beyond it is ignored, never invented) and
+     every step is linear -- an earlier draft had a quadratic regex that stalled a
+     scan for seconds on a long digit run.
+
+  Deliberately **not** inferred from text: lactose from a `milk`/`whey` entry
+  (lactose-free milk is still milk); halal/kosher from anything but pork (alcohol
+  as a solvent, gelatin's animal source and certification are not determinable
+  from an ingredient name -- the legacy `alcohol` → not-halal hit is dropped);
+  precautionary allergen labelling (no "may contain" channel exists on the wire);
+  anything from Bulgarian or other non-English text (unknown, not "suitable").
+  The absence of a match never means suitability or allergen absence.
 * **`null` otherwise** — including Bulgarian, mixed-language, foreign-language,
-  empty and truncated text.
+  empty and truncated text, and any ambiguous, negated, precautionary or
+  substring-only mention.
 * **Precedence when sources disagree** (`resolve_flags`): an explicit `false` is
   authoritative; derived evidence fills only what the source left unknown; an
-  explicit `true` that positive incompatibility evidence *contradicts* (e.g. a
-  model says `isVegan: true` for "gelatin, pork fat", or a curated ingredient
-  says it contains gluten) becomes `null` — two conflicting claims support
-  neither, and a conflict is never resolved in favour of the positive claim;
-  explicit `isVegan=true` beside `isVegetarian=false` is likewise `null`. (Cost:
-  a plant product whose text trips the over-reporting keyword heuristic, e.g.
-  "coconut milk", loses its explicit `true` and reads as unknown.)
+  explicit `true` that *real* incompatibility evidence contradicts (e.g. a model
+  says `isVegan: true` for "gelatin, pork fat", or a trusted catalog row says it
+  contains gluten) becomes `null` — two conflicting claims support neither, and a
+  conflict is never resolved in favour of the positive claim; explicit
+  `isVegan=true` beside `isVegetarian=false` is likewise `null`. Because an
+  uncertain mention ("coconut milk", "gluten-free", an untrusted catalog boolean)
+  is no longer evidence, it can no longer fake such a contradiction: a provider's
+  explicit `isVegan: true` beside "coconut milk" stays `true`. A milk entry does
+  not contradict an explicit `isLactoseFree: true`.
+* **Allergens** (`detect_allergens_text`, OCR-text path only): `Soy`/`Milk` are
+  listed only when the entry-identity rules above found them (`Contains: milk,
+  soy` → `"Soy, Milk"`; `coconut milk` → `""`; `may contain milk` → `""`). `""` is
+  *unknown / none detected*, never an allergen-free guarantee -- a product named
+  "coconut milk" is neither reported as containing Milk nor cleared of it, and
+  only 2 of the 14 regulated allergens are examined at all. A provider's/
+  Gemini's *declared* allergen list is independent evidence and is kept as
+  declared (placeholders filtered).
 * **Merges never erase evidence with an unknown**: barcode+label enrichment and
   higher-confidence rediscovery overwrite a flag/allergen list only when the
   incoming value is explicit/known; an incoming `null`/`""` leaves the supported
@@ -129,38 +199,89 @@ Schema: the six product flags and `health_score` become nullable;
 `allergens_detected` stays `NOT NULL` text; ORM defaults for the flags become
 `NULL` (they used to be `True`), for `allergens_detected` `""` (was `"None"`).
 
+**Amended in place (PR #22 review, finding 1).** The first version kept a legacy
+`false` whenever the row's raw text merely *contained* a keyword
+(`LIKE '%gluten%'`), so `isGlutenFree=false` with text `gluten-free` -- and
+`coconut milk`, `free from milk`, `without wheat`, everything after `may contain:` --
+survived as a "supported incompatibility". The old code that wrote those rows
+(`not ("wheat" in text or "gluten" in text)` …) produced exactly these `false`s from
+negated and plant-based text, so the keyword being present says nothing about
+whether the claim was ever supported. The policy is now evaluated in Python
+(a portable SQL `LIKE` cannot apply occurrence-level negation/scope) with a
+**frozen copy** of the entry-identity rules (section 2); the migration still
+imports no application code, is deterministic and idempotent.
+
+*Applied anywhere beyond disposable databases?* Nothing in the repository or the
+operator's records says so: PR #22 is open and unmerged, `main` (`32bd7ef`) does
+not contain the revision, the operator's backup directory holds pre-deployment
+dumps for earlier deployed PRs (`pre_pr18`, `pre_pr20`) and none for this branch,
+and the handoff records every prior run of this revision as CI or a disposable
+`--network none` / throwaway-PostgreSQL container. This task was forbidden to
+read the live database, so the negative is **not** proven from the live
+`alembic_version`. Amending in place is therefore safe only if that holds;
+**verify `alembic current` on any environment before deploying** -- if an
+environment is already at `d7e8f9a0b1c2` with the old policy, the amended
+revision will not re-run there (same revision id). Either `alembic downgrade
+c6d7e8f9a0b1` (lossy, documented) and re-upgrade, or add a corrective revision
+that re-applies `apply_flag_policy` to the already-migrated rows -- that can only
+*remove* unsupported `false`s; it cannot restore a value the old policy already
+reset to `NULL`.
+
 Legacy provenance cannot always distinguish evidence from a guess, so the policy
-is deliberately conservative (executable SQL, unit-tested on SQLite and
-round-tripped on real PostgreSQL 16):
+is deliberately conservative (executable, unit-tested on SQLite and round-tripped
+on real PostgreSQL 16):
 
 | Legacy value | Kept when | Otherwise |
 |---|---|---|
-| flag `true` | the row's `source` is a barcode provider (`open_food_facts`, `gs1_digital_link`, `upcitemdb`) — explicit provider tag | reset to `NULL` (unsupported positive claim; includes `local`, `label_scan`, `label_scan_translated`, unrecognised sources) |
-| flag `false` | the stored `raw_ingredient_text` still contains a legacy incompatibility keyword for *that* flag (case-insensitive) | reset to `NULL` (it was a default/"not stated") |
+| flag `true` | the row's `source` is a barcode provider (`open_food_facts`, `gs1_digital_link`, `upcitemdb`) **and** the same real evidence (below) does not contradict it (vegan `true` beside not-vegetarian evidence is also unknown) | reset to `NULL` (unsupported positive claim; includes `local`, `label_scan`, `label_scan_translated`, unrecognised sources). Never a `true` from uncertainty. |
+| flag `false` | it is **re-supported** by (1) exact ingredient-entry identity in the stored `raw_ingredient_text` (section 2, outside precautionary/negating headers) **or** (2) a linked *trusted* catalog row (`products.ingredient_ids` → `ingredients` that are `VERIFIED` and `CURATED_SEED`/`REGULATORY_LOOKUP`, not `identity_uncertain`) that an exact ingredient entry of the stored text *names* (name or E-number; the stored link itself came from the substring matcher, so it is not identity) | reset to `NULL` (it was a default/"not stated", a negated phrase, a plant-based name or a substring) |
 | `health_score` | the product `is_verified` (a genuine `0` survives) | reset to `NULL` (was only a placeholder) |
-| `allergens_detected` `"None"`/`"N/A"`/`"null"`/… | never (placeholder set) → `""` | positive allergen names untouched |
+| `allergens_detected` `"None"`/`"N/A"`/`"null"`/… | never (placeholder set) → `""` | positive allergen names untouched (see limitation 4) |
 
-Known limitations (documented, not fixable from stored data): (a) `source` is
-only rewritten when an enrichment newly *completes* an evidence group, so a
-provider-sourced row whose flags were later overwritten by an old-code label
-scan that completed no group keeps `source = open_food_facts` and its guessed
-`true`s survive as "provider evidence"; (b) a verified row's stored score is kept,
-so a placeholder `0` left by the old code between the discovery commit and the
-first scoring write (a request that died in that window) would survive — there is
-no evidence such rows exist, but the surviving `0`s are not *proven* genuine.
-Also: the SQL keyword re-check does not replicate the runtime negation
-guard, so a legacy `false` whose only hit is a negated phrase is preserved rather
-than destroyed; a provider's explicit `false` with no surviving keyword is reset
-to unknown (a rediscovery/label re-scan restores it). Trustworthy data is not
-indiscriminately destroyed: provider `true`s, keyword-supported `false`s, verified
-scores and known allergens all survive.
+Worked examples (all legacy `false`): `Gluten-free oat flour` → `NULL`; `Free from
+milk`, `without wheat`, `Free from: milk, soy, gluten`, `May contain: milk, wheat`,
+`coconut milk`, `oat milk`, `buttermilk`, `lactose-free milk`, Bulgarian and empty
+text → `NULL`; `Gluten-free oats, wheat flour` → gluten `false` **kept** (a genuine
+`wheat flour` entry); `Contains: Milk, Soy` → not-vegan kept, lactose `NULL`;
+`sugar, lactose` → lactose and vegan kept; a label naming (`Barley Malt Extract`) a linked
+curated row that says it contains gluten → gluten `false` kept; the same link to an
+UNVERIFIED / OCR / Gemini-sourced row, or to a trusted `Milk` row reached only through
+`Coconut milk` → `NULL`; line-wrapped `Gluten-<newline>free` and `May contain<newline>milk`
+→ `NULL`.
+
+Known limitations (documented, not fixable from stored data):
+1. `source` is only rewritten when an enrichment newly *completes* an evidence
+   group, so a provider-sourced row whose flags were later overwritten by an
+   old-code label scan that completed no group keeps `source = open_food_facts`
+   and its guessed `true`s survive as "provider evidence" (unless real evidence
+   contradicts them).
+2. A verified row's stored score is kept, so a placeholder `0` left by the old code
+   between the discovery commit and the first scoring write would survive -- no
+   evidence such rows exist, but surviving `0`s are not *proven* genuine.
+3. A legacy `false` that a provider/model stated explicitly but that neither the
+   stored text nor a trusted catalog row supports cannot be told apart from a
+   default `false` and becomes unknown (a rediscovery / label re-scan restores it
+   under the new logic). The migration cannot see which model/provider wrote a
+   value.
+4. **Positive allergen names are not rewritten.** A stored `Milk`/`Soy` on a
+   non-provider row may come from the old substring heuristic (`coconut milk` →
+   `Milk`) or from a real structured declaration; stored data cannot tell which.
+   Erasing a possibly-real allergen warning is the more dangerous error, so they
+   stay (over-reporting is never an absence claim) until a re-scan repopulates
+   them. **This is a decision for the owner**: a stricter migration could keep a
+   non-provider `Milk`/`Soy` only when the stored text re-supports it.
+5. The frozen entry rules under-detect by design (`milk chocolate`, `buttermilk`,
+   `wheat starch`, Bulgarian, `bacon`-as-halal, …): unknown, not `false`.
+6. Offline mode (`alembic upgrade --sql`) is refused for this revision (it raises)
+   because the flag policy runs against live rows; it will not silently skip it.
 
 **Downgrade is lossy and documented**: `NULL` flags → `false`, `NULL` score → `0`,
 the `"None"` allergen placeholder is *not* restored. Consequently upgrade →
 downgrade → upgrade is not an identity on data written after the first upgrade
-(non-provider `true`s are reset again). **Back up before running either
-direction on real data.** The migration imports no application code (frozen SQL
-copies of the keyword and placeholder sets).
+(non-provider `true`s are reset again, and every backfilled `false` is re-evaluated
+with the same evidence rules: an unsupported one returns to `NULL`, one the stored
+text/catalog genuinely supports is a supported `false`). **Back up before running
+either direction on real data.**
 
 ## 4. Translation-rejection diagnostics (owner's section 4)
 
@@ -232,7 +353,32 @@ up as `languageRejected` in a dry run — an existing limitation, not changed he
   (`0.0`/heuristic values) gated only by `hasVerifiedNutrition`; not changed.
 * `requireVegetarian`/`avoidPeanuts`/`avoidSoy`/`avoidTreeNuts` remain inert
   (documented parity gap, README §6 item 3).
-* The keyword heuristic can over-report an incompatibility for plant products
-  ("coconut milk"); it never over-reports suitability.
+* Superseded by the PR #22 review follow-up: raw text no longer over-reports an
+  incompatibility for plant products ("coconut milk" is unknown). The cost is
+  deliberate under-detection (`milk chocolate`, `buttermilk`, `wheat starch`, non-
+  English text stay unknown): for a user who must avoid gluten or dairy, an
+  unknown produces **no warning** where a keyword hit used to. That is the
+  owner-approved trade-off ("prefer NULL"); an informational "could not confirm"
+  warning for unknown flags (above) remains the open product decision that would
+  close the gap without asserting anything.
+* Catalog evidence is gated on provenance (`VERIFIED` + curated/regulatory), but a
+  catalog row is still *matched* to a label token by the existing fuzzy substring
+  matcher (`ocr_normalizer.match_against_database`, a verbatim port of the Kotlin
+  matcher); a token that merely *contains* a trusted row's name can match it.
+  Dormant today (no curated row asserts an incompatibility) but a limitation to
+  revisit before curating such rows. Legacy UNVERIFIED ingredient rows created
+  before `f5a6b7c8d9e0` may still carry fabricated per-ingredient flags on
+  `IngredientOut`; they are ignored for product-level claims and were not rewritten.
+  (Catalog evidence is now additionally gated on the row being *named* by an exact
+  entry, which closes the substring-link route for `coconut milk` -> a trusted `Milk`
+  row; a legitimately fuzzy match such as `Oat flour` -> `Whole Oat Flour` therefore
+  yields no catalog evidence either -- unknown, the conservative direction.)
+* Known imprecision of the entry rules (all err to *unknown*, none to a claim):
+  a precautionary/negating phrase suppresses the rest of its sentence (`salt without
+  additives, wheat flour` loses `wheat flour`); a parenthetical qualifier after an
+  entry is not interpreted (`Milk (plant-based)` still reads as milk -- rare; the
+  qualifier list would be an open-ended blacklist); numbered lists (`1. Milk 2. Wheat
+  flour`) are not split; non-English text yields nothing; there is no
+  precautionary-allergen ("may contain") channel on the wire.
 * `gemini_call_failed` logs `str(exc)` of the transport error in the ordinary
   application log (not in the diagnostics journal); unchanged.

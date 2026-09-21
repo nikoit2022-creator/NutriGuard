@@ -342,10 +342,11 @@ def _to_analyzed_data_from_discovery(
     was the safe direction for the warning engine but silently meant
     BOTH "unknown" and "proven unsuitable"; that ambiguity is what
     changed. An unknown flag may still become `False` from positive
-    incompatibility evidence in the provider's ingredient text or a
-    matched curated ingredient (so a product whose ingredients name
-    wheat is still reported not gluten-free) -- and is never turned into
-    `True` from the absence of a keyword. `allergens_detected` is the
+    incompatibility evidence -- an ingredient ENTRY of the provider's text
+    that is an unambiguous identity (a "wheat flour" entry still reports
+    not gluten-free; "coconut milk" or "gluten-free" prove nothing) or a
+    trusted catalog ingredient -- and is never turned into `True` from
+    the absence of a keyword. `allergens_detected` is the
     provider's declared allergen list, `""` (unknown) when it lists none
     -- never "None".
     """

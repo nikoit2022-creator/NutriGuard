@@ -1423,7 +1423,9 @@ than silently resolved:
       as `"None"` (a soy/milk-only heuristic). Full audit and evidence rules:
       `docs/TRUTHFUL_UNKNOWN_VALUES.md`.
     - **Alternatives considered.** (a) Adding more keywords/languages: rejected --
-      it only moves the blind spot; suitability is never derived from text. (b)
+      it only moves the blind spot; suitability is never derived from text (and,
+      per the PR #22 review, a *substring* is not an ingredient identity either: see
+      "Review follow-up" below). (b)
       Keeping `false` for unknown (the V6 rule, item 6): rejected -- it cannot be
       told apart from a supported incompatibility. (c) A separate
       `dietaryFlagsKnown` field or a nullable/`"UNKNOWN"` allergens field:
@@ -1436,10 +1438,36 @@ than silently resolved:
       unknown incoming value. Curated `e471_mono_diglycerides` now has
       `isVegan`/`isVegetarian`/`isHalal`/`isKosher` = `null` (its own text says
       source verification is required); seed reloads clear the old `true`s.
-    - **Legacy data.** Documented conservative policy (provider-sourced `true`s and
-      keyword-supported `false`s kept; other `true`s and unsupported `false`s reset
-      to `NULL`; unverified stored scores reset to `NULL`; `"None"` -> `""`) and a
-      lossy, documented downgrade -- see the migration docstring and the doc above.
+    - **Legacy data.** Documented conservative policy (provider-sourced `true`s not
+      contradicted by evidence, and `false`s that are *re-supported* by exact
+      ingredient-entry identity in the stored text or by a linked trusted catalog
+      row, kept; other `true`s and unsupported `false`s reset to `NULL`; unverified
+      stored scores reset to `NULL`; `"None"` -> `""`) and a lossy, documented
+      downgrade -- see the migration docstring and the doc above.
+    - **Review follow-up (PR #22): no promotion from substring keyword hits.**
+      Raw text used to turn any substring hit into a confirmed claim (`coconut milk`
+      -> not vegan, not lactose-free, allergen `Milk`; `gluten-free` inside a
+      legacy `false` -> a "supported" incompatibility). Now a claim/allergen comes
+      from raw text only when an ingredient *entry* is exactly an unambiguous
+      identity (`milk`, `skimmed milk powder`, `whey`, `lactose`, `pork`,
+      `gelatin`, `wheat flour`, `gluten`, `soy lecithin`, ...) outside a
+      precautionary/negating header; a milk entry does not establish lactose;
+      halal/kosher come only from pork or a trusted catalog row; catalog-row flags
+      count only for `VERIFIED` curated/regulatory rows that an exact entry names (the matcher's
+      substring link is not identity). Everything else is `null`
+      / no allergen entry (never a suitability or allergen-free claim). Deviation
+      from the previous behaviour, deliberately: an unknown produces no warning
+      where a keyword hit used to (`milk chocolate`, `buttermilk`, `wheat starch`
+      and non-English text are unknown). Migration `d7e8f9a0b1c2` was amended in
+      place (not yet applied beyond disposable databases -- verify with `alembic
+      current` before deploying). Alternatives rejected: a plant-milk blacklist
+      (open-ended, and the same substring mistake), keeping the substring hits as
+      "documented heuristics" (incompatible with `false` = supported), a
+      corrective second migration (cannot restore values the first policy reset;
+      unnecessary while the first is unapplied). Tests:
+      `tests/unit/test_text_evidence_identity.py`,
+      `tests/integration/test_evidence_semantics_e2e.py`, the rewritten
+      `test_tristate_product_flags_migration.py` and the PostgreSQL round trip.
     - **Tests.** `tests/unit/test_dietary_suitability.py`,
       `test_tristate_evidence_preserving_merge.py`,
       `test_tristate_product_flags_migration.py`,
