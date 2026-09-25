@@ -1471,6 +1471,27 @@ caught the actual bug there and it is corrected here.
   made on this backend-only branch (CLAUDE.md section 11) — flagged
   here for AI Studio/Android ownership.
 
+17. **Issue #25: label-image product identity is optional, never a gate
+    on ingredient/nutrition evidence.** `POST /api/v1/scan/label-image`
+    used to reject Gemini's WHOLE structured extraction when
+    `productName` was empty/missing, replacing a genuinely read
+    ingredient list (and nutrition panel) with the fallback's
+    placeholder guess and a `404` `labelScanRequired` "Scanned Label
+    Product" result with no ingredients. Now a missing/blank/non-string/
+    placeholder name is kept as `productName: ""` (identity not
+    observed -- never an invented name) and every other field goes
+    through unchanged validation, so an ingredient-list photo returns
+    the existing `200` `FullProductAnalysisOut` (nullable `healthScore`).
+    A standalone label scan that recognizes no ingredients now says so in
+    `details.reason` instead of claiming "This product's identity was
+    found" (same key/shape). No field, type, status code or OpenAPI
+    change; `hasVerifiedIngredients`/risk/translation semantics are
+    unchanged. Alternative considered and rejected: substituting a
+    generic name (would fabricate identity). Regression tests:
+    `tests/integration/test_ingredient_first_label_scan.py`,
+    `tests/unit/test_gemini_image_parser.py`. Full contract and evidence:
+    `docs/INGREDIENT_FIRST_LABEL_SCAN.md`.
+
 No other ambiguities were found that required deviating from the
 contract; where the contract was silent on an implementation detail
 (e.g., exact rate-limit numbers, refresh-token rotation strategy), a

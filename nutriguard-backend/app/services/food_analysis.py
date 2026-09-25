@@ -560,7 +560,22 @@ def _ingredient_out_dict(ing: Any) -> dict:
     }
 
 
-def _label_scan_required_details(product: Product, ingredients: list[Any] | None = None) -> dict:
+_IDENTITY_FOUND_REASON = (
+    "This product's identity was found, but its nutrition and/or ingredient data is "
+    "too incomplete for a reliable Health Score."
+)
+# Issue #25: a standalone label scan (synthetic `img_`/`ocr_` id) that
+# recognized no ingredients never found a product identity -- saying it
+# did is a false claim shown to the user. Same key, honest retry text.
+_NO_INGREDIENTS_READ_REASON = (
+    "No ingredients could be read from this label. Retake the photo with the "
+    "whole ingredient list in frame, in focus and well lit."
+)
+
+
+def _label_scan_required_details(
+    product: Product, ingredients: list[Any] | None = None, *, reason: str = _IDENTITY_FOUND_REASON
+) -> dict:
     """Structured response for a barcode whose *identity* is known (was
     discovered and persisted — see `_persist_discovered_product`) but
     whose nutrition/ingredient data is too incomplete to compute a real
@@ -597,10 +612,7 @@ def _label_scan_required_details(product: Product, ingredients: list[Any] | None
     """
     details = {
         "labelScanRequired": True,
-        "reason": (
-            "This product's identity was found, but its nutrition and/or ingredient data is "
-            "too incomplete for a reliable Health Score."
-        ),
+        "reason": reason,
         "discoveredIdentity": {
             "barcode": product.barcode,
             "productName": product.product_name,
@@ -1393,7 +1405,7 @@ async def _record_label_provenance(
 
 async def _run_label_image_pipeline(
     image_bytes: bytes, all_db_ingredients: list[Any]
-) -> tuple[AnalyzedProductData, list[Any], "gemini_image_parser.LabelFieldValidity", bool]:
+) -> tuple[AnalyzedProductData, list[Any], "gemini_image_parser.LabelFieldValidity", bool, dict]:
     """
     The Gemini-then-fallback chain for label-image analysis: try
     Gemini's structured extraction; on any failure/invalid response,
@@ -1404,7 +1416,8 @@ async def _run_label_image_pipeline(
     had its own copy of this exact chain, which is how the two paths
     drifted apart in the first place; see README section 11.9).
 
-    Returns `(data, ingredients, validity, ingredients_trustworthy)`:
+    Returns `(data, ingredients, validity, ingredients_trustworthy,
+    extraction_diagnostics)`:
     `validity` is which nutrition/NOVA fields are genuinely,
     individually trustworthy (see `gemini_image_parser.
     label_field_validity`); `ingredients_trustworthy` is True only when
@@ -1415,8 +1428,12 @@ async def _run_label_image_pipeline(
     label content, so ingredients tokenized from it are never
     trustworthy evidence (contrast `analyze_ocr_text_with_barcode`,
     where the fallback tokenizes the user's own genuine OCR text).
+    `extraction_diagnostics` (issue #25) is the closed-vocabulary
+    `_label_extraction_diagnostic_fields` dict -- which stage produced
+    this attempt's evidence, never any of its content.
     """
     data: AnalyzedProductData | None = None
+    extraction = "extracted"
     ingredients: list[Any] | None = None
     validity = gemini_image_parser.LabelFieldValidity()
     ingredients_trustworthy = False
@@ -1425,6 +1442,7 @@ async def _run_label_image_pipeline(
         raw_response = await gemini_service.analyze_image(image_bytes)
     except GeminiUnavailableError as exc:
         logger.info("gemini_image_fallback_triggered", reason=str(exc))
+        extraction = "model_unavailable"
     else:
         parsed = parse_gemini_image_json_result(raw_response, all_db_ingredients)
         if parsed is not None:
@@ -1432,7 +1450,8 @@ async def _run_label_image_pipeline(
             validity = gemini_image_parser.label_field_validity(raw_response)
             ingredients_trustworthy = bool(data.raw_ingredient_text.strip())
         else:
-            logger.info("gemini_image_json_invalid_falling_back")
+            extraction = gemini_image_parser.label_extraction_failure_reason(raw_response)
+            logger.info("gemini_image_json_invalid_falling_back", reason=extraction)
 
     if data is None:
         try:
@@ -1450,7 +1469,45 @@ async def _run_label_image_pipeline(
         validity = gemini_image_parser.LabelFieldValidity()
         ingredients_trustworthy = False
 
-    return data, ingredients, validity, ingredients_trustworthy
+    diagnostics = _label_extraction_diagnostic_fields(
+        extraction,
+        # Only an identity the model actually read counts -- the
+        # fallback's placeholder name is never an observed identity.
+        product_identity_observed=extraction == "extracted" and _is_meaningful_identity(data.product_name),
+        nutrition_complete=_nutrition_group_is_complete(validity),
+    )
+    return data, ingredients, validity, ingredients_trustworthy, diagnostics
+
+
+def _label_extraction_diagnostic_fields(
+    extraction: str, *, product_identity_observed: bool, nutrition_complete: bool
+) -> dict:
+    """Issue #25: bounded, content-free diagnostics for one label-image
+    extraction attempt, so the journal can tell an empty EXTRACTION
+    (`label_extraction` != "extracted": `model_unavailable`,
+    `model_response_invalid`, `model_response_empty`) apart from an
+    extracted-but-unresolved ingredient list (the router's existing
+    `unresolvedIngredientCount`), a response/serialization failure (the
+    router's existing `stage`/`INTERNAL_ERROR`) and incomplete nutrition
+    (`label_nutrition_complete`). Carried on the success result dict and
+    on `ProductNotFoundError.diagnostic_metadata`; never on the wire."""
+    return {
+        "label_extraction": extraction,
+        "label_product_identity_observed": product_identity_observed,
+        "label_nutrition_complete": nutrition_complete,
+    }
+
+
+async def _with_label_extraction_diagnostics(finalize: Any, diagnostics: dict) -> dict:
+    """Awaits a label-image finalize coroutine and attaches
+    `diagnostics` to whichever outcome it produces (success dict, or the
+    structured `ProductNotFoundError`), without touching either shape."""
+    try:
+        result = await finalize
+    except ProductNotFoundError as exc:
+        exc.diagnostic_metadata = {**(exc.diagnostic_metadata or {}), **diagnostics}
+        raise
+    return {**result, **diagnostics}
 
 
 def _translation_diagnostic_fields(
@@ -1734,8 +1791,8 @@ async def analyze_label_image_with_barcode(
         raise ImageUnreadableError("The uploaded file is not a readable image.") from exc
 
     all_db_ingredients = await ingredient_repository.get_all(db)
-    data, ingredients, validity, ingredients_trustworthy = await _run_label_image_pipeline(
-        image_bytes, all_db_ingredients
+    data, ingredients, validity, ingredients_trustworthy, extraction_diagnostics = (
+        await _run_label_image_pipeline(image_bytes, all_db_ingredients)
     )
     # Persistent ingredient knowledge cache -- see `ingredient_catalog`'s
     # module docstring. The Bulgarian-alias-aware rebuild further down
@@ -1748,18 +1805,21 @@ async def analyze_label_image_with_barcode(
         db, ingredients
     )
 
-    return await _finalize_barcode_enrichment(
-        db,
-        user_id,
-        barcode_raw,
-        barcode_info,
-        data,
-        ingredients,
-        validity,
-        ingredients_trustworthy,
-        scan_type=ScanType.OCR_LABEL,
-        provenance_provider="label_ocr",
-        pre_translation_summary=pre_translation_summary,
+    return await _with_label_extraction_diagnostics(
+        _finalize_barcode_enrichment(
+            db,
+            user_id,
+            barcode_raw,
+            barcode_info,
+            data,
+            ingredients,
+            validity,
+            ingredients_trustworthy,
+            scan_type=ScanType.OCR_LABEL,
+            provenance_provider="label_ocr",
+            pre_translation_summary=pre_translation_summary,
+        ),
+        extraction_diagnostics,
     )
 
 
@@ -2008,7 +2068,7 @@ async def _finalize_standalone_label_analysis(
         await db.commit()
         raise ProductNotFoundError(
             f"Product {product.barcode} could not be read reliably -- no ingredients were recognized.",
-            details=_label_scan_required_details(product, None),
+            details=_label_scan_required_details(product, None, reason=_NO_INGREDIENTS_READ_REASON),
             diagnostic_metadata=_translation_diagnostic_fields(
                 label_result, ingredient_translation_summary
             ),
@@ -2081,8 +2141,8 @@ async def analyze_label_image(db: AsyncSession, user_id: uuid.UUID, image_bytes:
         raise ImageUnreadableError("The uploaded file is not a readable image.") from exc
 
     all_db_ingredients = await ingredient_repository.get_all(db)
-    data, ingredients, validity, ingredients_trustworthy = await _run_label_image_pipeline(
-        image_bytes, all_db_ingredients
+    data, ingredients, validity, ingredients_trustworthy, extraction_diagnostics = (
+        await _run_label_image_pipeline(image_bytes, all_db_ingredients)
     )
     # Persistent ingredient knowledge cache -- see `ingredient_catalog`'s
     # module docstring. The Bulgarian-alias-aware rebuild further down
@@ -2095,15 +2155,18 @@ async def analyze_label_image(db: AsyncSession, user_id: uuid.UUID, image_bytes:
         db, ingredients
     )
 
-    return await _finalize_standalone_label_analysis(
-        db,
-        user_id,
-        data,
-        ingredients,
-        validity,
-        ingredients_trustworthy,
-        barcode_prefix="img",
-        scan_type=ScanType.OCR_LABEL,
-        provenance_provider="label_ocr",
-        pre_translation_summary=pre_translation_summary,
+    return await _with_label_extraction_diagnostics(
+        _finalize_standalone_label_analysis(
+            db,
+            user_id,
+            data,
+            ingredients,
+            validity,
+            ingredients_trustworthy,
+            barcode_prefix="img",
+            scan_type=ScanType.OCR_LABEL,
+            provenance_provider="label_ocr",
+            pre_translation_summary=pre_translation_summary,
+        ),
+        extraction_diagnostics,
     )

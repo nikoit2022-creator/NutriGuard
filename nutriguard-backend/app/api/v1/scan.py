@@ -172,6 +172,18 @@ def _translation_fields(result: dict) -> dict:
     }
 
 
+def _label_extraction_fields(source: dict) -> dict:
+    """Issue #25: the label-image extraction outcome
+    (`food_analysis._label_extraction_diagnostic_fields`) from a success
+    result dict or a `ProductNotFoundError.diagnostic_metadata` -- all
+    `None` (and so omitted from the journal line) when absent."""
+    return {
+        "labelExtraction": source.get("label_extraction"),
+        "productIdentityObserved": source.get("label_product_identity_observed"),
+        "labelNutritionComplete": source.get("label_nutrition_complete"),
+    }
+
+
 def _diagnostic_base(request: Request, *, operation: str, barcode: str | None) -> dict:
     return {
         "requestId": getattr(request.state, "request_id", None),
@@ -494,6 +506,7 @@ async def scan_label_image(
             # attempt across a LATER `ProductNotFoundError` -- see
             # `diagnostic_metadata=`'s docstring in `app.core.exceptions`.
             **_translation_fields(exc.diagnostic_metadata or {}),
+            **_label_extraction_fields(exc.diagnostic_metadata or {}),
             durationMs=round((time.perf_counter() - started) * 1000, 2),
         )
         raise
@@ -515,6 +528,7 @@ async def scan_label_image(
             outcome="failed",
             errorCode="INTERNAL_ERROR",
             **_translation_fields(result or {}),
+            **_label_extraction_fields(result or {}),
             durationMs=round((time.perf_counter() - started) * 1000, 2),
         )
         raise
@@ -528,6 +542,7 @@ async def scan_label_image(
         ingredientsRecognized=product.has_verified_ingredients,
         nutritionBasis=product.nutrition_basis,
         **_translation_fields(result),
+        **_label_extraction_fields(result),
         **_ingredient_language_counts(result["ingredients"]),
         durationMs=round((time.perf_counter() - started) * 1000, 2),
     )

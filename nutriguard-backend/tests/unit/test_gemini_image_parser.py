@@ -1,6 +1,9 @@
 import json
 
+import pytest
+
 from app.services.gemini_image_parser import (
+    label_extraction_failure_reason,
     label_field_validity,
     nutrition_fields_present,
     parse_gemini_image_json_result,
@@ -99,9 +102,66 @@ def test_unusable_structured_ingredients_fall_back_to_tokenizing_raw_text():
     assert [ingredient.id for ingredient in ingredients] == expected_ids
 
 
-def test_missing_product_name_returns_none():
-    payload = {"rawIngredientText": "Water, Salt"}
+# Issue #25: product identity is optional enrichment, never a gate on the
+# extracted ingredient/nutrition evidence (this test used to assert the
+# whole response was rejected -- that was the defect).
+@pytest.mark.parametrize(
+    "name_fields",
+    [{}, {"productName": ""}, {"productName": "   "}, {"productName": None},
+     {"productName": 123}, {"productName": "null"}, {"productName": "Unknown"}],
+)
+def test_missing_or_placeholder_product_name_keeps_ingredients_without_inventing_a_name(name_fields):
+    payload = {"rawIngredientText": "Water, Salt", **name_fields}
+    parsed = parse_gemini_image_json_result(json.dumps(payload), [])
+    assert parsed is not None
+    data, ingredients = parsed
+    assert data.product_name == ""
+    assert data.raw_ingredient_text == "Water, Salt"
+    assert [ing.common_name for ing in ingredients] == ["Water", "Salt"]
+
+
+def test_missing_product_name_keeps_the_same_nutrition_validation():
+    payload = {
+        "rawIngredientText": "Water, Salt",
+        "sugarGrams": 9.0,
+        "sodiumMg": -5.0,  # still rejected exactly as with a name present
+        "saturatedFatGrams": 1.2,
+        "nutritionBasis": "PER_100_G",
+    }
+    data, _ = parse_gemini_image_json_result(json.dumps(payload), [])
+    validity = label_field_validity(json.dumps(payload))
+    assert data.product_name == ""
+    assert data.sugar_grams == 9.0
+    assert validity.sugar_valid is True
+    assert validity.sodium_valid is False
+    assert validity.all_valid is False
+
+
+def test_real_product_name_is_still_used_trimmed():
+    payload = {"productName": "  Harvest Bar ", "rawIngredientText": "Oats"}
+    data, _ = parse_gemini_image_json_result(json.dumps(payload), [])
+    assert data.product_name == "Harvest Bar"
+
+
+def test_nameless_empty_label_is_still_rejected():
+    payload = {"rawIngredientText": ""}
     assert parse_gemini_image_json_result(json.dumps(payload), []) is None
+
+
+@pytest.mark.parametrize(
+    "raw, reason",
+    [
+        ("not json {{{", "model_response_invalid"),
+        (json.dumps(["a list"]), "model_response_invalid"),
+        (json.dumps({"productName": "X"}), "model_response_invalid"),
+        (json.dumps({"rawIngredientText": 5}), "model_response_invalid"),
+        (json.dumps({"rawIngredientText": ""}), "model_response_empty"),
+        (json.dumps({"rawIngredientText": " ", "sugarGrams": 1.0}), "model_response_empty"),
+    ],
+)
+def test_label_extraction_failure_reason_is_closed_vocabulary(raw, reason):
+    assert parse_gemini_image_json_result(raw, []) is None
+    assert label_extraction_failure_reason(raw) == reason
 
 
 def test_missing_raw_ingredient_text_returns_none():
