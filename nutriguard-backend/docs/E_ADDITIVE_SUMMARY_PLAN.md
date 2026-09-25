@@ -1,5 +1,12 @@
 # E-additive summaries -- Phase 1: inventory, sample pairs and API/data contract
 
+> **Update 2026-09-25:** source verification of this plan's claims, the
+> E150d investigation, revised samples (incl. E150d), a sectioned
+> contract proposal and the remaining owner decisions are in
+> `docs/E_ADDITIVE_PHASE1_VERIFICATION.md`. That document supersedes
+> sections 2, 3 and 4.2 below where they differ; this file is otherwise
+> kept as the original checkpoint record.
+
 Issue: #23 (`feat(backend): source-backed EN/BG summaries for existing E-additive catalog`).
 Phase: **1 of 2 -- STOP at the sample/contract checkpoint for owner approval.** No bulk content,
 no schema change, no loader change and no API change has been made. Backend only.
