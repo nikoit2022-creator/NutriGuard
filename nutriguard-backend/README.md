@@ -1491,6 +1491,17 @@ caught the actual bug there and it is corrected here.
     `tests/integration/test_ingredient_first_label_scan.py`,
     `tests/unit/test_gemini_image_parser.py`. Full contract and evidence:
     `docs/INGREDIENT_FIRST_LABEL_SCAN.md`.
+    Follow-up (additive): label/OCR scan failures (`PRODUCT_NOT_FOUND`,
+    `LABEL_TRANSLATION_UNRELIABLE`, `AI_SERVICE_UNAVAILABLE`,
+    `INTERNAL_ERROR`) carry `error.details.failureReason`, one of
+    `EXTRACTION_EMPTY`, `PROVIDER_UNAVAILABLE`,
+    `PROVIDER_RESPONSE_INVALID`, `TRANSLATION_FAILED` or `UNKNOWN`,
+    set at the stage the failure is observed; a standalone scan's
+    `details.reason` text follows it. An unexpected scan exception is
+    still `500 INTERNAL_ERROR` with the same message, now handled in the
+    router (stack trace still logged) so it can carry `UNKNOWN`. Status
+    codes and existing keys are unchanged; clients treat an absent or
+    unrecognized value as `UNKNOWN`.
 
 No other ambiguities were found that required deviating from the
 contract; where the contract was silent on an implementation detail

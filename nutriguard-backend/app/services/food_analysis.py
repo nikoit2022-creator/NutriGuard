@@ -123,9 +123,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.exceptions import (
     AIServiceUnavailableError,
+    AppError,
     ImageUnreadableError,
     ProductNotFoundError,
+    ScanFailureReason,
     ValidationAppError,
+    with_failure_reason,
 )
 from app.integrations.barcode_providers.base import ProviderProductResult
 from app.integrations.gemini import GeminiUnavailableError, gemini_service
@@ -181,7 +184,8 @@ async def _run_ai_or_fallback(title_hint: str, raw_text: str, db_ingredients: li
         except Exception as fallback_exc:  # noqa: BLE001
             logger.error("fallback_analysis_failed", error=str(fallback_exc))
             raise AIServiceUnavailableError(
-                "Both the AI service and the local fallback analysis failed."
+                "Both the AI service and the local fallback analysis failed.",
+                details=with_failure_reason(None, ScanFailureReason.UNKNOWN),
             ) from fallback_exc
 
 
@@ -566,11 +570,24 @@ _IDENTITY_FOUND_REASON = (
 )
 # Issue #25: a standalone label scan (synthetic `img_`/`ocr_` id) that
 # recognized no ingredients never found a product identity -- saying it
-# did is a false claim shown to the user. Same key, honest retry text.
-_NO_INGREDIENTS_READ_REASON = (
-    "No ingredients could be read from this label. Retake the photo with the "
-    "whole ingredient list in frame, in focus and well lit."
-)
+# did is a false claim shown to the user. Same key, honest text per
+# observed `ScanFailureReason` (`_with_label_extraction_diagnostics`);
+# none of them guesses at photo quality from an empty result.
+_NO_INGREDIENTS_READ_REASON = "No ingredients could be read from this label."
+_STANDALONE_FAILURE_REASON_TEXT = {
+    ScanFailureReason.EXTRACTION_EMPTY: (
+        "No ingredient list was found in this photo. Make sure the ingredient list is in "
+        "the frame and try again."
+    ),
+    ScanFailureReason.PROVIDER_UNAVAILABLE: (
+        "The label could not be analyzed because the analysis service is temporarily "
+        "unavailable. Please try again later."
+    ),
+    ScanFailureReason.PROVIDER_RESPONSE_INVALID: (
+        "The label analysis returned an unusable result. Please try again."
+    ),
+    ScanFailureReason.UNKNOWN: _NO_INGREDIENTS_READ_REASON,
+}
 
 
 def _label_scan_required_details(
@@ -1309,7 +1326,10 @@ async def _persist_enriched_product(
         # Lost a race with a concurrent enrichment/discovery of the same barcode.
         existing = await product_repository.get_by_barcode(db, canonical_barcode)
         if existing is None:
-            raise AIServiceUnavailableError("Could not persist the enriched product.")
+            raise AIServiceUnavailableError(
+                "Could not persist the enriched product.",
+                details=with_failure_reason(None, ScanFailureReason.UNKNOWN),
+            )
 
     _apply_label_enrichment(existing, data, ingredients, validity, ingredients_trustworthy, source_label)
     await db.flush()
@@ -1461,8 +1481,16 @@ async def _run_label_image_pipeline(
                 all_db_ingredients,
             )
         except Exception as fallback_exc:  # noqa: BLE001
+            failure_reason = _label_failure_reason(extraction, ingredient_text_observed=False)
             raise AIServiceUnavailableError(
-                "Both the AI service and the local fallback analysis failed."
+                "Both the AI service and the local fallback analysis failed.",
+                details=with_failure_reason(None, failure_reason),
+                diagnostic_metadata=_label_extraction_diagnostic_fields(
+                    extraction,
+                    product_identity_observed=False,
+                    nutrition_complete=False,
+                    failure_reason=failure_reason,
+                ),
             ) from fallback_exc
         # The keyword-heuristic fallback never extracts anything -- it
         # guesses, from a placeholder string, not the actual label.
@@ -1475,12 +1503,37 @@ async def _run_label_image_pipeline(
         # fallback's placeholder name is never an observed identity.
         product_identity_observed=extraction == "extracted" and _is_meaningful_identity(data.product_name),
         nutrition_complete=_nutrition_group_is_complete(validity),
+        failure_reason=_label_failure_reason(
+            extraction, ingredient_text_observed=ingredients_trustworthy
+        ),
     )
     return data, ingredients, validity, ingredients_trustworthy, diagnostics
 
 
+def _label_failure_reason(extraction: str, *, ingredient_text_observed: bool) -> ScanFailureReason:
+    """The `ScanFailureReason` a label-image attempt reports IF it ends in
+    a failure, from what the extraction stage actually observed. An
+    extraction that did yield ingredient text cannot explain a later
+    failure, so it maps to `UNKNOWN` rather than a guessed cause."""
+    if extraction == "model_unavailable":
+        return ScanFailureReason.PROVIDER_UNAVAILABLE
+    if extraction == "model_response_invalid":
+        return ScanFailureReason.PROVIDER_RESPONSE_INVALID
+    if extraction == "model_response_empty":
+        return ScanFailureReason.EXTRACTION_EMPTY
+    if extraction == "extracted" and not ingredient_text_observed:
+        # Well-formed answer with an empty ingredient list (e.g. a
+        # nutrition-panel-only photo).
+        return ScanFailureReason.EXTRACTION_EMPTY
+    return ScanFailureReason.UNKNOWN
+
+
 def _label_extraction_diagnostic_fields(
-    extraction: str, *, product_identity_observed: bool, nutrition_complete: bool
+    extraction: str,
+    *,
+    product_identity_observed: bool,
+    nutrition_complete: bool,
+    failure_reason: ScanFailureReason,
 ) -> dict:
     """Issue #25: bounded, content-free diagnostics for one label-image
     extraction attempt, so the journal can tell an empty EXTRACTION
@@ -1495,17 +1548,43 @@ def _label_extraction_diagnostic_fields(
         "label_extraction": extraction,
         "label_product_identity_observed": product_identity_observed,
         "label_nutrition_complete": nutrition_complete,
+        "label_failure_reason": failure_reason,
     }
 
 
-async def _with_label_extraction_diagnostics(finalize: Any, diagnostics: dict) -> dict:
+async def _with_label_extraction_diagnostics(
+    finalize: Any, diagnostics: dict, *, standalone: bool
+) -> dict:
     """Awaits a label-image finalize coroutine and attaches
-    `diagnostics` to whichever outcome it produces (success dict, or the
-    structured `ProductNotFoundError`), without touching either shape."""
+    `diagnostics` to whichever outcome it produces, at the stage it
+    occurs -- success dict, any `AppError`, or an unexpected exception
+    (whose `diagnostic_metadata` attribute the router reads) -- without
+    changing a status code or removing any existing key.
+
+    A `ProductNotFoundError` (no ingredients recognized) additionally
+    gains the public `details.failureReason` observed by the extraction
+    stage; a standalone scan's `details.reason` text is replaced by the
+    matching honest text (a barcode-linked one keeps its existing text).
+    Errors that already carry their own `failureReason` (e.g. a
+    translation failure) keep it."""
     try:
         result = await finalize
     except ProductNotFoundError as exc:
+        reason = diagnostics["label_failure_reason"]
+        details = with_failure_reason(exc.details, reason)
+        if standalone:
+            details["reason"] = _STANDALONE_FAILURE_REASON_TEXT[reason]
+        exc.details = details
         exc.diagnostic_metadata = {**(exc.diagnostic_metadata or {}), **diagnostics}
+        raise
+    except AppError as exc:
+        exc.diagnostic_metadata = {**(exc.diagnostic_metadata or {}), **diagnostics}
+        raise
+    except Exception as exc:
+        try:
+            exc.diagnostic_metadata = {**(getattr(exc, "diagnostic_metadata", None) or {}), **diagnostics}
+        except Exception:  # noqa: BLE001 -- best effort; never mask the real error
+            pass
         raise
     return {**result, **diagnostics}
 
@@ -1820,6 +1899,7 @@ async def analyze_label_image_with_barcode(
             pre_translation_summary=pre_translation_summary,
         ),
         extraction_diagnostics,
+        standalone=False,
     )
 
 
@@ -2169,4 +2249,5 @@ async def analyze_label_image(db: AsyncSession, user_id: uuid.UUID, image_bytes:
             pre_translation_summary=pre_translation_summary,
         ),
         extraction_diagnostics,
+        standalone=True,
     )

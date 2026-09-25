@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.core.config import settings
-from app.core.exceptions import TranslationUnreliableError
+from app.core.exceptions import ScanFailureReason, TranslationUnreliableError, with_failure_reason
 from app.integrations.gemini import GeminiUnavailableError, gemini_service
 from app.services.barcode_text_safety import is_placeholder
 from app.services.language_detection import detect_language
@@ -265,6 +265,7 @@ async def _translate_other_language_text(source_text: str) -> _TranslationPayloa
         raise TranslationUnreliableError(
             "The label text could not be translated: the AI translation service is unavailable. "
             "Please try again or rescan a clearer label.",
+            details=with_failure_reason(None, ScanFailureReason.PROVIDER_UNAVAILABLE),
         ) from exc
 
     try:
@@ -272,6 +273,7 @@ async def _translate_other_language_text(source_text: str) -> _TranslationPayloa
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         raise TranslationUnreliableError(
             "The label text could not be reliably translated. Please rescan a clearer label.",
+            details=with_failure_reason(None, ScanFailureReason.PROVIDER_RESPONSE_INVALID),
         ) from exc
 
     try:
@@ -279,6 +281,7 @@ async def _translate_other_language_text(source_text: str) -> _TranslationPayloa
     except ValidationError as exc:
         raise TranslationUnreliableError(
             "The label text could not be reliably translated. Please rescan a clearer label.",
+            details=with_failure_reason(None, ScanFailureReason.PROVIDER_RESPONSE_INVALID),
         ) from exc
 
     # Belt-and-braces alongside the Pydantic `ge`/`le` constraints (which
@@ -288,23 +291,24 @@ async def _translate_other_language_text(source_text: str) -> _TranslationPayloa
     if not math.isfinite(parsed.confidence):
         raise TranslationUnreliableError(
             "The label text could not be reliably translated. Please rescan a clearer label.",
+            details=with_failure_reason(None, ScanFailureReason.PROVIDER_RESPONSE_INVALID),
         )
 
     if parsed.confidence < _MIN_TRANSLATION_CONFIDENCE:
         raise TranslationUnreliableError(
             "The label text could not be translated with sufficient confidence. "
             "Please rescan a clearer, more complete label.",
-            details={
-                "confidence": parsed.confidence,
-                "minimumRequired": _MIN_TRANSLATION_CONFIDENCE,
-            },
+            details=with_failure_reason(
+                {"confidence": parsed.confidence, "minimumRequired": _MIN_TRANSLATION_CONFIDENCE},
+                ScanFailureReason.TRANSLATION_FAILED,
+            ),
         )
 
     failure_reason = _verify_translation_invariants(source_text, parsed.translatedText)
     if failure_reason is not None:
         raise TranslationUnreliableError(
             "The label text could not be reliably translated. Please rescan a clearer label.",
-            details={"reason": failure_reason},
+            details=with_failure_reason({"reason": failure_reason}, ScanFailureReason.TRANSLATION_FAILED),
         )
 
     return parsed

@@ -283,7 +283,10 @@ async def test_empty_or_blurry_label_gives_honest_retry_guidance(app_client, mon
     assert details["ingredientsScanRequired"] is True
     assert "ingredients" not in details  # nothing fabricated
     assert not details["reason"].startswith(IDENTITY_FOUND_REASON_PREFIX)
-    assert "No ingredients could be read" in details["reason"]
+    assert details["failureReason"] == "EXTRACTION_EMPTY"
+    # Never infers photo quality from an empty result.
+    for guess in ("blur", "focus", "lit", "light"):
+        assert guess not in details["reason"].lower()
 
 
 @pytest.mark.asyncio
@@ -455,3 +458,239 @@ def test_diagnostic_fields_never_reach_the_wire():
 
     fields = set(FullProductAnalysisOut.model_json_schema(by_alias=True)["properties"])
     assert not fields & {"labelExtraction", "productIdentityObserved", "labelNutritionComplete"}
+
+
+# --- 8. Public failure-reason contract: error.details.failureReason -------------
+#
+# Every reachable label/OCR scan failure carries one closed-vocabulary,
+# content-free value, observed at the stage it occurred. Each test also
+# plants a "sensitive" marker in the provider exception / provider output
+# / OCR text and asserts it never reaches the response body.
+
+FAILURE_REASONS = {
+    "EXTRACTION_EMPTY",
+    "PROVIDER_UNAVAILABLE",
+    "PROVIDER_RESPONSE_INVALID",
+    "TRANSLATION_FAILED",
+    "UNKNOWN",
+}
+SECRET = "SECRET-MARKER-7f3a"
+GERMAN_LABEL = "Wasser, Zucker, Salz, Natriumbenzoat (E211)"
+BARCODE_TRANSLATION = "7501031311309"
+
+
+def _assert_failure(resp, status: int, code: str, reason: str) -> dict:
+    assert resp.status_code == status, resp.text
+    error = resp.json()["error"]
+    assert error["code"] == code
+    assert error["details"]["failureReason"] == reason
+    assert reason in FAILURE_REASONS
+    assert SECRET not in resp.text
+    return error["details"]
+
+
+def test_failure_reason_vocabulary_is_exactly_the_published_one():
+    from app.core.exceptions import ScanFailureReason
+
+    assert {r.value for r in ScanFailureReason} == FAILURE_REASONS
+
+
+@pytest.mark.asyncio
+async def test_provider_unavailable_is_reported_without_the_provider_error(app_client, monkeypatch):
+    async def unavailable(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        raise GeminiUnavailableError(f"upstream 503 key={SECRET}")
+
+    monkeypatch.setattr(gemini_service, "analyze_image", unavailable)
+    resp = await app_client.post(
+        "/api/v1/scan/label-image",
+        headers=await _headers(app_client, "i25-fr-unavailable"),
+        files={"image": ("label.jpg", _jpeg(), "image/jpeg")},
+    )
+    details = _assert_failure(resp, 404, "PRODUCT_NOT_FOUND", "PROVIDER_UNAVAILABLE")
+    assert "temporarily unavailable" in details["reason"]
+    # Backward compatible: every pre-existing key is still present.
+    for key in ("labelScanRequired", "discoveredIdentity", "suggestedAction", "analysisComplete",
+                "healthScoreAvailable", "healthScore", "nutritionScanRequired",
+                "ingredientsScanRequired", "dataSource"):
+        assert key in details
+
+
+@pytest.mark.asyncio
+async def test_missing_provider_key_is_provider_unavailable(app_client):
+    assert gemini_service.is_configured is False  # tests run without a key
+    resp = await app_client.post(
+        "/api/v1/scan/label-image",
+        headers=await _headers(app_client, "i25-fr-nokey"),
+        files={"image": ("label.jpg", _jpeg(), "image/jpeg")},
+    )
+    _assert_failure(resp, 404, "PRODUCT_NOT_FOUND", "PROVIDER_UNAVAILABLE")
+
+
+@pytest.mark.asyncio
+async def test_invalid_provider_response_is_reported_without_its_content(app_client, monkeypatch):
+    resp = await _scan(app_client, monkeypatch, f"not json {SECRET} {{{{", "i25-fr-invalid")
+    details = _assert_failure(resp, 404, "PRODUCT_NOT_FOUND", "PROVIDER_RESPONSE_INVALID")
+    assert "unusable result" in details["reason"]
+
+
+@pytest.mark.asyncio
+async def test_nutrition_only_extraction_is_extraction_empty(app_client, monkeypatch):
+    resp = await _scan(app_client, monkeypatch, {"rawIngredientText": "", **FULL_NUTRITION}, "i25-fr-nutr")
+    _assert_failure(resp, 404, "PRODUCT_NOT_FOUND", "EXTRACTION_EMPTY")
+
+
+@pytest.mark.asyncio
+async def test_barcode_linked_empty_extraction_adds_reason_and_keeps_existing_text(app_client, monkeypatch):
+    resp = await _scan(
+        app_client, monkeypatch, {"rawIngredientText": ""}, "i25-fr-linked-empty", barcode="0012345678905"
+    )
+    details = _assert_failure(resp, 404, "PRODUCT_NOT_FOUND", "EXTRACTION_EMPTY")
+    assert details["discoveredIdentity"]["barcode"] == "0012345678905"
+    assert details["reason"].startswith(IDENTITY_FOUND_REASON_PREFIX)  # barcode-linked text unchanged
+
+
+@pytest.mark.asyncio
+async def test_provider_and_fallback_both_failing_keeps_503_with_the_observed_cause(app_client, monkeypatch):
+    import app.services.food_analysis as food_analysis_module
+
+    async def unavailable(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        raise GeminiUnavailableError("simulated")
+
+    def broken_fallback(*args, **kwargs):
+        raise RuntimeError(f"fallback crashed {SECRET}")
+
+    monkeypatch.setattr(gemini_service, "analyze_image", unavailable)
+    monkeypatch.setattr(food_analysis_module, "fallback_local_analysis", broken_fallback)
+    calls = _capture(monkeypatch)
+    resp = await app_client.post(
+        "/api/v1/scan/label-image",
+        headers=await _headers(app_client, "i25-fr-503"),
+        files={"image": ("label.jpg", _jpeg(), "image/jpeg")},
+    )
+    _assert_failure(resp, 503, "AI_SERVICE_UNAVAILABLE", "PROVIDER_UNAVAILABLE")
+    assert calls[0]["failureReason"] == "PROVIDER_UNAVAILABLE"
+    assert calls[0]["labelExtraction"] == "model_unavailable"  # captured at the stage it occurred
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "translation, reason, extra_key",
+    [
+        ("unavailable", "PROVIDER_UNAVAILABLE", None),
+        ("invalid", "PROVIDER_RESPONSE_INVALID", None),
+        ("low_confidence", "TRANSLATION_FAILED", "confidence"),
+        ("invariant", "TRANSLATION_FAILED", "reason"),
+    ],
+)
+async def test_barcode_linked_translation_failures_keep_422_with_a_reason(
+    app_client, monkeypatch, translation, reason, extra_key
+):
+    async def fake_translate(text: str) -> str:
+        if translation == "unavailable":
+            raise GeminiUnavailableError(f"translate down {SECRET}")
+        if translation == "invalid":
+            return f"garbage {SECRET}"
+        if translation == "low_confidence":
+            return json.dumps({"detectedLanguage": "de", "confidence": 0.05, "translatedText": "Water"})
+        # E211 dropped -> invariant check fails.
+        return json.dumps({"detectedLanguage": "de", "confidence": 0.9, "translatedText": "Water, Sugar, Salt"})
+
+    monkeypatch.setattr(gemini_service, "translate_label_text", fake_translate)
+    calls = _capture(monkeypatch)
+    resp = await _scan(
+        app_client, monkeypatch, {"rawIngredientText": GERMAN_LABEL}, f"i25-fr-tr-{translation}",
+        barcode=BARCODE_TRANSLATION,
+    )
+    details = _assert_failure(resp, 422, "LABEL_TRANSLATION_UNRELIABLE", reason)
+    if extra_key:
+        assert extra_key in details  # pre-existing keys kept
+    assert calls[0]["failureReason"] == reason
+    assert calls[0]["labelExtraction"] == "extracted"
+
+
+@pytest.mark.asyncio
+async def test_ocr_text_translation_failure_has_a_reason(app_client, monkeypatch):
+    async def fake_translate(text: str) -> str:
+        return json.dumps({"detectedLanguage": "de", "confidence": 0.05, "translatedText": "Water"})
+
+    monkeypatch.setattr(gemini_service, "translate_label_text", fake_translate)
+    resp = await app_client.post(
+        "/api/v1/scan/ocr-text",
+        headers=await _headers(app_client, "i25-fr-ocr-tr"),
+        json={"rawText": GERMAN_LABEL, "barcode": BARCODE_TRANSLATION},
+    )
+    _assert_failure(resp, 422, "LABEL_TRANSLATION_UNRELIABLE", "TRANSLATION_FAILED")
+    assert "Wasser" not in resp.text  # OCR text never echoed
+
+
+@pytest.mark.asyncio
+async def test_ocr_text_local_fallback_failure_is_unknown(app_client, monkeypatch):
+    import app.services.food_analysis as food_analysis_module
+
+    def broken_fallback(*args, **kwargs):
+        raise RuntimeError(f"fallback crashed {SECRET}")
+
+    monkeypatch.setattr(food_analysis_module, "fallback_local_analysis", broken_fallback)
+    resp = await app_client.post(
+        "/api/v1/scan/ocr-text",
+        headers=await _headers(app_client, "i25-fr-ocr-503"),
+        json={"rawText": "Oats, Sugar"},
+    )
+    _assert_failure(resp, 503, "AI_SERVICE_UNAVAILABLE", "UNKNOWN")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["label-image", "ocr-text"])
+async def test_unexpected_processing_error_is_500_unknown_without_leaking(app_client, monkeypatch, endpoint):
+    import app.services.food_analysis as food_analysis_module
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError(f"db password={SECRET}")
+
+    calls = _capture(monkeypatch)
+    headers = await _headers(app_client, f"i25-fr-500-{endpoint}")
+    if endpoint == "label-image":
+        _mock_image(monkeypatch, {"rawIngredientText": INGREDIENTS})
+        monkeypatch.setattr(food_analysis_module, "_finalize_standalone_label_analysis", boom)
+        resp = await app_client.post(
+            "/api/v1/scan/label-image", headers=headers, files={"image": ("label.jpg", _jpeg(), "image/jpeg")}
+        )
+    else:
+        monkeypatch.setattr(food_analysis_module, "analyze_ocr_text", boom)
+        resp = await app_client.post("/api/v1/scan/ocr-text", headers=headers, json={"rawText": "Oats"})
+
+    _assert_failure(resp, 500, "INTERNAL_ERROR", "UNKNOWN")
+    assert resp.json()["error"]["message"] == "An unexpected error occurred."
+    assert resp.json()["error"]["details"] == {"failureReason": "UNKNOWN"}
+    assert calls[0]["failureReason"] == "UNKNOWN"
+    if endpoint == "label-image":
+        # The extraction had succeeded before the later failure -- recorded
+        # from the exception itself, not from a result dict that never existed.
+        assert calls[0]["labelExtraction"] == "extracted"
+
+
+@pytest.mark.asyncio
+async def test_failure_without_an_observed_cause_falls_back_to_unknown(app_client, monkeypatch):
+    """Backward-compatible fallback: a not-found raised by a path that
+    observed no cause still gets `UNKNOWN`, never a guessed cause."""
+    import app.services.food_analysis as food_analysis_module
+    from app.core.exceptions import ProductNotFoundError
+
+    async def not_found(*args, **kwargs):
+        raise ProductNotFoundError("not found", details={"labelScanRequired": True})
+
+    monkeypatch.setattr(food_analysis_module, "analyze_ocr_text", not_found)
+    resp = await app_client.post(
+        "/api/v1/scan/ocr-text", headers=await _headers(app_client, "i25-fr-fallback"), json={"rawText": "Oats"}
+    )
+    details = _assert_failure(resp, 404, "PRODUCT_NOT_FOUND", "UNKNOWN")
+    assert details["labelScanRequired"] is True
+
+
+@pytest.mark.asyncio
+async def test_successful_scans_never_carry_a_failure_reason(app_client, monkeypatch):
+    resp = await _scan(app_client, monkeypatch, {"rawIngredientText": INGREDIENTS}, "i25-fr-success")
+    assert resp.status_code == 200
+    assert "failureReason" not in resp.text
+    assert "label_failure_reason" not in resp.text
+
