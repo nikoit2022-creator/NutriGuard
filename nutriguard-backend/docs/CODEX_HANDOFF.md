@@ -1,5 +1,21 @@
 # CODEX_HANDOFF
 
+## 2026-09-26: issue #23 stage 1 -- catalog baseline audit (Claude Code, isolated worktree)
+
+Branch `audit/backend-catalog-baseline-issue-23`, from `origin/main` `32bd7efc05750470da6f48eab7c4111e45db1d26`. Audit only: no application code, seed, schema or API change. Authorization: issue #23 comment 5845208498, stage 1 (bounded read-only live catalog audit).
+
+**Investigated.** Live dev-stack catalog (read-only session, aggregate counts, catalog tables plus product `ingredient_ids` only; no user/device/scan/OCR/log access; credentials never in commands or files) and the Git seeds. Full findings, tables and limits: `docs/CATALOG_BASELINE_AUDIT.md`. Headlines: 289 ingredients (47 curated, 242 OCR-derived); 30 of 45 curated E-coded rows have no description; 0 curated rows have a source URL or per-field provenance and all 43 starter-CSV rows cite only generic landing pages; E150D exists only as an empty OCR-derived row; 12 of 47 curated rows have a BG profile; git seeds reconcile exactly with live (12 + 35 = 47). New defect found and reproduced on baseline: a failed label-image provider call (`404`) still persists the placeholder sentence tokens as two catalog rows, referenced by 16 products. The supplied 800-row registry is not present, so it was not compared.
+
+**Files.** `scripts/audit/catalog_baseline_readonly.sql`, `scripts/audit/seed_sources_inventory.py`, `tests/unit/test_catalog_baseline_audit_scripts.py`, `docs/CATALOG_BASELINE_AUDIT.md`, this file.
+
+**Commands/tests.** Read-only `psql` through the local DB container (`default_transaction_read_only=on`, `BEGIN READ ONLY … ROLLBACK`). `python scripts/audit/seed_sources_inventory.py`. Pinned image (fastapi 0.115.6, pydantic 2.10.4, SQLAlchemy 2.0.36, pytest 8.3.4): `python -m pytest -q` -> 593 passed, 10 skipped.
+
+**Unresolved.** Placeholder-token catalog pollution (fix in stage 2); BG hash staleness and per-finding affected-product counts (stage 4); one dev DB is not a production sample.
+
+**Next step.** Stage 2 in its own branch from `origin/main`: candidate/observation metadata on the existing `ingredients`/`ingredient_aliases`, no materialization of untrusted fallback tokens, junk detection, exact-identifier/validated-alias reuse only.
+
+---
+
 ## 2026-09-17 (later): code-review follow-up -- translation correctness, EN/BG contract, diagnostic accuracy (Claude Code, isolated worktree)
 
 Continuation of the entry immediately below, addressing a code review of commit `8ca0119fac1fbffb47bb64b5cb50a0f5ada83fb7` on the same branch (`feat/backend-ingredient-language-diagnostics`). Also tracked as GitHub issue #19 (shared Claude/Codex task record); a copy of this report was intended to be posted there, with a fallback to committing it into this repo when API/comment access isn't available in this session -- see `docs/INGREDIENT_LANGUAGE_REVIEW.md` if present. Worked in the same isolated worktree as before; live checkout/database/containers untouched throughout. One subagent used (issue 3, non-overlapping file ownership: `app/services/ingredient_segmentation.py` + its test file only).
