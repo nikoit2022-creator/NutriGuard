@@ -1,21 +1,5 @@
 # CODEX_HANDOFF
 
-## 2026-09-26: issue #25 evidence-loss fix -- `RESOLUTION_FAILED` (Claude Code, isolated worktree)
-
-Branch `fix/backend-ingredient-first-label-scan`, parent `bc709dd0bb805e9df0fc448a7754f8d73e217926`, `origin/main` still `32bd7efc05750470da6f48eab7c4111e45db1d26`. Backend only; no Android, live DB, container, secret or deploy access. Owner authorization: issue #25 comment 5845207733.
-
-**Changed.** Non-empty label text that yields no usable ingredient (`---`, `...`, `; ; ,`, one character, digits only) used to return `200` with `ingredients: []` and `hasVerifiedIngredients: true` on all four paths (image/OCR, standalone/barcode-linked), and barcode-linked it counted as a complete group. Now: the existing `404 PRODUCT_NOT_FOUND` partial envelope with `error.details.failureReason: "RESOLUTION_FAILED"` (new enum value, additive). Usable = a resolved ingredient whose name has a letter; unknown-but-valid names are still returned with no description/rating. Barcode-linked existing products keep every stored ingredient/nutrition/identity field and earlier provenance text; the `404` returns the preserved ingredients in `details.ingredients`. Contract, JSON captures and Android notes: `docs/INGREDIENT_FIRST_LABEL_SCAN.md` section 3.7.
-
-**Files.** `app/core/exceptions.py`, `app/services/food_analysis.py`, `tests/integration/test_label_scan_resolution_failed.py` (new, 39 cases), `tests/integration/test_ingredient_first_label_scan.py` (vocabulary pin), `docs/INGREDIENT_FIRST_LABEL_SCAN.md`, `README.md`, this file.
-
-**Verification (pinned deps: fastapi 0.115.6, pydantic 2.10.4, SQLAlchemy 2.0.36, pytest 8.3.4).** Full suite 687 passed, 10 skipped (the opt-in Postgres tests). `pytest tests/postgres` on a disposable `postgres:16-alpine` (own network, no published ports, removed afterwards): 10 passed. `alembic heads`: single head `c6d7e8f9a0b1`, upgrade OK, no migration added. `app.openapi()` identical to `openapi.json`. 31 of the 39 new tests fail on `bc709dd`.
-
-**Unresolved.** Live confirmation of the owner's device symptom is still outstanding. Junk that contains letters (OCR noise) is still a usable name; that belongs to issue #23 stage 2. An empty extraction on a not-yet-verified barcode row still overwrites its unverified ingredient text (baseline behavior, not broadened). Placeholder identity strings in `discoveredIdentity` remain (section 7 of the report).
-
-**Next step.** Open/refresh the PR for this branch, have Codex confirm the `404` + `details.ingredients` handling, then start issue #23 (its own branch from `origin/main`, not stacked on this one).
-
----
-
 ## 2026-09-17 (later): code-review follow-up -- translation correctness, EN/BG contract, diagnostic accuracy (Claude Code, isolated worktree)
 
 Continuation of the entry immediately below, addressing a code review of commit `8ca0119fac1fbffb47bb64b5cb50a0f5ada83fb7` on the same branch (`feat/backend-ingredient-language-diagnostics`). Also tracked as GitHub issue #19 (shared Claude/Codex task record); a copy of this report was intended to be posted there, with a fallback to committing it into this repo when API/comment access isn't available in this session -- see `docs/INGREDIENT_LANGUAGE_REVIEW.md` if present. Worked in the same isolated worktree as before; live checkout/database/containers untouched throughout. One subagent used (issue 3, non-overlapping file ownership: `app/services/ingredient_segmentation.py` + its test file only).
