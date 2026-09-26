@@ -10,7 +10,8 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any
 
-from app.models.enums import RiskLevel
+from app.models.enums import TRUSTED_INGREDIENT_SOURCES, IngredientSource, RiskLevel
+from app.services.ingredient_normalization import normalize_ingredient_name
 
 _BRACKET_OR_PERCENT = re.compile(r"\[.*?\]|\(.*?%\)")
 _NON_WORD_EDGES = re.compile(r"^\W+|\W+$")
@@ -51,7 +52,35 @@ def normalize_and_extract_tokens(raw_text: str) -> list[str]:
     return result
 
 
+def _trusted_for_containment(ing: Any) -> bool:
+    """Only curated/regulatory rows may absorb a MORE specific token by
+    containment. A row without a `source` (a plain test double) is treated
+    as curated, which keeps the historical behavior for that shape."""
+    return getattr(ing, "source", IngredientSource.CURATED_SEED) in TRUSTED_INGREDIENT_SOURCES
+
+
+def _contains_whole_phrase(haystack: str, phrase: str) -> bool:
+    return re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", haystack) is not None
+
+
 def match_against_database(tokens: list[str], db_ingredients: list[Any]) -> NormalizedIngredientResult:
+    """Matches each token to an existing catalog row by IDENTITY evidence
+    only (issue #23, stage 2):
+
+      1. an exact E-number;
+      2. an exact normalized name (`common_name` or `scientific_name`),
+         against ANY row;
+      3. a token that CONTAINS a curated/regulatory row's full name as
+         whole words ("cane sugar" contains "sugar").
+
+    A token that is merely a FRAGMENT of a name never matches ("water" is
+    not "carbonated water", "sugar" is not "sugar-free sweetener", "salt"
+    is not "salted butter"), and an uncurated OCR-derived row is only ever
+    matched exactly. Reproduced before this change: after one scan of
+    "Carbonated Water, Sugar-free sweetener, Salted butter", a later scan
+    of "Water, Sugar, Salt" returned those three rows instead. Tokens with
+    no match stay unknown and reach the catalog's exact alias lookup
+    (`ingredient_catalog.get_or_create_catalog_ingredient`)."""
     matched: list[Any] = []
     unknown: list[str] = []
 
@@ -68,15 +97,31 @@ def match_against_database(tokens: list[str], db_ingredients: list[Any]) -> Norm
             )
 
         if found is None:
-            for ing in db_ingredients:
-                common = ing.common_name.lower()
-                sci = (ing.scientific_name or "").lower()
-                if (
-                    (common and (lower_token in common or common in lower_token))
-                    or (sci and lower_token in sci)
-                ):
-                    found = ing
-                    break
+            token_norm = normalize_ingredient_name(token)
+            if token_norm:
+                found = next(
+                    (
+                        ing
+                        for ing in db_ingredients
+                        if token_norm
+                        in (
+                            normalize_ingredient_name(ing.common_name or ""),
+                            normalize_ingredient_name(ing.scientific_name or ""),
+                        )
+                    ),
+                    None,
+                )
+            if found is None and token_norm:
+                found = next(
+                    (
+                        ing
+                        for ing in db_ingredients
+                        if _trusted_for_containment(ing)
+                        and (common := normalize_ingredient_name(ing.common_name or ""))
+                        and _contains_whole_phrase(token_norm, common)
+                    ),
+                    None,
+                )
 
         if found is not None:
             if found not in matched:

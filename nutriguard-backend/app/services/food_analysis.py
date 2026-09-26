@@ -1149,7 +1149,11 @@ def _apply_label_enrichment(
     # product complete; an incomplete/invalid group never erases verified
     # evidence. Ingredient lists are replaced (not unioned) so removed or
     # corrected label items do not linger forever.
-    if ingredients_complete_this_scan or not existing.has_verified_ingredients:
+    # Issue #23 (stage 2): an untrusted attempt (the label-image provider
+    # failed, or the photo held no ingredient text) observed nothing about
+    # the ingredients, so it must not replace what an unverified row already
+    # has -- provider-sourced text, ids and flags -- with an empty result.
+    if ingredients_complete_this_scan or (not existing.has_verified_ingredients and ingredients_trustworthy):
         existing.raw_ingredient_text = data.raw_ingredient_text
         existing.original_ingredient_text = data.original_ingredient_text
         existing.ingredient_text_source_language = data.ingredient_text_source_language
@@ -1449,6 +1453,12 @@ async def _run_label_image_pipeline(
         # guesses, from a placeholder string, not the actual label.
         validity = gemini_image_parser.LabelFieldValidity()
         ingredients_trustworthy = False
+        # Issue #23 (stage 2): the tokens of that placeholder sentence are
+        # error text, not ingredients. Reproduced at baseline 32bd7ef: they
+        # were materialized as catalog rows and referenced by products.
+        # Nothing observed means no ingredient text and no ingredients.
+        data.raw_ingredient_text = ""
+        ingredients = []
 
     return data, ingredients, validity, ingredients_trustworthy
 

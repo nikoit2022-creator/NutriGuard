@@ -636,6 +636,7 @@ snapshot is included at `openapi.json` for convenience/diffing).
 | `refresh_tokens` | Persisted refresh-token registry (`jti`), enabling rotation and revocation |
 | `ingredients` | The one persistent, reusable ingredient catalog — mirrors `IngredientEntity` (plus additive canonical-identity/provenance columns, see section 13) — every curated/seeded entry AND every OCR/Gemini-observed ingredient with no curated match (an `UNVERIFIED` minimal record, see section 13) |
 | `ingredient_aliases` | Reverse-lookup index from any known name/spelling variant (English, Bulgarian, OCR/spelling variant) to its one canonical `ingredients` row — see section 13 |
+| `ingredient_candidates` | Bounded observation queue for ingredient tokens with no curated identity (issue #23): first/last seen, encounter count, closed-vocabulary review flags, and a nullable pointer at the `ingredients` row the token resolved to. Holds no evidence and is not a second catalog — see `docs/INGREDIENT_CANDIDATE_QUEUE.md` |
 | `products` | Analyzed products — mirrors `ProductEntity` exactly, including a denormalized `ingredient_ids` text column (see section 6), plus additive discovery-provenance columns (see section 10.4) not part of the public API contract |
 | `scan_history` | Per-user scan log — mirrors `ScanHistoryEntity` |
 | `user_health_profiles` | One row per user — mirrors `UserHealthProfile` |
@@ -2881,3 +2882,23 @@ E-number/alias/Bulgarian dedup, race-safe insert), `tests/integration/test_load_
 on next retrieval, `needsRefresh` fresh vs. expired), and
 `tests/postgres/test_ingredient_catalog_concurrency_postgres.py`
 (opt-in, real concurrent-session PostgreSQL).
+
+## 14. Ingredient candidate queue and identity matching (issue #23, stage 2)
+
+Unknown ingredient tokens are now counted in a bounded queue
+(`ingredient_candidates`, migration `d7e8f9a0b1c2`) instead of only
+piling up as `OCR_HEURISTIC` catalog rows. Identity is decided exactly as
+before by official identifier, then exact alias; the queue only observes.
+Two identity-safety corrections ship with it, both visible to clients as
+fewer wrong merges and fewer junk ingredient cards, with no wire-format
+change (`openapi.json` identical):
+
+- A token that is merely a fragment of a name no longer matches it
+  ("Water" was resolving to a stored "Carbonated Water", "Sugar" to
+  "Sugar-free sweetener"); an uncurated row matches only exactly.
+- OCR junk (a system error sentence, or a token with no letter) is no
+  longer stored as a catalog ingredient or returned as one.
+
+Full design, guarantees, maintenance commands and verification:
+`docs/INGREDIENT_CANDIDATE_QUEUE.md`.
+

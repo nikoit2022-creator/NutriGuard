@@ -65,6 +65,7 @@ from app.models.enums import (
 )
 from app.models.ingredient import Ingredient
 from app.repositories import ingredient_alias_repository, ingredient_repository, product_repository
+from app.services import ingredient_candidate_flags, ingredient_candidates
 from app.services.barcode_text_safety import is_placeholder
 from app.services.ingredient_normalization import normalize_ingredient_name
 from app.services.ingredient_regulatory import is_authoritative_regulatory_source
@@ -1267,7 +1268,21 @@ async def materialize_ingredients(
     see `_resolve_ingredient_languages`'s own docstring for what the
     second and third elements mean and why callers need them.
     """
-    prepared, translation_occurred, summary = await _resolve_ingredient_languages(db, ingredients)
+    # Issue #23 (stage 2): OCR junk -- a system placeholder sentence or a
+    # token with no letter -- is provably not an ingredient. It is never
+    # persisted as a catalog identity and never returned as one; it is only
+    # counted in the candidate queue.
+    observations: list[ingredient_candidates.Observation] = []
+    kept: list[Any] = []
+    for ing in ingredients:
+        if isinstance(ing, SyntheticIngredient) and ingredient_candidate_flags.is_junk(
+            ingredient_candidate_flags.classify_token(ing.common_name)
+        ):
+            observations.append(ingredient_candidates.Observation(name=ing.common_name, e_number=ing.e_number))
+            continue
+        kept.append(ing)
+
+    prepared, translation_occurred, summary = await _resolve_ingredient_languages(db, kept)
 
     materialized: list[Any] = []
     for ing in prepared:
@@ -1275,6 +1290,22 @@ async def materialize_ingredients(
             resolved = await get_or_create_catalog_ingredient(db, ing)
             materialized.append(resolved)
             await _register_original_text_alias(db, resolved, ing)
+            observations.append(
+                ingredient_candidates.Observation(
+                    # The token as observed: the pre-translation text when a
+                    # translation replaced it. Identity is never inferred from it.
+                    name=ing.original_text or ing.common_name,
+                    e_number=ing.e_number,
+                    resolved=resolved,
+                )
+            )
         else:
             materialized.append(ing)
+            if isinstance(ing, Ingredient) and not ingredient_candidates.is_known_identity(ing):
+                # A later sighting of an already-persisted uncurated identity
+                # (matched by exact name upstream): still an encounter.
+                observations.append(
+                    ingredient_candidates.Observation(name=ing.common_name, e_number=ing.e_number, resolved=ing)
+                )
+    await ingredient_candidates.record_observations(db, observations)
     return materialized, translation_occurred, summary
