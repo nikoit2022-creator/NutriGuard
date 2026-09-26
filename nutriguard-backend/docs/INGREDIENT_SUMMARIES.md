@@ -290,11 +290,13 @@ Nothing here was stacked on unmerged work.
 - **Stage 2** (`feat/backend-ingredient-candidate-queue-issue-23`, migration
   `d7e8f9a0b1c2`) has the same parent `c6d7e8f9a0b1`. **Whichever migration
   merges second must change its `down_revision` to the other's revision**;
-  the single-head test fails until that one-line edit is made. Both branches
-  also touch `README.md`, `app/core/config.py`, `app/models/__init__.py`,
-  `app/services/food_analysis.py` and
-  `tests/unit/test_ingredient_language_provenance_migration.py`; the edits are
-  additive and in different places.
+  the single-head test fails until that one-line edit is made. A dry-run
+  merge of this branch with the stage 2 branch (`git merge-tree`) reports
+  textual conflicts in exactly two files, `README.md` and
+  `app/models/__init__.py`; both are adjacent additive lines, keep both.
+  `app/core/config.py`, `app/services/food_analysis.py` and
+  `tests/unit/test_ingredient_language_provenance_migration.py` merge
+  automatically. The migration test then needs the `down_revision` edit above.
 - **Recommended order:** stage 2 first (it fixes fragment-name convergence that
   name summaries depend on), then this branch with its `down_revision` set to
   `d7e8f9a0b1c2`.
