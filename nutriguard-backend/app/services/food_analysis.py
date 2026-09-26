@@ -586,8 +586,18 @@ _STANDALONE_FAILURE_REASON_TEXT = {
     ScanFailureReason.PROVIDER_RESPONSE_INVALID: (
         "The label analysis returned an unusable result. Please try again."
     ),
+    ScanFailureReason.RESOLUTION_FAILED: (
+        "Text was read from the label, but no ingredient names could be recognized in it. "
+        "Try again with the ingredient list in view."
+    ),
     ScanFailureReason.UNKNOWN: _NO_INGREDIENTS_READ_REASON,
 }
+# Barcode-linked variant: the product already held verified ingredients,
+# which this attempt left untouched.
+_RESOLUTION_FAILED_KEPT_REASON = (
+    _STANDALONE_FAILURE_REASON_TEXT[ScanFailureReason.RESOLUTION_FAILED]
+    + " The product's previously saved ingredients were kept."
+)
 
 
 def _label_scan_required_details(
@@ -1106,12 +1116,47 @@ def _nutrition_group_is_complete(validity: "gemini_image_parser.LabelFieldValidi
     return validity.all_valid
 
 
-def _ingredients_group_is_complete(data: AnalyzedProductData, ingredients_trustworthy: bool) -> bool:
+def _has_usable_ingredients(ingredients: list[Any]) -> bool:
+    """Issue #25: True when at least one resolved ingredient carries a
+    name with a letter in it. "Usable" is an identity question, NOT a
+    curation one: a valid but unknown ingredient name (no catalog match,
+    no description, no risk rating) is usable. Punctuation-only text
+    tokenizes to nothing, and a digits-only token ("1234") is not an
+    ingredient name, so neither makes an ingredient group complete."""
+    return any(
+        any(ch.isalpha() for ch in (getattr(ing, "common_name", "") or "")) for ing in ingredients
+    )
+
+
+def _ingredient_resolution_failed(
+    data: AnalyzedProductData, ingredients_trustworthy: bool, ingredients: list[Any]
+) -> bool:
+    """Issue #25: real, trustworthy label text WAS extracted but no usable
+    ingredient survived tokenization/resolution. Different from an empty
+    extraction (no text at all, `EXTRACTION_EMPTY`) and from an untrusted
+    fallback attempt (`ingredients_trustworthy` False)."""
+    return (
+        ingredients_trustworthy
+        and bool(data.raw_ingredient_text.strip())
+        and not _has_usable_ingredients(ingredients)
+    )
+
+
+def _ingredients_group_is_complete(
+    data: AnalyzedProductData, ingredients_trustworthy: bool, ingredients: list[Any]
+) -> bool:
     """The INGREDIENTS evidence group: real, trustworthy ingredient-list
     text was extracted (not a heuristic guess from a placeholder/error
-    string -- see `ingredients_trustworthy`'s callers) AND it's actually
-    non-empty. Independent of the nutrition group."""
-    return ingredients_trustworthy and bool(data.raw_ingredient_text.strip())
+    string -- see `ingredients_trustworthy`'s callers), it's actually
+    non-empty, AND at least one usable ingredient resulted from it (issue
+    #25: text such as "---" is non-empty but yields none, and must not
+    produce a falsely complete group). Independent of the nutrition
+    group."""
+    return (
+        ingredients_trustworthy
+        and bool(data.raw_ingredient_text.strip())
+        and _has_usable_ingredients(ingredients)
+    )
 
 
 def _apply_label_enrichment(
@@ -1121,11 +1166,15 @@ def _apply_label_enrichment(
     validity: "gemini_image_parser.LabelFieldValidity",
     ingredients_trustworthy: bool,
     source_label: str,
-) -> None:
+) -> bool:
     """
-    Mutates `existing` IN PLACE. Complete first-party label evidence may
-    refresh the corresponding group; incomplete evidence only fills missing
-    fields and never erases a verified group. Does NOT commit -- the caller
+    Mutates `existing` IN PLACE. Returns True when this attempt completed
+    an evidence group (issue #25: lets the caller record honestly whether
+    a failed-resolution attempt contributed anything to the row).
+
+    Complete first-party label evidence may refresh the corresponding
+    group; incomplete evidence only fills missing fields and never erases
+    a verified group. Does NOT commit -- the caller
     controls the single outer-transaction commit point (review round 3
     finding 3; see `_finalize_barcode_enrichment`).
 
@@ -1170,15 +1219,20 @@ def _apply_label_enrichment(
 
     newly_completed_group = False
 
-    ingredients_complete_this_scan = _ingredients_group_is_complete(data, ingredients_trustworthy)
+    ingredients_complete_this_scan = _ingredients_group_is_complete(data, ingredients_trustworthy, ingredients)
     nutrition_complete_this_scan = _nutrition_group_is_complete(validity)
+    # Issue #25: text was read but nothing usable resolved from it. The
+    # ingredient group is then left exactly as it was -- even a not yet
+    # verified row keeps whatever ingredient text/ids/flags it already
+    # has, rather than having them replaced by a failed attempt.
+    resolution_failed = _ingredient_resolution_failed(data, ingredients_trustworthy, ingredients)
 
     # A user-requested label scan is newer first-party evidence. A complete
     # group replaces that group even when a provider previously marked the
     # product complete; an incomplete/invalid group never erases verified
     # evidence. Ingredient lists are replaced (not unioned) so removed or
     # corrected label items do not linger forever.
-    if ingredients_complete_this_scan or not existing.has_verified_ingredients:
+    if ingredients_complete_this_scan or (not existing.has_verified_ingredients and not resolution_failed):
         existing.raw_ingredient_text = data.raw_ingredient_text
         existing.original_ingredient_text = data.original_ingredient_text
         existing.ingredient_text_source_language = data.ingredient_text_source_language
@@ -1233,6 +1287,7 @@ def _apply_label_enrichment(
     if existing.is_verified:
         existing.last_verified_at = datetime.now(timezone.utc)
     existing.timestamp = int(time.time() * 1000)
+    return newly_completed_group
 
 
 def _new_product_from_label(
@@ -1244,7 +1299,7 @@ def _new_product_from_label(
     source_label: str,
 ) -> Product:
     nutrition_complete = _nutrition_group_is_complete(validity)
-    ingredients_complete = _ingredients_group_is_complete(data, ingredients_trustworthy)
+    ingredients_complete = _ingredients_group_is_complete(data, ingredients_trustworthy, ingredients)
     is_complete = nutrition_complete and ingredients_complete
     product = _to_product_model(
         canonical_barcode,
@@ -1331,9 +1386,15 @@ async def _persist_enriched_product(
                 details=with_failure_reason(None, ScanFailureReason.UNKNOWN),
             )
 
-    _apply_label_enrichment(existing, data, ingredients, validity, ingredients_trustworthy, source_label)
+    contributed = _apply_label_enrichment(
+        existing, data, ingredients, validity, ingredients_trustworthy, source_label
+    )
     await db.flush()
-    return existing, True
+    # Issue #25: an attempt whose text resolved to nothing usable and
+    # completed no group did not contribute to the persisted product; its
+    # provenance row says so instead of claiming it was used.
+    resolution_failed = _ingredient_resolution_failed(data, ingredients_trustworthy, ingredients)
+    return existing, contributed or not resolution_failed
 
 
 # Review finding 7: the OCR-extraction pipeline (Gemini image analysis
@@ -1359,6 +1420,7 @@ async def _record_label_provenance(
     label_result: LabelTextResult,
     *,
     used_for_persisted_product: bool,
+    preserve_existing: bool = False,
 ) -> None:
     """
     Records label-OCR (and, when applicable, translation) provenance
@@ -1371,7 +1433,19 @@ async def _record_label_provenance(
     "Provenance" / 11.5 "Why no migration was needed". Does NOT commit
     -- see `_finalize_barcode_enrichment`'s single outer-transaction
     commit point (review finding 3).
+
+    `preserve_existing` (issue #25): the (barcode, provider) provenance
+    row is normally refreshed in place, which would replace the source
+    text of an EARLIER attempt with this one's. A failed-resolution
+    attempt sets it, so an already-recorded row -- the evidence an earlier
+    scan left behind -- is kept exactly as it was; only a missing row is
+    created. The failed attempt itself stays visible in the bounded,
+    content-free scan diagnostics (`failureReason: RESOLUTION_FAILED`).
     """
+    if preserve_existing and await product_source_repository.get_by_barcode_and_provider(
+        db, canonical_barcode, provider_name
+    ):
+        return
     ocr_result = ProviderProductResult(
         provider=provider_name,
         external_id=None,
@@ -1397,7 +1471,12 @@ async def _record_label_provenance(
         used_for_persisted_product=used_for_persisted_product,
     )
 
-    if label_result.translation_used:
+    if label_result.translation_used and not (
+        preserve_existing
+        and await product_source_repository.get_by_barcode_and_provider(
+            db, canonical_barcode, "label_translation"
+        )
+    ):
         translation_result = ProviderProductResult(
             provider="label_translation",
             external_id=None,
@@ -1563,17 +1642,24 @@ async def _with_label_extraction_diagnostics(
 
     A `ProductNotFoundError` (no ingredients recognized) additionally
     gains the public `details.failureReason` observed by the extraction
-    stage; a standalone scan's `details.reason` text is replaced by the
+    stage, unless a later stage already set its own; a standalone scan's `details.reason` text is replaced by the
     matching honest text (a barcode-linked one keeps its existing text).
     Errors that already carry their own `failureReason` (e.g. a
     translation failure) keep it."""
     try:
         result = await finalize
     except ProductNotFoundError as exc:
-        reason = diagnostics["label_failure_reason"]
-        details = with_failure_reason(exc.details, reason)
-        if standalone:
-            details["reason"] = _STANDALONE_FAILURE_REASON_TEXT[reason]
+        observed = exc.details.get("failureReason") if isinstance(exc.details, dict) else None
+        if observed:
+            # A stage after extraction already observed the cause (issue
+            # #25: RESOLUTION_FAILED); the extraction-stage reason must
+            # not overwrite it, and its text is already in place.
+            details = dict(exc.details)
+        else:
+            reason = diagnostics["label_failure_reason"]
+            details = with_failure_reason(exc.details, reason)
+            if standalone:
+                details["reason"] = _STANDALONE_FAILURE_REASON_TEXT[reason]
         exc.details = details
         exc.diagnostic_metadata = {**(exc.diagnostic_metadata or {}), **diagnostics}
         raise
@@ -1739,6 +1825,9 @@ async def _finalize_barcode_enrichment(
                     )
                 )
 
+    # Issue #25: text was read but nothing usable resolved from it. Decided
+    # once, here, from the FINAL ingredient list.
+    resolution_failed = _ingredient_resolution_failed(data, ingredients_trustworthy, ingredients)
     source_label = "label_scan_translated" if label_result.translation_used else "label_scan"
     product, used_label_analysis = await _persist_enriched_product(
         db, existing, canonical_barcode, data, ingredients, validity, ingredients_trustworthy, source_label
@@ -1757,6 +1846,7 @@ async def _finalize_barcode_enrichment(
         data,
         label_result,
         used_for_persisted_product=used_label_analysis,
+        preserve_existing=resolution_failed,
     )
 
     # SUCCESS GATE (V13, see module docstring "Ingredient-recognition
@@ -1771,7 +1861,12 @@ async def _finalize_barcode_enrichment(
     # extraction failure (no trustworthy ingredients at all, ever, for
     # this barcode) still returns the structured `labelScanRequired`
     # response, exactly as before.
-    if not product.has_verified_ingredients:
+    # Issue #25: a resolution failure is a failure even when the row
+    # already holds verified ingredients (left untouched by
+    # `_apply_label_enrichment`): the partial envelope hands those
+    # preserved ingredients back and carries `failureReason:
+    # RESOLUTION_FAILED`, observed here.
+    if resolution_failed or not product.has_verified_ingredients:
         # Atomically persist ONLY the permitted incomplete identity +
         # provenance (one commit, nothing else -- no Health Score, no
         # scan history for a row with no recognized ingredients) before
@@ -1785,9 +1880,21 @@ async def _finalize_barcode_enrichment(
         # verified but nutrition missing -- that path's own partial-
         # ingredients handling is unaffected by this change).
         await db.commit()
+        if resolution_failed:
+            kept = await fetch_ingredients_for_product(db, product) if product.has_verified_ingredients else None
+            details = _label_scan_required_details(
+                product,
+                kept,
+                reason=_RESOLUTION_FAILED_KEPT_REASON
+                if kept is not None
+                else _STANDALONE_FAILURE_REASON_TEXT[ScanFailureReason.RESOLUTION_FAILED],
+            )
+            details = with_failure_reason(details, ScanFailureReason.RESOLUTION_FAILED)
+        else:
+            details = _label_scan_required_details(product, None)
         raise ProductNotFoundError(
             f"Product {product.barcode} could not be read reliably -- no ingredients were recognized.",
-            details=_label_scan_required_details(product, None),
+            details=details,
             diagnostic_metadata=_translation_diagnostic_fields(
                 label_result, ingredient_translation_summary
             ),
@@ -2100,7 +2207,7 @@ async def _finalize_standalone_label_analysis(
                 )
 
     nutrition_complete = _nutrition_group_is_complete(validity)
-    ingredients_complete = _ingredients_group_is_complete(data, ingredients_trustworthy)
+    ingredients_complete = _ingredients_group_is_complete(data, ingredients_trustworthy, ingredients)
     # `is_complete` still tracks full verification / Health-Score
     # readiness for `Product.is_verified` -- kept exactly as before.
     # V13: it is deliberately NOT the success/failure gate below any
@@ -2146,9 +2253,21 @@ async def _finalize_standalone_label_analysis(
         # `ingredients_complete` is False here by construction, so there
         # is no genuinely trustworthy partial evidence to hand back.
         await db.commit()
+        if _ingredient_resolution_failed(data, ingredients_trustworthy, ingredients):
+            # Issue #25: text was read but resolved to nothing usable.
+            details = with_failure_reason(
+                _label_scan_required_details(
+                    product,
+                    None,
+                    reason=_STANDALONE_FAILURE_REASON_TEXT[ScanFailureReason.RESOLUTION_FAILED],
+                ),
+                ScanFailureReason.RESOLUTION_FAILED,
+            )
+        else:
+            details = _label_scan_required_details(product, None, reason=_NO_INGREDIENTS_READ_REASON)
         raise ProductNotFoundError(
             f"Product {product.barcode} could not be read reliably -- no ingredients were recognized.",
-            details=_label_scan_required_details(product, None, reason=_NO_INGREDIENTS_READ_REASON),
+            details=details,
             diagnostic_metadata=_translation_diagnostic_fields(
                 label_result, ingredient_translation_summary
             ),

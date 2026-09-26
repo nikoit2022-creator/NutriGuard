@@ -1495,7 +1495,9 @@ caught the actual bug there and it is corrected here.
     `LABEL_TRANSLATION_UNRELIABLE`, `AI_SERVICE_UNAVAILABLE`,
     `INTERNAL_ERROR`) carry `error.details.failureReason`, one of
     `EXTRACTION_EMPTY`, `PROVIDER_UNAVAILABLE`,
-    `PROVIDER_RESPONSE_INVALID`, `TRANSLATION_FAILED` or `UNKNOWN`,
+    `PROVIDER_RESPONSE_INVALID`, `TRANSLATION_FAILED`, `RESOLUTION_FAILED`
+    (text was read but no usable ingredient resolved from it: a `404`
+    that keeps everything already stored for the product) or `UNKNOWN`,
     set at the stage the failure is observed; a standalone scan's
     `details.reason` text follows it. An unexpected scan exception is
     still `500 INTERNAL_ERROR` with the same message, now handled in the

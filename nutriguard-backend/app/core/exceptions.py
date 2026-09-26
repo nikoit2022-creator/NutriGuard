@@ -129,6 +129,13 @@ class ScanFailureReason(str, Enum):
     # A well-formed translation was rejected (low confidence, or failed
     # E-number/numeric invariant checks).
     TRANSLATION_FAILED = "TRANSLATION_FAILED"
+    # Text WAS read from the label (a well-formed, non-empty extraction),
+    # but no usable ingredient token remained after tokenization and
+    # resolution (e.g. punctuation-only text such as "---"). Distinct from
+    # EXTRACTION_EMPTY: the provider did return text. Says nothing about
+    # photo quality or about a curated/scientific match -- a valid but
+    # unknown ingredient name is still "usable".
+    RESOLUTION_FAILED = "RESOLUTION_FAILED"
     # Any other/unclassified processing failure.
     UNKNOWN = "UNKNOWN"
 

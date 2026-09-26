@@ -8,9 +8,10 @@ independent of product completeness". Branch
 |---|---|
 | Baseline (exact `origin/main`) | `32bd7efc05750470da6f48eab7c4111e45db1d26` |
 | Commit 1 (ingredient-first fix) | `b220428006103e7fbedd50f25fc85f7749f79507` |
-| Commit 2 (failure-reason contract, section 3.6) | the commit that updates this file to include section 3.6 (a file cannot contain its own SHA; the SHA is posted with the push) |
-| Scope | backend only: parser, label/OCR failure reasons, diagnostics, retry messages, tests, docs |
-| Wire/schema change | additive only: `error.details.failureReason` on scan failures (commit 2). No field removed or retyped, no status-code change, OpenAPI identical, no migration |
+| Commit 2 (failure-reason contract, section 3.6) | `bc709dd0bb805e9df0fc448a7754f8d73e217926` |
+| Commit 3 (`RESOLUTION_FAILED`, section 3.7) | the commit that updates this file to include section 3.7 (a file cannot contain its own SHA; the SHA is posted with the push). Parent: `bc709dd0bb805e9df0fc448a7754f8d73e217926` |
+| Scope | backend only: parser, label/OCR failure reasons, evidence-loss guard, diagnostics, retry messages, tests, docs |
+| Wire/schema change | additive only: `error.details.failureReason` on scan failures (commit 2) and its new value `RESOLUTION_FAILED` (commit 3). No field removed or retyped, no migration, OpenAPI identical. Commit 3 changes one status code for one degenerate input class: `200` with `ingredients: []` becomes the existing `404` partial envelope (section 3.7) |
 
 ## 1. Reproduced defect vs. unconfirmed live incident
 
@@ -243,7 +244,7 @@ and `POST /api/v1/scan/ocr-text`:
 
 | `error.code` (HTTP) | Unchanged status? | `failureReason` values it can carry |
 |---|---|---|
-| `PRODUCT_NOT_FOUND` (404) | yes | `EXTRACTION_EMPTY`, `PROVIDER_UNAVAILABLE`, `PROVIDER_RESPONSE_INVALID`, `UNKNOWN` |
+| `PRODUCT_NOT_FOUND` (404) | yes | `EXTRACTION_EMPTY`, `PROVIDER_UNAVAILABLE`, `PROVIDER_RESPONSE_INVALID`, `RESOLUTION_FAILED` (section 3.7), `UNKNOWN` |
 | `LABEL_TRANSLATION_UNRELIABLE` (422, barcode-linked label/OCR) | yes | `PROVIDER_UNAVAILABLE`, `PROVIDER_RESPONSE_INVALID`, `TRANSLATION_FAILED` |
 | `AI_SERVICE_UNAVAILABLE` (503) | yes | `PROVIDER_UNAVAILABLE`, `PROVIDER_RESPONSE_INVALID`, `EXTRACTION_EMPTY`, `UNKNOWN` |
 | `INTERNAL_ERROR` (500) | yes | `UNKNOWN` |
@@ -261,6 +262,7 @@ It is not added to input-validation errors (`VALIDATION_ERROR`,
 | `PROVIDER_UNAVAILABLE` | The AI provider could not be reached: network error, timeout, no configured key, or a provider-side error. Applies to extraction and to barcode-linked translation. | `GeminiUnavailableError` at that stage |
 | `PROVIDER_RESPONSE_INVALID` | The provider answered, but not with the required structure (not JSON, wrong shape, no string `rawIngredientText`, invalid translation payload). | parser / translation validation |
 | `TRANSLATION_FAILED` | A well-formed translation was rejected: confidence below the minimum, or failed E-number/numeric invariant checks. | `label_language` |
+| `RESOLUTION_FAILED` | Text **was** read (a non-empty extraction) but no usable ingredient remained after tokenization and resolution, e.g. `---`. Says nothing about photo quality or curation (section 3.7). | label finalize stage |
 | `UNKNOWN` | Any other or unclassified processing failure. This includes an unexpected exception (500), the local fallback crashing on `/scan/ocr-text`, a persistence race, and any failure where no stage observed a cause. | router fallback / processing sites |
 
 **Mapping to the requested categories.**
@@ -268,7 +270,7 @@ It is not added to input-validation errors (`VALIDATION_ERROR`,
 - Provider unavailable: `PROVIDER_UNAVAILABLE`.
 - Invalid provider response: `PROVIDER_RESPONSE_INVALID`.
 - Translation failure: `TRANSLATION_FAILED`.
-- Resolution failure: currently never a failure response (see the proposal in section 7). `RESOLUTION_FAILED` is **reserved** and is not emitted.
+- Resolution failure: `RESOLUTION_FAILED` (section 3.7).
 - Unknown: `UNKNOWN`.
 
 **Client rules.**
@@ -290,6 +292,7 @@ unchanged.
 | `EXTRACTION_EMPTY` | "No ingredient list was found in this photo. Make sure the ingredient list is in the frame and try again." |
 | `PROVIDER_UNAVAILABLE` | "The label could not be analyzed because the analysis service is temporarily unavailable. Please try again later." |
 | `PROVIDER_RESPONSE_INVALID` | "The label analysis returned an unusable result. Please try again." |
+| `RESOLUTION_FAILED` | "Text was read from the label, but no ingredient names could be recognized in it. Try again with the ingredient list in view." |
 | `UNKNOWN` | "No ingredients could be read from this label." |
 
 **Guarantees** (each tested on the actual HTTP JSON):
@@ -344,6 +347,132 @@ in full in 3.3; only the fields that differ are shown here):
   "details": {"failureReason": "UNKNOWN"},
   "timestamp": 1790341390396}}
 ```
+
+### 3.7 `RESOLUTION_FAILED`: text was read, nothing usable resolved (commit 3)
+
+Owner-approved narrow correction (issue #25, comment 5845207733).
+
+**Defect (reproduced at `bc709dd`, all four paths).** `POST
+/scan/label-image` and `POST /scan/ocr-text`, standalone and
+barcode-linked, given non-empty text that yields no ingredient token
+(`"---"`, `"..."`, `"; ; ,"`, one-character text, digits-only `"1234,
+5678"`) returned `200` with `ingredients: []` and
+`hasVerifiedIngredients: true`. Barcode-linked, that also counted as a
+complete ingredient group, so it replaced a previously verified list.
+
+**Cause.** `_ingredients_group_is_complete` only tested that the raw text
+was non-empty. Tokenization drops punctuation-only and one-character
+tokens, so "complete" was decided before anyone checked that anything
+resolved. (Fixtures are synthetic; this is a code-path reproduction, not
+a claim about the owner's device.)
+
+**Behavior now.**
+- "Usable" means a resolved ingredient whose name contains a letter
+  (any script). It is an identity test, not a curation one: an unknown
+  name with no catalog match, no description and no risk rating is still
+  returned, with `verificationStatus: "UNVERIFIED"`,
+  `riskAssessmentAvailable: false` and an empty `description`.
+- No usable ingredient from non-empty, real label text: the existing
+  partial envelope `404 PRODUCT_NOT_FOUND` with
+  `error.details.failureReason: "RESOLUTION_FAILED"`. No new keys.
+- Mixed valid and invalid tokens (`"Sugar; ---; Salt"`) are unchanged:
+  `200` with the valid ingredients only.
+- The ingredient group is never marked complete and no Health Score or
+  scan-history entry is written for a failed attempt.
+- Barcode-linked, existing product: **nothing already stored is
+  replaced.** Ingredient text, ingredient ids, flags, allergens,
+  nutrition, identity and verification flags are exactly as before, even
+  when the row was not yet verified. The `404` hands the preserved
+  ingredients back in `details.ingredients` (the existing partial form),
+  with `ingredientsScanRequired: false`, so a client can keep showing
+  them.
+- Barcode-linked, nutrition on the same photo: a complete nutrition
+  group is still stored (`nutritionScanRequired: false`); the ingredient
+  group is not pretended complete (`ingredientsScanRequired: true`).
+- Provenance: an existing `product_sources` row for the same provider
+  (the source text of an earlier scan) is not overwritten by the failed
+  attempt. A missing row is created and marked
+  `used_for_persisted_product: false` when the attempt contributed
+  nothing. The failed attempt is visible in the scan diagnostics journal
+  (`failureReason: RESOLUTION_FAILED`, `outcome: partial`, no text).
+- Nothing about the input text is echoed in the response or the
+  diagnostics.
+
+**Synthetic capture, standalone** (`POST /scan/ocr-text`, `rawText:
+"---"`, real HTTP JSON; `timestamp` omitted):
+
+```json
+{
+  "error": {
+    "code": "PRODUCT_NOT_FOUND",
+    "message": "Product ocr_1790417029547 could not be read reliably -- no ingredients were recognized.",
+    "details": {
+      "labelScanRequired": true,
+      "reason": "Text was read from the label, but no ingredient names could be recognized in it. Try again with the ingredient list in view.",
+      "discoveredIdentity": {
+        "barcode": "ocr_1790417029547",
+        "productName": "Scanned Product",
+        "brand": "Scanned Label Product",
+        "imageUrl": null
+      },
+      "suggestedAction": "Use POST /scan/label-image or POST /scan/ocr-text to analyze the product's label directly.",
+      "analysisComplete": false,
+      "healthScoreAvailable": false,
+      "healthScore": null,
+      "nutritionScanRequired": true,
+      "ingredientsScanRequired": true,
+      "dataSource": "label_scan",
+      "failureReason": "RESOLUTION_FAILED"
+    }
+  }
+}
+```
+
+**Synthetic capture, barcode-linked existing product** (`POST
+/scan/label-image` with `barcode`, after a verified scan of "Carbonated
+Water, Sugar" with full nutrition; ingredient objects trimmed to five
+keys here, the wire carries the full object):
+
+```json
+{
+  "error": {
+    "code": "PRODUCT_NOT_FOUND",
+    "message": "Product 5449000000996 could not be read reliably -- no ingredients were recognized.",
+    "details": {
+      "labelScanRequired": true,
+      "reason": "Text was read from the label, but no ingredient names could be recognized in it. Try again with the ingredient list in view. The product's previously saved ingredients were kept.",
+      "discoveredIdentity": {
+        "barcode": "5449000000996",
+        "productName": "Bolt Energy Drink",
+        "brand": "Analyzed Brand",
+        "imageUrl": null
+      },
+      "suggestedAction": "Use POST /scan/label-image or POST /scan/ocr-text to analyze the product's label directly.",
+      "analysisComplete": false,
+      "healthScoreAvailable": false,
+      "healthScore": null,
+      "nutritionScanRequired": false,
+      "ingredientsScanRequired": false,
+      "dataSource": "label_scan",
+      "ingredients": [
+        {"id": "synth_carbonated_water_407d936dd620", "commonName": "Carbonated Water", "description": "", "riskAssessmentAvailable": false, "verificationStatus": "UNVERIFIED"},
+        {"id": "synth_sugar_30eef85dfdd3", "commonName": "Sugar", "description": "", "riskAssessmentAvailable": false, "verificationStatus": "UNVERIFIED"}
+      ],
+      "failureReason": "RESOLUTION_FAILED"
+    }
+  }
+}
+```
+
+The placeholder strings visible in `discoveredIdentity` are the baseline
+values described in section 7.
+
+**Old clients.** Same status, `error.code` and detail keys as the
+existing empty-extraction `404` (pinned by a test); only the additive
+`failureReason` value is new, and an unrecognized value already means
+`UNKNOWN`. A client that only handled `200` for this degenerate input
+previously rendered an empty result; it now gets an error it already
+handles.
 
 ## 4. Diagnostics (bounded, content-free)
 
@@ -413,6 +542,26 @@ all asserting actual HTTP JSON):
   exception to propagate to the ASGI test transport. They now assert
   the `500` envelope and that the exception text is absent.
 
+- Commit 3 (`tests/integration/test_label_scan_resolution_failed.py`, 39
+  cases, real HTTP JSON; 31 of them fail on `bc709dd`, the rest are
+  regression guards for behavior that must not change):
+  - Standalone image and OCR: `---`, `...`, `; ; ,`, `1234, 5678`,
+    one-character text; no ingredients key, no verified group, no scan
+    history, input never echoed.
+  - Barcode-linked image and OCR, new barcode: same, plus a later real
+    list completes the same row (one row per barcode).
+  - Nutrition on the same photo is kept without ingredient success.
+  - Existing verified product, image and OCR endpoints: every stored
+    field unchanged, preserved ingredients returned, scan history
+    unchanged, earlier provenance text not overwritten.
+  - Existing not-yet-verified product keeps its ingredient text; the
+    failed attempt's provenance is marked not used.
+  - Mixed valid and invalid tokens; valid unknown names (Latin and
+    Cyrillic) stay usable with no invented description or rating.
+  - Envelope keys identical to the empty-extraction `404`.
+  - Diagnostics carry `RESOLUTION_FAILED` and no text.
+  - The pinned vocabulary test now includes the new value.
+
 Updated: `tests/unit/test_gemini_image_parser.py`.
 `test_missing_product_name_returns_none` pinned the defect itself and is
 replaced by tests asserting the kept evidence, unchanged nutrition
@@ -431,6 +580,16 @@ asyncpg 0.30.0, alembic 1.14.0):
 | Disposable `postgres:16-alpine`: `alembic heads` | `c6d7e8f9a0b1` (single) | same | same |
 | `alembic upgrade head`, then `downgrade -1` / `upgrade head` cycle | OK | OK | OK |
 | `pytest tests/postgres` (`NUTRIGUARD_TEST_POSTGRES_URL` set; incl. concurrent enrichment and catalog concurrency) | 10 passed | 10 passed | **10 passed** |
+
+Commit 3 (parent `bc709dd`), same pinned dependencies (fastapi 0.115.6,
+pydantic 2.10.4, SQLAlchemy 2.0.36, pytest 8.3.4):
+
+| Check | Result |
+|---|---|
+| `python -m pytest -q` (full suite, SQLite) | **687 passed, 10 skipped** (0 failed) |
+| `alembic heads` / `upgrade head` on a disposable `postgres:16-alpine` | single head `c6d7e8f9a0b1`; upgrade OK; no migration added, so no downgrade cycle was needed |
+| `pytest tests/postgres` (`NUTRIGUARD_TEST_POSTGRES_URL` set) | **10 passed** |
+| `app.openapi()` vs tracked `openapi.json` | **identical** |
 
 The 10 skipped in the SQLite run are the opt-in Postgres tests, which
 were run separately as shown. The disposable Postgres used its own
@@ -455,20 +614,16 @@ is mocked.
 
 - **Live confirmation outstanding** (section 1). Needs one real
   label-image scan; check `details.failureReason` or `labelExtraction`.
-- **Proposed, not implemented: zero-resolved ingredients are a false
-  success.** Reproduced on baseline and still present: when the extracted
-  ingredient text is non-empty but yields no ingredient tokens (e.g.
-  `"---"`, `"..."`, `"; ; ,"`), both `/scan/label-image` and
-  `/scan/ocr-text` return **`200` with `ingredients: []`** and
-  `hasVerifiedIngredients: true`. On the barcode-linked path, such a scan
-  also counts as a complete ingredient group, so it can replace a
-  previously verified ingredient list. The honest outcome is the `404`
-  `labelScanRequired` result with `failureReason: "RESOLUTION_FAILED"`
-  (the reserved value), plus requiring at least one resolved ingredient
-  in `_ingredients_group_is_complete`. That changes a status code and an
-  evidence gate for an existing (if degenerate) input, so under the
-  "coordinate before incompatible changes" rule it needs owner and Codex
-  approval before implementation.
+- **Zero-resolved ingredients: implemented in commit 3** (section 3.7).
+  Known boundary: "usable" is a letter test on resolved names. Junk that
+  contains letters (OCR noise such as `xq`, or a stray word) is still a
+  usable name here; detecting it belongs to the identity/candidate-queue
+  stage of issue #23, not this correction. In a mixed list, a digits-only
+  token such as `100` next to real names is still returned as before.
+- **Unverified rows and nutrition-only/empty photos**: an EMPTY
+  extraction (no text at all) on a barcode row that is not yet verified
+  still overwrites that row's unverified ingredient text, as at baseline.
+  Only the new `RESOLUTION_FAILED` case is guarded. Not broadened here.
 - **Placeholder identity strings remain on the wire**:
   `"Scanned Label Product"` (fallback `discoveredIdentity`, 3.3),
   `"Analyzed Brand"`/`"Analyzed Food"` (brand/category defaults), and
@@ -500,10 +655,15 @@ is mocked.
   - `PROVIDER_UNAVAILABLE`: "service temporarily unavailable, try again later". Not the photo's fault.
   - `PROVIDER_RESPONSE_INVALID`: "analysis failed, try again".
   - `TRANSLATION_FAILED`: "label language could not be translated reliably".
+  - `RESOLUTION_FAILED`: "text was read but no ingredient names were recognized, try the ingredient list again". Not the photo's fault as such; do not say the photo was blurry.
   - `UNKNOWN`: neutral wording.
   Never tell the user the photo was blurry: nothing in the contract
   observes that.
 - Consider adding "scanned label product", "analyzed brand" and "scanned
   product" to your placeholder list (see section 7).
+- `RESOLUTION_FAILED` with `details.ingredients` present (barcode-linked,
+  product already known): show those preserved ingredients with the
+  retry hint; they are the product's earlier verified list, not a result
+  of this scan. Without `details.ingredients`, there is nothing to show.
 - The empty-ingredient `404` has no `ingredients` key. The UI cannot and
   must not repair it with fallback ingredients.
