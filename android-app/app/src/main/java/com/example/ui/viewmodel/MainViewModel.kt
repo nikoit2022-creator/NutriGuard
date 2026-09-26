@@ -82,7 +82,8 @@ sealed interface BarcodeLookupUiState {
         val healthScore: Int?,
         val nutritionScanRequired: Boolean?,
         val ingredientsScanRequired: Boolean?,
-        val ingredients: List<IngredientEntity>
+        val ingredients: List<IngredientEntity>,
+        val fromLabelSubmission: Boolean = false
     ) : BarcodeLookupUiState {
         companion object {
             fun from(e: LabelScanRequiredException, idPrefixForSyntheticIds: String): LabelScanRequired =
@@ -324,6 +325,7 @@ class MainViewModel(
                 // submission.
                 val idPrefix = barcodeForThisSubmission ?: e.discoveredIdentity?.barcode ?: "ocr_text"
                 _barcodeLookupState.value = BarcodeLookupUiState.LabelScanRequired.from(e, idPrefix)
+                    .copy(fromLabelSubmission = true)
             } catch (e: BarcodeTimeoutException) {
                 _barcodeLookupState.value = BarcodeLookupUiState.Failed(
                     e.message ?: "The request timed out. Please try again.",
@@ -403,6 +405,7 @@ class MainViewModel(
                 // carries -- see LabelScanRequiredException's docs).
                 val idPrefix = barcodeForThisSubmission ?: e.discoveredIdentity?.barcode ?: "label_scan"
                 _barcodeLookupState.value = BarcodeLookupUiState.LabelScanRequired.from(e, idPrefix)
+                    .copy(fromLabelSubmission = true)
             } catch (e: BarcodeTimeoutException) {
                 _barcodeLookupState.value = BarcodeLookupUiState.Failed(
                     e.message ?: "The request timed out. Please try again.",

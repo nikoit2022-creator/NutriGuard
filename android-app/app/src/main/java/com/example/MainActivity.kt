@@ -67,6 +67,7 @@ import com.example.ui.screens.ScanHistoryScreen
 import com.example.ui.screens.ScientificLibraryScreen
 import com.example.ui.i18n.AppLanguage
 import com.example.ui.i18n.LanguageSwitcher
+import com.example.ui.i18n.LanguageTopBar
 import com.example.ui.i18n.LocalAppLanguage
 import com.example.ui.i18n.localizeUiText
 import com.example.ui.theme.NutriGuardRadius
@@ -373,18 +374,7 @@ fun NutriGuardApp(
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         topBar = {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(ScannerPageBackground)
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                contentAlignment = Alignment.CenterEnd
-            ) {
-                LanguageSwitcher(
-                    language = language,
-                    onLanguageChange = onLanguageChange
-                )
-            }
+            LanguageTopBar(language, onLanguageChange)
         },
         bottomBar = {
             if (showBottomBar) {
