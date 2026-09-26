@@ -144,6 +144,7 @@ from app.services import barcode_validation
 from app.services import ingredient_catalog
 from app.services import ingredient_regulatory
 from app.services import ingredient_localization
+from app.services import ingredient_summaries
 from app.services.barcode_text_safety import is_placeholder
 from app.services.barcode_validation import validate_and_normalize
 from app.services.fallback_analysis import AnalyzedProductData, fallback_local_analysis
@@ -557,6 +558,8 @@ def _ingredient_out_dict(ing: Any) -> dict:
         "badForPregnancy": ing.bad_for_pregnancy,
         "badForChildren": ing.bad_for_children,
         "badForHighCholesterol": ing.bad_for_high_cholesterol,
+        # Additive (issue #23 stage 3): the served summary payload, or null.
+        "summary": getattr(ing, "loaded_summary", None),
     }
 
 
@@ -781,6 +784,7 @@ async def fetch_ingredients_for_product(db: AsyncSession, product: Product) -> l
             )
         else:
             resolved.append(reconstruct_synthetic_ingredient(ingredient_id, product.raw_ingredient_text))
+    await ingredient_summaries.attach(db, resolved)
     return resolved
 
 

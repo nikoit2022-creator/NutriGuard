@@ -13,7 +13,7 @@ from app.core.rate_limit import SCAN_RATE, limiter
 from app.core.scan_diagnostics import record_scan_diagnostic
 from app.database.session import get_db
 from app.schemas.scan import BarcodeScanRequest, FullProductAnalysisOut, OcrTextScanRequest
-from app.services import food_analysis
+from app.services import food_analysis, ingredient_summaries
 from app.services.barcode_text_safety import clean_optional
 
 router = APIRouter(prefix="/scan", tags=["scan"])
@@ -266,6 +266,7 @@ async def scan_barcode(
     try:
         result = await food_analysis.analyze_barcode(db, user_id, body.barcode.strip())
         diagnostic_base["stage"] = "analysis_complete"
+        await ingredient_summaries.attach(db, result.get("ingredients") or [])
         out = _to_analysis_out(result)
         _finish_serializing(out)
         diagnostic_base["stage"] = "response_built"
@@ -345,6 +346,7 @@ async def scan_ocr_text(
         else:
             result = await food_analysis.analyze_ocr_text(db, user_id, body.raw_text.strip())
         diagnostic_base["stage"] = "analysis_complete"
+        await ingredient_summaries.attach(db, result.get("ingredients") or [])
         out = _to_analysis_out(result)
         _finish_serializing(out)
         diagnostic_base["stage"] = "response_built"
@@ -476,6 +478,7 @@ async def scan_label_image(
         # falls into the generic `except Exception` below instead of
         # leaving a false "success" diagnostic line behind (see
         # `_finish_serializing`).
+        await ingredient_summaries.attach(db, result.get("ingredients") or [])
         out = _to_analysis_out(result)
         _finish_serializing(out)
         diagnostic_base["stage"] = "response_built"

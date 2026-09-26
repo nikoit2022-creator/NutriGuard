@@ -1,0 +1,222 @@
+{
+  "id": "e322_soy_lecithin",
+  "commonName": "Soy Lecithin",
+  "scientificName": "Phosphatidylcholine from Glycine max",
+  "eNumber": "E322",
+  "insNumber": "322",
+  "casNumber": null,
+  "category": "Natural Emulsifier",
+  "description": "Phospholipid mixture extracted from soybeans.",
+  "purposeInFood": "Emulsifier in chocolate, infant formula, bakery goods, and instant powders.",
+  "healthConcerns": "Safe. Essential phospholipid source.",
+  "evidenceLevel": "Strong Scientific Consensus",
+  "countriesRestrictedOrBanned": "",
+  "efsaStatus": "Authorized (No ADI limit necessary)",
+  "fdaStatus": "GRAS",
+  "whoIarcClassification": null,
+  "acceptableDailyIntake": "Not limited",
+  "sideEffects": "Mild GI distress only in extreme excessive intake",
+  "allergens": "Soy",
+  "references": "EFSA Journal 2017;15(4):4742",
+  "effectConditions": "",
+  "dietaryGuidance": "",
+  "riskLevel": "SAFE",
+  "riskAssessmentAvailable": true,
+  "verificationStatus": "VERIFIED",
+  "source": "CURATED_SEED",
+  "sourceRecordId": "e322_soy_lecithin",
+  "sourceUrl": null,
+  "retrievedAt": 1790422275508,
+  "lastVerifiedAt": 1790422275508,
+  "confidence": 1.0,
+  "schemaVersion": 1,
+  "summary": {
+    "scope": "E_NUMBER_GENERIC",
+    "evidenceState": "SOURCE_VERIFIED",
+    "humanReviewed": false,
+    "verifiedAt": 1790380800000,
+    "sections": [
+      {
+        "kind": "ORIGIN",
+        "text": "Lecithins (E 322) are mixtures or fractions of phosphatides (phospholipids) obtained by physical procedures from animal or vegetable foods; the EU specification also covers hydrolysed lecithins. JECFA describes lecithin as usually prepared from oil-bearing seeds used for food, especially soybeans, and possibly from animal sources. The raw material differs between products and is not identified by the E-number alone.",
+        "citationIds": [
+          "eu-231-2012-e322",
+          "jecfa-lecithin-1993"
+        ],
+        "jurisdiction": null
+      },
+      {
+        "kind": "FUNCTION",
+        "text": "They are used as emulsifiers, helping fat- and water-based ingredients stay mixed, and as antioxidants.",
+        "citationIds": [
+          "jecfa-lecithin-1993"
+        ],
+        "jurisdiction": null
+      },
+      {
+        "kind": "EFFECTS",
+        "text": "EFSA (2017) found no need for a numerical acceptable daily intake and no safety concern for the general population over one year of age at the reported uses. A 2020 EFSA follow-up found no safety concern for use in infant formula and foods for special medical purposes for infants under 16 weeks, up to the maximum permitted level.",
+        "citationIds": [
+          "efsa-2017-4742",
+          "efsa-2020-6266"
+        ],
+        "jurisdiction": null
+      },
+      {
+        "kind": "JURISDICTION",
+        "text": "EU food-information rules list soybeans and eggs and products made from them, lecithins included, among the allergens that must be indicated (Regulation (EU) No 1169/2011, Annex II, text as originally published; later amendments were not checked).",
+        "citationIds": [
+          "eu-1169-2011-annex-ii",
+          "efsa-2017-4742"
+        ],
+        "jurisdiction": "EU"
+      }
+    ],
+    "citations": [
+      {
+        "id": "eu-231-2012-e322",
+        "label": "Commission Regulation (EU) No 231/2012, specification for E 322 (OJ L 83, 22.3.2012)",
+        "url": "https://eur-lex.europa.eu/eli/reg/2012/231/oj",
+        "documentDate": "2012-03-22",
+        "accessType": "FULL_TEXT",
+        "supports": [
+          "ORIGIN"
+        ]
+      },
+      {
+        "id": "jecfa-lecithin-1993",
+        "label": "JECFA specification: lecithin, 41st meeting (1993), FNP 52 Add 2",
+        "url": "https://www.fao.org/fileadmin/user_upload/jecfa_additives/docs/monograph4/additive-250-m4.pdf",
+        "documentDate": "1993",
+        "accessType": "FULL_TEXT",
+        "supports": [
+          "ORIGIN",
+          "FUNCTION"
+        ]
+      },
+      {
+        "id": "efsa-2017-4742",
+        "label": "EFSA, Re-evaluation of lecithins (E 322) as a food additive, EFSA Journal 2017;15(4):4742",
+        "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC7010002/",
+        "documentDate": "2017-04",
+        "accessType": "FULL_TEXT",
+        "supports": [
+          "EFFECTS",
+          "JURISDICTION"
+        ]
+      },
+      {
+        "id": "efsa-2020-6266",
+        "label": "EFSA, Follow-up on the safety of lecithins (E 322) for infants below 16 weeks, EFSA Journal 2020;18(11):6266",
+        "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC7654424/",
+        "documentDate": "2020-11",
+        "accessType": "ABSTRACT",
+        "supports": [
+          "EFFECTS"
+        ]
+      },
+      {
+        "id": "eu-1169-2011-annex-ii",
+        "label": "Regulation (EU) No 1169/2011, Annex II: substances or products causing allergies or intolerances (OJ L 304, 22.11.2011)",
+        "url": "https://eur-lex.europa.eu/eli/reg/2011/1169/oj",
+        "documentDate": "2011-11-22",
+        "accessType": "FULL_TEXT",
+        "supports": [
+          "JURISDICTION"
+        ]
+      }
+    ],
+    "localizations": {
+      "bg": {
+        "sections": [
+          {
+            "kind": "ORIGIN",
+            "text": "Лецитините (E 322) са смеси или фракции от фосфатиди (фосфолипиди), получени чрез физични процеси от животински или растителни храни; спецификацията на ЕС обхваща и хидролизирани лецитини. JECFA описва лецитина като приготвян обикновено от маслодайни семена, използвани за храна, особено соя, и евентуално от животински източници. Суровината се различава между продуктите и не се определя само от E-номера.",
+            "jurisdiction": null
+          },
+          {
+            "kind": "FUNCTION",
+            "text": "Използват се като емулгатори – помагат мазните и водните съставки да останат смесени – и като антиоксиданти.",
+            "jurisdiction": null
+          },
+          {
+            "kind": "EFFECTS",
+            "text": "EFSA (2017) не вижда нужда от числено определен допустим дневен прием и не установява риск за безопасността за общото население над едногодишна възраст при отчетените употреби. Последващо становище на EFSA от 2020 г. не установява риск при употреба в храни за кърмачета и храни за специални медицински цели за кърмачета под 16 седмици, до максимално разрешеното ниво.",
+            "jurisdiction": null
+          },
+          {
+            "kind": "JURISDICTION",
+            "text": "Правилата на ЕС за информация за храните включват соята и яйцата и продуктите от тях, включително лецитините, сред алергените, които задължително се посочват (Регламент (ЕС) № 1169/2011, приложение II, текст в първоначално публикувания вид; по-късните изменения не са проверявани).",
+            "jurisdiction": "EU"
+          }
+        ],
+        "translationStatus": "REVIEWED",
+        "translationSource": "MACHINE_TRANSLATED"
+      }
+    }
+  },
+  "isGluten": false,
+  "isLactose": false,
+  "isVegan": true,
+  "isVegetarian": true,
+  "isHalal": true,
+  "isKosher": true,
+  "badForDiabetes": false,
+  "badForHypertension": false,
+  "badForKidneyDisease": false,
+  "badForGout": false,
+  "badForPregnancy": false,
+  "badForChildren": false,
+  "badForHighCholesterol": false,
+  "identityUncertain": false,
+  "uncertaintyReason": null,
+  "needsRefresh": false,
+  "riskRationale": "Strong Scientific Consensus",
+  "efsaApprovalStatus": "APPROVED",
+  "fdaApprovalStatus": "APPROVED",
+  "adiMinMgPerKgBwPerDay": null,
+  "adiMaxMgPerKgBwPerDay": null,
+  "adiSource": null,
+  "adiPopulationScope": null,
+  "insNumberVerified": false,
+  "localizations": {
+    "en": {
+      "commonName": "Soy Lecithin",
+      "category": "Natural Emulsifier",
+      "description": "Phospholipid mixture extracted from soybeans.",
+      "purposeInFood": "Emulsifier in chocolate, infant formula, bakery goods, and instant powders.",
+      "healthConcerns": "Safe. Essential phospholipid source.",
+      "evidenceLevel": "Strong Scientific Consensus",
+      "countriesRestrictedOrBanned": "",
+      "efsaStatus": "Authorized (No ADI limit necessary)",
+      "fdaStatus": "GRAS",
+      "acceptableDailyIntake": "Not limited",
+      "sideEffects": "Mild GI distress only in extreme excessive intake",
+      "allergens": "Soy",
+      "effectConditions": "",
+      "dietaryGuidance": "",
+      "riskRationale": "Strong Scientific Consensus",
+      "translationStatus": null,
+      "translationSource": null
+    },
+    "bg": {
+      "commonName": "Соев лецитин",
+      "category": "Естествен емулгатор",
+      "description": "Смес от фосфолипиди, извлечена от соеви зърна.",
+      "purposeInFood": "Емулгатор в шоколад, храни за кърмачета, печива и разтворими прахообразни продукти.",
+      "healthConcerns": "Счита се за безопасен и е източник на фосфолипиди.",
+      "evidenceLevel": "Силен научен консенсус",
+      "countriesRestrictedOrBanned": "",
+      "efsaStatus": "Разрешен (не е необходимо числово ограничение за допустим дневен прием)",
+      "fdaStatus": "Общопризнат като безопасен (GRAS)",
+      "acceptableDailyIntake": "Без числово ограничение",
+      "sideEffects": "Лек стомашно-чревен дискомфорт е възможен само при много висок прием.",
+      "allergens": "Соя",
+      "effectConditions": "",
+      "dietaryGuidance": "",
+      "riskRationale": "Силен научен консенсус",
+      "translationStatus": "REVIEWED",
+      "translationSource": "MACHINE_TRANSLATED"
+    }
+  }
+}

@@ -43,6 +43,7 @@ from app.repositories import ingredient_alias_repository
 from app.services.ingredient_catalog import derive_ins_number_from_e_number, register_curated_alias
 from app.services.ingredient_normalization import normalize_ingredient_name
 from app.services.ingredient_localization import canonical_text_hash
+from app.seed.load_summaries import load_summaries
 
 logger = structlog.get_logger(__name__)
 
@@ -351,9 +352,12 @@ async def load_seed() -> int:
 
         count += await _load_e_additive_starter(session)
         await _load_bg_localizations(session)
+        # Issue #23 stage 3: source-backed summaries (separate tables; never
+        # touches the ingredient rows above).
+        summary_counts = await load_summaries(session)
 
         await session.commit()
-    logger.info("seed_loaded", count=count)
+    logger.info("seed_loaded", count=count, **{f"summaries_{k}": v for k, v in summary_counts.items()})
     return count
 
 

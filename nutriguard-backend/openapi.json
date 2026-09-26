@@ -1324,6 +1324,16 @@
             ],
             "title": "Schemaversion"
           },
+          "summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IngredientSummaryOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "isGluten": {
             "anyOf": [
               {
@@ -1578,6 +1588,64 @@
         ],
         "title": "IngredientSource",
         "description": "Where an `Ingredient`/`IngredientAlias` row's data came from --\nalso the priority ranking used to decide whether new data is\nallowed to overwrite what's already stored (see\n`app.services.ingredient_catalog.SOURCE_PRIORITY`/`merge_verified_fields`:\nlower-priority/lower-confidence data must never overwrite\nhigher-priority/higher-confidence data)."
+      },
+      "IngredientSummaryOut": {
+        "properties": {
+          "scope": {
+            "type": "string",
+            "title": "Scope"
+          },
+          "evidenceState": {
+            "type": "string",
+            "title": "Evidencestate"
+          },
+          "humanReviewed": {
+            "type": "boolean",
+            "title": "Humanreviewed"
+          },
+          "verifiedAt": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verifiedat"
+          },
+          "sections": {
+            "items": {
+              "$ref": "#/components/schemas/SummarySectionOut"
+            },
+            "type": "array",
+            "title": "Sections"
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/components/schemas/SummaryCitationOut"
+            },
+            "type": "array",
+            "title": "Citations"
+          },
+          "localizations": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SummaryLocalizedOut"
+            },
+            "type": "object",
+            "title": "Localizations"
+          }
+        },
+        "type": "object",
+        "required": [
+          "scope",
+          "evidenceState",
+          "humanReviewed",
+          "sections",
+          "citations"
+        ],
+        "title": "IngredientSummaryOut",
+        "description": "Source-backed, sectioned ingredient summary (issue #23, stage 3). Its\nEnglish `sections` are the fallback for every language; `localizations`\nholds only a REVIEWED, current translation. `humanReviewed` is false\nuntil a person signs off the scientific content."
       },
       "IngredientTranslationSource": {
         "type": "string",
@@ -2035,6 +2103,138 @@
         ],
         "title": "ScanType",
         "description": "Mirrors the scanType string values used in ScanHistoryEntity"
+      },
+      "SummaryCitationOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "documentDate": {
+            "type": "string",
+            "title": "Documentdate"
+          },
+          "accessType": {
+            "type": "string",
+            "title": "Accesstype"
+          },
+          "supports": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Supports"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "url",
+          "documentDate",
+          "accessType"
+        ],
+        "title": "SummaryCitationOut"
+      },
+      "SummaryLocalizedOut": {
+        "properties": {
+          "sections": {
+            "items": {
+              "$ref": "#/components/schemas/SummaryLocalizedSectionOut"
+            },
+            "type": "array",
+            "title": "Sections"
+          },
+          "translationStatus": {
+            "type": "string",
+            "title": "Translationstatus"
+          },
+          "translationSource": {
+            "type": "string",
+            "title": "Translationsource"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sections",
+          "translationStatus",
+          "translationSource"
+        ],
+        "title": "SummaryLocalizedOut"
+      },
+      "SummaryLocalizedSectionOut": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "jurisdiction": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Jurisdiction"
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "text"
+        ],
+        "title": "SummaryLocalizedSectionOut",
+        "description": "A translated section: text only. Citations stay language-independent\non the English summary and are never repeated per language."
+      },
+      "SummarySectionOut": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "citationIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Citationids"
+          },
+          "jurisdiction": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Jurisdiction"
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "text"
+        ],
+        "title": "SummarySectionOut"
       },
       "TokenResponse": {
         "properties": {

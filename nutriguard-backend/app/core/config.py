@@ -104,6 +104,10 @@ class Settings(BaseSettings):
     # unresolved ingredient isn't re-attempted for every product within
     # this window (see app.services.ingredient_catalog.is_within_negative_cache_window).
     INGREDIENT_NEGATIVE_CACHE_TTL_SECONDS: int = 24 * 60 * 60  # 24 hours
+    # Kill switch for the additive `summary` object on ingredient responses
+    # (issue #23, stage 3). Off: every response is exactly as before, `summary`
+    # is null. The stored rows are untouched either way.
+    INGREDIENT_SUMMARIES_SERVE: bool = True
 
     @property
     def cors_origins_list(self) -> List[str]:

@@ -3,6 +3,7 @@ from app.models.health_profile import UserHealthProfileModel  # noqa: F401
 from app.models.ingredient import Ingredient  # noqa: F401
 from app.models.ingredient_localization import IngredientLocalization  # noqa: F401
 from app.models.ingredient_alias import IngredientAlias  # noqa: F401
+from app.models.ingredient_summary import IngredientSummary, IngredientSummaryLocalization  # noqa: F401
 from app.models.product import Product  # noqa: F401
 from app.models.product_source import ProductSource  # noqa: F401
 from app.models.scan_history import ScanHistory  # noqa: F401
