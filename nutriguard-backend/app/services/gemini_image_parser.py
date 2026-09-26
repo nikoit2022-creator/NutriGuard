@@ -22,15 +22,25 @@ database or the deterministic keyword-heuristic fallback are
 authoritative for ingredient-level claims.
 
 Returns `None` (rather than raising) when the JSON is missing, malformed,
-or missing the minimum usable fields (`productName` + `rawIngredientText`)
-— callers should treat `None` exactly like a Gemini failure and fall
-back to `fallback_local_analysis`.
+or missing the minimum usable field (`rawIngredientText`) -- callers
+should treat `None` exactly like a Gemini failure and fall back to
+`fallback_local_analysis`.
+
+Issue #25: `productName` is product IDENTITY, not ingredient or
+nutrition evidence, and is NOT part of that minimum. An ingredient-list
+photo routinely shows no product name at all; rejecting the whole
+response for it used to discard a genuinely extracted ingredient list
+(and nutrition panel) and replace it with the fallback's placeholder
+guess. A missing/blank/placeholder name is now kept as `""` (identity
+not observed) -- never an invented name -- and every other field goes
+through exactly the same validation as before.
 """
 import json
 import math
 from dataclasses import dataclass
 from typing import Any
 
+from app.services.barcode_text_safety import is_placeholder
 from app.services.fallback_analysis import AnalyzedProductData
 from app.services.ocr_normalizer import (
     create_synthetic_ingredient,
@@ -356,6 +366,33 @@ def _extract_allergens_text(payload: dict) -> str:
     return ", ".join(names)
 
 
+def observed_product_name(payload: dict) -> str:
+    """The product name actually read off the label, or `""` when the
+    response states none (missing key, JSON null, a non-string, blank, or
+    a literal placeholder such as "null"/"unknown"). `""` means "identity
+    not observed" -- no substitute name is ever invented here."""
+    value = payload.get("productName")
+    if not isinstance(value, str) or is_placeholder(value):
+        return ""
+    return value.strip()
+
+
+def label_extraction_failure_reason(json_string: str) -> str:
+    """Closed-vocabulary diagnostic reason for a response
+    `parse_gemini_image_json_result` rejected (returned `None` for):
+    `model_response_invalid` (not a JSON object, or no string
+    `rawIngredientText`) or `model_response_empty` (well-formed, but no
+    ingredient text and no complete nutrition panel). Never includes
+    any of the response's own content."""
+    try:
+        payload = json.loads(json_string)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return "model_response_invalid"
+    if not isinstance(payload, dict) or not isinstance(payload.get("rawIngredientText"), str):
+        return "model_response_invalid"
+    return "model_response_empty"
+
+
 def parse_gemini_image_json_result(
     json_string: str, db_ingredients: list[Any]
 ) -> tuple[AnalyzedProductData, list[Any]] | None:
@@ -367,10 +404,7 @@ def parse_gemini_image_json_result(
     if not isinstance(payload, dict):
         return None
 
-    product_name = payload.get("productName")
     raw_text = payload.get("rawIngredientText")
-    if not isinstance(product_name, str) or not product_name.strip():
-        return None
     if not isinstance(raw_text, str):
         return None
     # A nutrition-panel-only photo is useful even when it contains no
@@ -388,7 +422,9 @@ def parse_gemini_image_json_result(
 
     data = AnalyzedProductData(
         barcode="",  # overridden by the caller (food_analysis.analyze_label_image)
-        product_name=product_name.strip(),
+        # Issue #25: identity is optional enrichment, never a gate on the
+        # extracted evidence -- see `observed_product_name`.
+        product_name=observed_product_name(payload),
         brand=str(payload.get("brand") or "Analyzed Brand").strip() or "Analyzed Brand",
         category="Analyzed Food",
         image_url=None,

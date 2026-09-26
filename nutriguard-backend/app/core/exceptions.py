@@ -6,6 +6,7 @@ of the API Contract, and carries the HTTP status that should be returned.
 These are translated to the standard error envelope by the exception
 handlers registered in `app/main.py`.
 """
+from enum import Enum
 from typing import Any, Optional
 
 
@@ -106,3 +107,42 @@ class RateLimitExceededError(AppError):
 class InternalError(AppError):
     code = "INTERNAL_ERROR"
     status_code = 500
+
+
+class ScanFailureReason(str, Enum):
+    """Issue #25: closed-vocabulary, content-free cause carried as
+    `error.details.failureReason` on label/OCR scan failures, so a client
+    can tell an empty extraction from a provider or processing problem.
+    Set where the failure is observed -- never inferred from an empty
+    result (e.g. never "blurry photo"), never a raw exception/provider
+    message. Clients must treat an absent or unrecognized value as
+    `UNKNOWN` (older backends, future values)."""
+
+    # The provider answered and the answer was well-formed, but it held no
+    # ingredient text (an empty list, or a nutrition panel only).
+    EXTRACTION_EMPTY = "EXTRACTION_EMPTY"
+    # The AI provider could not be reached (network error, timeout, no
+    # configured key, provider-side error) at the stage that failed.
+    PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    # The provider answered, but not with the required structure.
+    PROVIDER_RESPONSE_INVALID = "PROVIDER_RESPONSE_INVALID"
+    # A well-formed translation was rejected (low confidence, or failed
+    # E-number/numeric invariant checks).
+    TRANSLATION_FAILED = "TRANSLATION_FAILED"
+    # Text WAS read from the label (a well-formed, non-empty extraction),
+    # but no usable ingredient token remained after tokenization and
+    # resolution (e.g. punctuation-only text such as "---"). Distinct from
+    # EXTRACTION_EMPTY: the provider did return text. Says nothing about
+    # photo quality or about a curated/scientific match -- a valid but
+    # unknown ingredient name is still "usable".
+    RESOLUTION_FAILED = "RESOLUTION_FAILED"
+    # Any other/unclassified processing failure.
+    UNKNOWN = "UNKNOWN"
+
+
+def with_failure_reason(details: Any, reason: ScanFailureReason) -> dict:
+    """`details` as a dict with `failureReason` added (additive: every
+    existing key is kept; a `None` details becomes a new dict)."""
+    merged = dict(details) if isinstance(details, dict) else {}
+    merged["failureReason"] = reason.value
+    return merged

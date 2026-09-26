@@ -8,7 +8,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user_id
 from app.core.config import settings
-from app.core.exceptions import AppError, ImageTooLargeError, ProductNotFoundError, ValidationAppError
+from app.core.exceptions import (
+    AIServiceUnavailableError,
+    AppError,
+    ImageTooLargeError,
+    InternalError,
+    ProductNotFoundError,
+    ScanFailureReason,
+    TranslationUnreliableError,
+    ValidationAppError,
+    with_failure_reason,
+)
 from app.core.rate_limit import SCAN_RATE, limiter
 from app.core.scan_diagnostics import record_scan_diagnostic
 from app.database.session import get_db
@@ -170,6 +180,50 @@ def _translation_fields(result: dict) -> dict:
         "ingredientTranslationUnreliableCount": ingredient_unreliable,
         "ingredientTranslationLanguages": ingredient_languages,
     }
+
+
+def _label_extraction_fields(source: dict) -> dict:
+    """Issue #25: the label-image extraction outcome
+    (`food_analysis._label_extraction_diagnostic_fields`) from a success
+    result dict or a `ProductNotFoundError.diagnostic_metadata` -- all
+    `None` (and so omitted from the journal line) when absent."""
+    return {
+        "labelExtraction": source.get("label_extraction"),
+        "productIdentityObserved": source.get("label_product_identity_observed"),
+        "labelNutritionComplete": source.get("label_nutrition_complete"),
+    }
+
+
+# Issue #25: the label/OCR scan failures that carry the public
+# `details.failureReason` (`ScanFailureReason`). Input-validation errors
+# (VALIDATION_ERROR, IMAGE_TOO_LARGE, IMAGE_UNREADABLE, rate limiting)
+# already name their cause in `code` and are left unchanged.
+_FAILURE_REASON_ERRORS = (ProductNotFoundError, AIServiceUnavailableError, TranslationUnreliableError)
+
+
+def _ensure_failure_reason(exc: AppError) -> str | None:
+    """Guarantees a scan failure's public `details.failureReason` --
+    `UNKNOWN` when no stage observed a cause -- and returns it for the
+    diagnostics journal. `None` (untouched) for other error types."""
+    if not isinstance(exc, _FAILURE_REASON_ERRORS):
+        return None
+    if not (isinstance(exc.details, dict) and exc.details.get("failureReason")):
+        exc.details = with_failure_reason(exc.details, ScanFailureReason.UNKNOWN)
+    return exc.details["failureReason"]
+
+
+def _unexpected_scan_error() -> InternalError:
+    """The same `500 INTERNAL_ERROR` / "An unexpected error occurred."
+    envelope the global handler (`app.main.handle_unexpected`) returns,
+    plus `details.failureReason: UNKNOWN`. Must be called inside the
+    `except` block: the stack trace is logged here exactly as that
+    handler would log it; nothing about the exception reaches the
+    client."""
+    _logger.exception("unexpected_error")
+    return InternalError(
+        "An unexpected error occurred.",
+        details=with_failure_reason(None, ScanFailureReason.UNKNOWN),
+    )
 
 
 def _diagnostic_base(request: Request, *, operation: str, barcode: str | None) -> dict:
@@ -349,12 +403,14 @@ async def scan_ocr_text(
         _finish_serializing(out)
         diagnostic_base["stage"] = "response_built"
     except ProductNotFoundError as exc:
+        failure_reason = _ensure_failure_reason(exc)
         details = exc.details if isinstance(exc.details, dict) else {}
         _safe_record_scan_diagnostic(
             **{**diagnostic_base, "barcode": barcode},
             dataSource=_observed_data_source(None, details),
             outcome="partial" if _is_partial_result(details) else "failed",
             errorCode=exc.code,
+            failureReason=failure_reason,
             # Code-review fix: a translation attempt observed before
             # THIS specific `ProductNotFoundError` (raised after
             # `food_analysis` already ran its language/translation
@@ -367,14 +423,16 @@ async def scan_ocr_text(
         )
         raise
     except AppError as exc:
+        failure_reason = _ensure_failure_reason(exc)
         _safe_record_scan_diagnostic(
             **diagnostic_base,
             outcome="failed",
             errorCode=exc.code,
+            failureReason=failure_reason,
             durationMs=round((time.perf_counter() - started) * 1000, 2),
         )
         raise
-    except Exception:
+    except Exception as exc:
         # Code-review fix: a LATER failure (response construction /
         # `_finish_serializing`) after `food_analysis` already
         # succeeded and returned `result` must not silently drop the
@@ -384,10 +442,11 @@ async def scan_ocr_text(
             **diagnostic_base,
             outcome="failed",
             errorCode="INTERNAL_ERROR",
+            failureReason=ScanFailureReason.UNKNOWN.value,
             **_translation_fields(result or {}),
             durationMs=round((time.perf_counter() - started) * 1000, 2),
         )
-        raise
+        raise _unexpected_scan_error() from exc
 
     product = result["product"]
     _safe_record_scan_diagnostic(
@@ -480,6 +539,7 @@ async def scan_label_image(
         _finish_serializing(out)
         diagnostic_base["stage"] = "response_built"
     except ProductNotFoundError as exc:
+        failure_reason = _ensure_failure_reason(exc)
         details = exc.details if isinstance(exc.details, dict) else {}
         ingredients = details.get("ingredients")
         _safe_record_scan_diagnostic(
@@ -487,6 +547,7 @@ async def scan_label_image(
             dataSource=_observed_data_source(None, details),
             outcome="partial" if _is_partial_result(details) else "failed",
             errorCode=exc.code,
+            failureReason=failure_reason,
             nutritionRecognized=not bool(details.get("nutritionScanRequired", True)),
             ingredientsRecognized=not bool(details.get("ingredientsScanRequired", True)),
             recognizedIngredientCount=len(ingredients) if isinstance(ingredients, list) else 0,
@@ -494,30 +555,42 @@ async def scan_label_image(
             # attempt across a LATER `ProductNotFoundError` -- see
             # `diagnostic_metadata=`'s docstring in `app.core.exceptions`.
             **_translation_fields(exc.diagnostic_metadata or {}),
+            **_label_extraction_fields(exc.diagnostic_metadata or {}),
             durationMs=round((time.perf_counter() - started) * 1000, 2),
         )
         raise
     except AppError as exc:
+        failure_reason = _ensure_failure_reason(exc)
         _safe_record_scan_diagnostic(
             **diagnostic_base,
             outcome="failed",
             errorCode=exc.code,
+            failureReason=failure_reason,
+            # Issue #25: the extraction outcome observed before THIS
+            # failure (e.g. a strict translation rejection, or both the
+            # provider and the local fallback failing).
+            **_label_extraction_fields(exc.diagnostic_metadata or {}),
             durationMs=round((time.perf_counter() - started) * 1000, 2),
         )
         raise
-    except Exception:
+    except Exception as exc:
         # Code-review fix: preserve translation work `food_analysis`
         # already observed and returned before a LATER response-
         # construction/serialization failure -- `result` is `None` only
-        # when `food_analysis` itself never returned at all.
+        # when `food_analysis` itself never returned at all. Issue #25:
+        # an exception raised INSIDE `food_analysis` carries the
+        # extraction outcome it had already observed on
+        # `diagnostic_metadata` (see `_with_label_extraction_diagnostics`).
         _safe_record_scan_diagnostic(
             **diagnostic_base,
             outcome="failed",
             errorCode="INTERNAL_ERROR",
+            failureReason=ScanFailureReason.UNKNOWN.value,
             **_translation_fields(result or {}),
+            **_label_extraction_fields(result or getattr(exc, "diagnostic_metadata", None) or {}),
             durationMs=round((time.perf_counter() - started) * 1000, 2),
         )
-        raise
+        raise _unexpected_scan_error() from exc
 
     product = result["product"]
     _safe_record_scan_diagnostic(
@@ -528,6 +601,7 @@ async def scan_label_image(
         ingredientsRecognized=product.has_verified_ingredients,
         nutritionBasis=product.nutrition_basis,
         **_translation_fields(result),
+        **_label_extraction_fields(result),
         **_ingredient_language_counts(result["ingredients"]),
         durationMs=round((time.perf_counter() - started) * 1000, 2),
     )

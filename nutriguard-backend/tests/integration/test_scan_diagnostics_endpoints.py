@@ -36,6 +36,20 @@ def _capture(monkeypatch) -> list[dict]:
     return calls
 
 
+def _assert_unexpected_error_envelope(resp, raw_exception_text: str) -> None:
+    """Issue #25: an unexpected scan failure is returned as the same
+    `500 INTERNAL_ERROR` envelope the global handler produces (it used to
+    propagate to the ASGI test transport as the raw exception), plus the
+    content-free `details.failureReason: UNKNOWN` -- never the exception
+    text itself."""
+    assert resp.status_code == 500
+    error = resp.json()["error"]
+    assert error["code"] == "INTERNAL_ERROR"
+    assert error["message"] == "An unexpected error occurred."
+    assert error["details"] == {"failureReason": "UNKNOWN"}
+    assert raw_exception_text not in resp.text
+
+
 def _small_jpeg_files() -> dict:
     buf = io.BytesIO()
     Image.new("RGB", (16, 16), color=(1, 2, 3)).save(buf, format="JPEG")
@@ -388,8 +402,8 @@ async def test_scan_label_image_serialization_failure_after_analysis_is_a_failed
     monkeypatch.setattr(gemini_service, "analyze_image", fake_analyze_image)
     monkeypatch.setattr(scan_module, "_to_analysis_out", _broken_to_analysis_out)
 
-    with pytest.raises(ValueError, match="forced serialization failure"):
-        await app_client.post("/api/v1/scan/label-image", headers=headers, files=_small_jpeg_files())
+    resp = await app_client.post("/api/v1/scan/label-image", headers=headers, files=_small_jpeg_files())
+    _assert_unexpected_error_envelope(resp, "forced serialization failure")
 
     assert len(calls) == 1
     assert calls[0]["outcome"] == "failed"
@@ -610,8 +624,8 @@ async def test_scan_label_image_computed_field_serialization_failure_is_a_failed
     monkeypatch.setattr(gemini_service, "analyze_image", fake_analyze_image)
     monkeypatch.setattr(scan_module, "_finish_serializing", _broken_finish_serializing)
 
-    with pytest.raises(ValueError, match="forced computed-field serialization failure"):
-        await app_client.post("/api/v1/scan/label-image", headers=headers, files=_small_jpeg_files())
+    resp = await app_client.post("/api/v1/scan/label-image", headers=headers, files=_small_jpeg_files())
+    _assert_unexpected_error_envelope(resp, "forced computed-field serialization failure")
 
     assert len(calls) == 1
     assert calls[0]["outcome"] == "failed"
@@ -669,8 +683,8 @@ async def test_scan_label_image_serialization_failure_after_translation_preserve
     monkeypatch.setattr(gemini_service, "translate_ingredient_list", _fake_translate)
     monkeypatch.setattr(scan_module, "_finish_serializing", _broken_finish_serializing)
 
-    with pytest.raises(ValueError, match="forced computed-field serialization failure"):
-        await app_client.post("/api/v1/scan/label-image", headers=headers, files=_small_jpeg_files())
+    resp = await app_client.post("/api/v1/scan/label-image", headers=headers, files=_small_jpeg_files())
+    _assert_unexpected_error_envelope(resp, "forced computed-field serialization failure")
 
     assert len(calls) == 1
     diag = calls[0]
