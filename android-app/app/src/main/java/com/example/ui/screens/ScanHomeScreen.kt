@@ -958,6 +958,7 @@ internal fun partialProductDisplayName(productName: String?): String {
     val cleaned = productName.cleanOrNull()
         ?.takeUnless { it.startsWith("synth_", ignoreCase = true) }
         ?.takeUnless { it.equals("Unknown product", ignoreCase = true) }
+        ?.takeUnless { it.equals("Scanned Label Product", ignoreCase = true) }
     return cleaned ?: UNCONFIRMED_PRODUCT_NAME
 }
 
@@ -1007,7 +1008,7 @@ internal fun shouldCancelFlowOnFailedDismiss(pendingBarcode: String?): Boolean =
  * `0`, and this card never shows a numeric score in the first place.
  */
 @Composable
-private fun LabelScanRequiredCard(
+internal fun LabelScanRequiredCard(
     state: BarcodeLookupUiState.LabelScanRequired,
     onIngredientClick: (IngredientEntity) -> Unit,
     onScanLabel: () -> Unit,
@@ -1015,9 +1016,12 @@ private fun LabelScanRequiredCard(
 ) {
     val identity = state.discoveredIdentity
     val identityName = partialProductDisplayName(identity?.productName)
-    val identityBrand = identity?.brand?.cleanOrNull()
-    val missingMessages = missingEvidenceMessages(state.nutritionScanRequired, state.ingredientsScanRequired)
+    val identityBrand = partialProductDisplayName(identity?.brand)
+        .takeUnless { it == UNCONFIRMED_PRODUCT_NAME || it.equals(identityName, ignoreCase = true) }
     val hasRecognizedIngredients = state.ingredients.isNotEmpty()
+    val ingredientFirst = hasRecognizedIngredients || state.fromLabelSubmission
+    val missingMessages = if (ingredientFirst) emptyList() else
+        missingEvidenceMessages(state.nutritionScanRequired, state.ingredientsScanRequired)
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -1060,7 +1064,11 @@ private fun LabelScanRequiredCard(
                 Spacer(modifier = Modifier.width(10.dp))
                 Column {
                     Text(
-                        text = if (hasRecognizedIngredients) "Ingredients recognized" else "Label Scan Needed",
+                        text = when {
+                            hasRecognizedIngredients -> "Ingredients recognized"
+                            state.fromLabelSubmission -> "No ingredients available from this scan"
+                            else -> "Label Scan Needed"
+                        },
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         color = PastelInk
@@ -1068,6 +1076,8 @@ private fun LabelScanRequiredCard(
                     Text(
                         text = if (hasRecognizedIngredients) {
                             "We found useful information on the label"
+                        } else if (state.fromLabelSubmission) {
+                            "The server returned no ingredients without a specific cause. You can try again."
                         } else {
                             "One more scan will help complete the product"
                         },
@@ -1085,7 +1095,7 @@ private fun LabelScanRequiredCard(
             // here is a deliberate second, UI-side layer of the same
             // defense (never trust a single filtering pass for text
             // shown directly to the user).
-            Text(
+            if (identityName != UNCONFIRMED_PRODUCT_NAME) Text(
                 text = buildString {
                     append(identityName)
                     if (identityBrand != null && identityName != UNCONFIRMED_PRODUCT_NAME) {
@@ -1096,14 +1106,9 @@ private fun LabelScanRequiredCard(
                 fontWeight = FontWeight.Medium,
                 color = PastelInk
             )
-            Text(
-                text = "Product identity is not confirmed yet",
-                style = MaterialTheme.typography.labelSmall,
-                color = PastelInk.copy(alpha = 0.64f)
-            )
             Spacer(modifier = Modifier.height(6.dp))
 
-            Box(
+            if (!ingredientFirst) Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(NutriGuardRadius.medium))
@@ -1154,7 +1159,7 @@ private fun LabelScanRequiredCard(
                         .padding(horizontal = NutriGuardSpacing.md, vertical = NutriGuardSpacing.sm)
                 ) {
                     Text(
-                        text = "Health Score pending • Scan the missing label information to complete it",
+                        text = "A nutrition photo is optional and can help calculate a Health Score",
                         style = MaterialTheme.typography.bodySmall,
                         fontWeight = FontWeight.Medium,
                         color = PastelInk.copy(alpha = 0.72f)
@@ -1181,7 +1186,7 @@ private fun LabelScanRequiredCard(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = labelScanActionText(
+                        text = if (ingredientFirst) "Add another photo" else labelScanActionText(
                             state.nutritionScanRequired,
                             state.ingredientsScanRequired
                         ),

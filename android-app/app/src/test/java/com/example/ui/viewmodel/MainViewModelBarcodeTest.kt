@@ -430,6 +430,7 @@ class MainViewModelBarcodeTest {
         assertEquals(false, state.ingredientsScanRequired)
         assertEquals(1, state.ingredients.size)
         assertEquals("Sugar", state.ingredients[0].commonName)
+        assertTrue("photo partial result must retain its label origin", state.fromLabelSubmission)
 
         // Second photo (nutrition panel) still attaches the SAME pending barcode.
         fake.imageResult = Result.success(sampleFullProductAnalysis(barcode = "4006381333931"))
@@ -722,6 +723,7 @@ class MainViewModelBarcodeTest {
         state as BarcodeLookupUiState.LabelScanRequired
         assertEquals(false, state.healthScoreAvailable)
         assertNull("never a fabricated/zero score for an incomplete result", state.healthScore)
+        assertTrue("text partial result must retain its label origin", state.fromLabelSubmission)
         assertEquals(true, state.nutritionScanRequired)
         assertEquals(1, state.ingredients.size)
         // Standalone (no pendingBarcode before this call) -- the partial
