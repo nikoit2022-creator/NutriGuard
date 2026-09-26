@@ -78,6 +78,52 @@ class IngredientLocalizedTextOut(ORMModel):
     translation_source: IngredientTranslationSource | None = None
 
 
+class SummarySectionOut(ORMModel):
+    kind: str
+    text: str
+    citation_ids: list[str] = Field(default_factory=list)
+    jurisdiction: str | None = None
+
+
+class SummaryCitationOut(ORMModel):
+    id: str
+    label: str
+    url: str
+    document_date: str
+    access_type: str
+    supports: list[str] = Field(default_factory=list)
+
+
+class SummaryLocalizedSectionOut(ORMModel):
+    """A translated section: text only. Citations stay language-independent
+    on the English summary and are never repeated per language."""
+
+    kind: str
+    text: str
+    jurisdiction: str | None = None
+
+
+class SummaryLocalizedOut(ORMModel):
+    sections: list[SummaryLocalizedSectionOut]
+    translation_status: str
+    translation_source: str
+
+
+class IngredientSummaryOut(ORMModel):
+    """Source-backed, sectioned ingredient summary (issue #23, stage 3). Its
+    English `sections` are the fallback for every language; `localizations`
+    holds only a REVIEWED, current translation. `humanReviewed` is false
+    until a person signs off the scientific content."""
+
+    scope: str
+    evidence_state: str
+    human_reviewed: bool
+    verified_at: int | None = None
+    sections: list[SummarySectionOut]
+    citations: list[SummaryCitationOut]
+    localizations: dict[str, SummaryLocalizedOut] = Field(default_factory=dict)
+
+
 class IngredientOut(ORMModel):
     """Mirrors com.example.data.model.IngredientEntity exactly (API Contract 5.4),
     plus additive, backward-compatible data-quality fields (see the
@@ -160,6 +206,12 @@ class IngredientOut(ORMModel):
     # DIFFERENT field on this row. See `_field_provenance` below and
     # `app.services.ingredient_catalog.parse_field_provenance`.
     field_provenance_json: str | None = Field(default=None, exclude=True, repr=False)
+    # Additive (issue #23 stage 3): null unless a source-verified summary
+    # exactly matches this ingredient. Served BESIDE the fields above, never
+    # merged into them.
+    summary: IngredientSummaryOut | None = Field(
+        default=None, validation_alias=AliasChoices("loaded_summary", "summary")
+    )
     localization_rows: list[IngredientLocalizationRow] = Field(
         default_factory=list,
         exclude=True,

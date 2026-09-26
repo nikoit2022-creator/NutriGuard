@@ -636,6 +636,7 @@ snapshot is included at `openapi.json` for convenience/diffing).
 | `refresh_tokens` | Persisted refresh-token registry (`jti`), enabling rotation and revocation |
 | `ingredients` | The one persistent, reusable ingredient catalog — mirrors `IngredientEntity` (plus additive canonical-identity/provenance columns, see section 13) — every curated/seeded entry AND every OCR/Gemini-observed ingredient with no curated match (an `UNVERIFIED` minimal record, see section 13) |
 | `ingredient_aliases` | Reverse-lookup index from any known name/spelling variant (English, Bulgarian, OCR/spelling variant) to its one canonical `ingredients` row — see section 13 |
+| `ingredient_summaries`, `ingredient_summary_localizations` | Stored, source-backed, sectioned (ORIGIN / FUNCTION / EFFECTS / JURISDICTION) English summaries keyed by an exact E-number or exact normalized name, with per-claim source ledger and review-gated Bulgarian text (issue #23) — a separate layer beside `ingredients`, never merged into it — see `docs/INGREDIENT_SUMMARIES.md` |
 | `products` | Analyzed products — mirrors `ProductEntity` exactly, including a denormalized `ingredient_ids` text column (see section 6), plus additive discovery-provenance columns (see section 10.4) not part of the public API contract |
 | `scan_history` | Per-user scan log — mirrors `ScanHistoryEntity` |
 | `user_health_profiles` | One row per user — mirrors `UserHealthProfile` |
@@ -2881,3 +2882,22 @@ E-number/alias/Bulgarian dedup, race-safe insert), `tests/integration/test_load_
 on next retrieval, `needsRefresh` fresh vs. expired), and
 `tests/postgres/test_ingredient_catalog_concurrency_postgres.py`
 (opt-in, real concurrent-session PostgreSQL).
+
+## 15. Source-backed ingredient summaries (issue #23, stage 3)
+
+`IngredientOut` (and therefore every scan response, the partial `404`
+ingredient list and `GET /ingredients`) gains one additive, nullable object,
+`summary`. It is `null` unless a stored, source-verified summary exactly
+matches the ingredient: by official E-number, or by exact normalized name for
+an identity-certain row. Its sections (`ORIGIN`, `FUNCTION`, `EFFECTS`,
+`JURISDICTION`) are each optional, citations are language-independent, and
+Bulgarian text is served only when a person has marked it `REVIEWED` and it
+still matches the current English text. A generic E-number summary is served
+beside the ingredient's own fields and never merged into them; no field of the
+ingredient, no score, no risk colour and no verification state changes.
+Content is loaded from a committed file by an idempotent loader (`python -m
+app.seed.load_summaries`, also run by `load_seed`); nothing is generated per
+scan. `INGREDIENT_SUMMARIES_SERVE=false` turns the object off without
+touching stored rows. Migration `e8f9a0b1c2d3`, `openapi.json` regenerated
+(additive only). Full contract, pilot coverage, sources, review process and
+verification: `docs/INGREDIENT_SUMMARIES.md`.

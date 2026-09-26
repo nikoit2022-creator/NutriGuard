@@ -149,13 +149,18 @@ def test_ingredient_out_field_set_is_purely_additive():
         "effectConditions", "dietaryGuidance", "adiPopulationScope",
         "identityUncertain", "uncertaintyReason",
     }
+    # Issue #23 stage 3: one additive, nullable object; null unless a
+    # source-verified summary exactly matches the ingredient.
+    summary_task_fields = {"summary"}
     assert dumped.keys() == (
         original_camel_fields
         | data_quality_task_fields
         | knowledge_cache_task_fields
         | review_fix_fields
         | language_and_info_contract_fields
+        | summary_task_fields
     )
+    assert dumped["summary"] is None
 
 
 def test_reviewed_localization_serializes_nested_and_leaves_canonical_fields_unchanged():

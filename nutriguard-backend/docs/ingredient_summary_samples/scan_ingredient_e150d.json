@@ -1,0 +1,242 @@
+{
+  "id": "synth_colour_e150d_a1430000c743",
+  "commonName": "Colour (E150d",
+  "scientificName": "E150D",
+  "eNumber": "E150D",
+  "insNumber": "150D",
+  "casNumber": null,
+  "category": "Food Additive (E150D)",
+  "description": "",
+  "purposeInFood": "",
+  "healthConcerns": "",
+  "evidenceLevel": "",
+  "countriesRestrictedOrBanned": "",
+  "efsaStatus": "",
+  "fdaStatus": "",
+  "whoIarcClassification": null,
+  "acceptableDailyIntake": "",
+  "sideEffects": "",
+  "allergens": "",
+  "references": "",
+  "effectConditions": "",
+  "dietaryGuidance": "",
+  "riskLevel": "SAFE",
+  "riskAssessmentAvailable": false,
+  "verificationStatus": "UNVERIFIED",
+  "source": "OCR_HEURISTIC",
+  "sourceRecordId": null,
+  "sourceUrl": null,
+  "retrievedAt": 1790422275780,
+  "lastVerifiedAt": null,
+  "confidence": 0.2,
+  "schemaVersion": 1,
+  "summary": {
+    "scope": "E_NUMBER_GENERIC",
+    "evidenceState": "SOURCE_VERIFIED",
+    "humanReviewed": false,
+    "verifiedAt": 1790380800000,
+    "sections": [
+      {
+        "kind": "ORIGIN",
+        "text": "Sulphite ammonia caramel (E 150d), also called caramel colour class IV, is a complex mixture of compounds, not a single substance. It is made by controlled heating of carbohydrates (such as glucose syrups, sucrose, invert syrups or dextrose) in the presence of both sulphite and ammonium compounds, and is a dark brown to black liquid or solid.\n\n4-Methylimidazole (4-MEI) is a separate substance that forms as a by-product when caramel colours are made with ammonia compounds (classes III and IV). It is not the colour itself. EU rules limit its content in E 150d (see the EU note below).",
+        "citationIds": [
+          "eu-231-2012-e150d",
+          "jecfa-caramel-2011",
+          "ntp-tr535",
+          "fda-4mei-qa"
+        ],
+        "jurisdiction": null
+      },
+      {
+        "kind": "FUNCTION",
+        "text": "It is used as a food colour.",
+        "citationIds": [
+          "jecfa-caramel-2011"
+        ],
+        "jurisdiction": null
+      },
+      {
+        "kind": "EFFECTS",
+        "text": "For the colour itself, EFSA's 2011 re-evaluation of the caramel colours (E 150a-d) had found that estimated intake could exceed the acceptable daily intake (ADI) for E 150a, E 150c and E 150d. A refined exposure assessment in 2012, using updated industry use levels, found intake considerably lower and found that the group ADI of 300 mg per kg of body weight per day for the four caramel colours combined was not exceeded for any population group. Only E 150c, a different caramel colour with its own lower ADI (100 mg per kg of body weight per day), could still be exceeded by toddlers and adults.\n\nThe cancer concern about 4-MEI comes from animal feeding studies of the pure substance, not from studies of E 150d itself. In the US National Toxicology Program's 2-year feeding studies (2007), 4-MEI at about 40 to 170 mg per kg of body weight per day increased lung tumours (alveolar/bronchiolar adenoma and carcinoma) in male and female mice, which the NTP rated as clear evidence. In female rats, at about 60 to 260 mg per kg per day, the evidence was equivocal (mononuclear cell leukaemia, significantly increased in the highest-dose group). In male rats, at about 30 to 115 mg per kg per day, there was no evidence. The NTP notes that determining the actual risk to humans requires a wider analysis than these studies. The International Agency for Research on Cancer lists 4-MEI as Group 2B, possibly carcinogenic to humans (Monographs Volume 101, 2013).\n\nIn the NTP tests 4-MEI was not mutagenic in Salmonella and did not raise micronucleus frequencies in rat or mouse bone marrow or in mouse blood. Regulators have read this differently: a 2016 review reports that EFSA judged 4-MEI not genotoxic and used a no-observed-adverse-effect level of 80 mg per kg per day, whereas California's OEHHA judged the testing not comprehensive enough to rule out a genotoxic mode of action.\n\nThis summary cites no human study of E 150d or 4-MEI and cancer, so the cancer findings above are animal findings. Whether they matter for people depends on dose: the FDA states that the NTP studies used levels that far exceed current estimates of human exposure to 4-MEI from food. Two 2025 papers show that the discussion continues (abstracts only were read). A risk assessment by Scialli (Regulatory Toxicology and Pharmacology) combined NTP rat reproductive-study data with FDA 90th-percentile US dietary exposure, reported margins of exposure of 735 to 1,489 (100 or more is considered low concern) and concluded that reproductive or developmental risk from US dietary 4-MEI is not expected. A review by Shikha and colleagues (Toxicology Letters) summarises reports from experimental models of liver, nervous-system and reproductive effects, notes that standard mutagenicity assays are largely negative, and states that emerging studies link 4-MEI to disruptions in glucose and lipid metabolism, which it says raises concerns about chronic low-dose dietary exposure; its abstract gives no doses or study designs for these. Neither paper is a human study or a regulatory decision.",
+        "citationIds": [
+          "efsa-2012-3030",
+          "ntp-tr535",
+          "iarc-classification-list",
+          "morita-2016",
+          "fda-4mei-qa",
+          "scialli-2025",
+          "shikha-2025"
+        ],
+        "jurisdiction": null
+      },
+      {
+        "kind": "JURISDICTION",
+        "text": "The EU specification for E 150d (Regulation (EU) No 231/2012, text as originally published in 2012; later amendments were not checked) allows not more than 250 mg/kg of 4-MEI and not more than 0.2 % sulphur dioxide, both expressed on an equivalent-colour basis (as if the product had a colour intensity of 0.1 absorbance units).",
+        "citationIds": [
+          "eu-231-2012-e150d"
+        ],
+        "jurisdiction": "EU"
+      },
+      {
+        "kind": "JURISDICTION",
+        "text": "The US Food and Drug Administration states that, based on current science, it has no reason to believe that 4-MEI presents any immediate or short-term health risks at the levels expected in food (page current as of 27 March 2020).",
+        "citationIds": [
+          "fda-4mei-qa"
+        ],
+        "jurisdiction": "US"
+      },
+      {
+        "kind": "JURISDICTION",
+        "text": "California (Proposition 65): as reported in a 2016 review, the state's OEHHA defined a No Significant Risk Level for 4-MEI of 29 micrograms per day for a 10^-5 lifetime cancer risk, using a non-threshold approach. This level applies to the substance 4-MEI, not to the colour as a whole.",
+        "citationIds": [
+          "morita-2016"
+        ],
+        "jurisdiction": "US-CA"
+      }
+    ],
+    "citations": [
+      {
+        "id": "eu-231-2012-e150d",
+        "label": "Commission Regulation (EU) No 231/2012, specification for E 150d (OJ L 83, 22.3.2012)",
+        "url": "https://eur-lex.europa.eu/eli/reg/2012/231/oj",
+        "documentDate": "2012-03-22",
+        "accessType": "FULL_TEXT",
+        "supports": [
+          "ORIGIN",
+          "JURISDICTION"
+        ]
+      },
+      {
+        "id": "jecfa-caramel-2011",
+        "label": "JECFA specification: caramel colours, 74th meeting (2011), FAO JECFA Monographs 11",
+        "url": "https://www.fao.org/fileadmin/user_upload/jecfa_additives/docs/monograph11/additive-102-m11.pdf",
+        "documentDate": "2011",
+        "accessType": "FULL_TEXT",
+        "supports": [
+          "ORIGIN",
+          "FUNCTION"
+        ]
+      },
+      {
+        "id": "efsa-2012-3030",
+        "label": "EFSA, Refined exposure assessment for caramel colours (E 150a, c, d), EFSA Journal 2012;10(12):3030",
+        "url": "https://doi.org/10.2903/j.efsa.2012.3030",
+        "documentDate": "2012-12",
+        "accessType": "ABSTRACT",
+        "supports": [
+          "EFFECTS"
+        ]
+      },
+      {
+        "id": "ntp-tr535",
+        "label": "US National Toxicology Program, Technical Report 535: 4-Methylimidazole in F344/N rats and B6C3F1 mice (feed studies)",
+        "url": "https://ntp.niehs.nih.gov/publications/reports/tr/tr535",
+        "documentDate": "2007-01",
+        "accessType": "FULL_TEXT",
+        "supports": [
+          "ORIGIN",
+          "EFFECTS"
+        ]
+      },
+      {
+        "id": "iarc-classification-list",
+        "label": "IARC Monographs, agents classified (Volumes 1-123): 4-methylimidazole, Group 2B, Volume 101, 2013",
+        "url": "https://monographs.iarc.who.int/wp-content/uploads/2018/09/ClassificationsAlphaOrder.pdf",
+        "documentDate": "2018-11",
+        "accessType": "OFFICIAL_PAGE",
+        "supports": [
+          "EFFECTS"
+        ]
+      },
+      {
+        "id": "morita-2016",
+        "label": "Morita T, Uneyama C. Genotoxicity assessment of 4-methylimidazole: regulatory perspectives. Genes and Environment 2016;38:20",
+        "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC5088675/",
+        "documentDate": "2016-11",
+        "accessType": "ABSTRACT",
+        "supports": [
+          "EFFECTS",
+          "JURISDICTION"
+        ]
+      },
+      {
+        "id": "fda-4mei-qa",
+        "label": "US FDA, Questions & Answers About 4-MEI",
+        "url": "https://www.fda.gov/food/food-additives-petitions/questions-answers-about-4-mei",
+        "documentDate": "2020-03-27",
+        "accessType": "OFFICIAL_PAGE",
+        "supports": [
+          "ORIGIN",
+          "EFFECTS",
+          "JURISDICTION"
+        ]
+      },
+      {
+        "id": "scialli-2025",
+        "label": "Scialli AR. Reproductive and developmental toxicity risk assessment for 4-methylimidazole. Regulatory Toxicology and Pharmacology 2025:105856",
+        "url": "https://doi.org/10.1016/j.yrtph.2025.105856",
+        "documentDate": "2025",
+        "accessType": "ABSTRACT",
+        "supports": [
+          "EFFECTS"
+        ]
+      },
+      {
+        "id": "shikha-2025",
+        "label": "Shikha, Gautam K, Sharma M. Toxicological evaluation of 4-methylimidazole: research advances, health concerns and regulatory perspectives. Toxicology Letters 2025:111747",
+        "url": "https://doi.org/10.1016/j.toxlet.2025.111747",
+        "documentDate": "2025",
+        "accessType": "ABSTRACT",
+        "supports": [
+          "EFFECTS"
+        ]
+      }
+    ],
+    "localizations": {}
+  },
+  "isGluten": null,
+  "isLactose": null,
+  "isVegan": null,
+  "isVegetarian": null,
+  "isHalal": null,
+  "isKosher": null,
+  "badForDiabetes": false,
+  "badForHypertension": false,
+  "badForKidneyDisease": false,
+  "badForGout": false,
+  "badForPregnancy": false,
+  "badForChildren": false,
+  "badForHighCholesterol": false,
+  "identityUncertain": true,
+  "uncertaintyReason": "TRANSLATION_UNRELIABLE",
+  "needsRefresh": false,
+  "riskRationale": null,
+  "efsaApprovalStatus": "NO_INFORMATION",
+  "fdaApprovalStatus": "NO_INFORMATION",
+  "adiMinMgPerKgBwPerDay": null,
+  "adiMaxMgPerKgBwPerDay": null,
+  "adiSource": null,
+  "adiPopulationScope": null,
+  "insNumberVerified": false,
+  "localizations": {
+    "en": {
+      "commonName": "Colour (E150d",
+      "category": "Food Additive (E150D)",
+      "description": "",
+      "purposeInFood": "",
+      "healthConcerns": "",
+      "evidenceLevel": "",
+      "countriesRestrictedOrBanned": "",
+      "efsaStatus": "",
+      "fdaStatus": "",
+      "acceptableDailyIntake": "",
+      "sideEffects": "",
+      "allergens": "",
+      "effectConditions": "",
+      "dietaryGuidance": "",
+      "riskRationale": "",
+      "translationStatus": null,
+      "translationSource": null
+    }
+  }
+}

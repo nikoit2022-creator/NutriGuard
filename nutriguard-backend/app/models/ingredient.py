@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Any, ClassVar
 
 from sqlalchemy import Boolean, DateTime, Enum, Integer, Numeric, String, Text, inspect as sa_inspect
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -263,6 +264,12 @@ class Ingredient(Base):
     localization_rows: Mapped[list["IngredientLocalization"]] = relationship(  # type: ignore[name-defined]
         back_populates="ingredient", cascade="all, delete-orphan", lazy="selectin"
     )
+
+    # Transient (not a column): the served `summary` payload for this row,
+    # set per request by `app.services.ingredient_summaries.attach`. `None`
+    # when there is no eligible summary or nothing attached it; serializers
+    # read it synchronously and never trigger I/O.
+    loaded_summary: ClassVar[Any] = None
 
     @property
     def loaded_localization_rows(self) -> list["IngredientLocalization"]:  # type: ignore[name-defined]

@@ -958,3 +958,24 @@ Date: 2026-09-04
 Verification at the time: `python -m pytest -q` → 366 passed, 2
 skipped. `alembic heads` → one head (`d3e4f5a6b7c8`, since superseded
 by `e4f5a6b7c8d9` above). `alembic upgrade head --sql` → clean.
+# 2026-09-26 — Catalog quality audit continuation (local, not deployed)
+
+- Base: Claude summaries `255dde27b59785706eb714404cf57d0a1f80a000`; isolated
+  worktree/branch `feat/backend-catalog-quality-audit`. Existing Android and live
+  checkout changes preserved.
+- Added `scripts/audit/catalog_quality.sql`, a read-only PostgreSQL aggregate audit;
+  `scripts/audit/catalog_quality_report.py`, bounded validation/comparison with no
+  writes; `tests/unit/test_catalog_quality_report.py`; `docs/CATALOG_QUALITY_AUDIT.md`.
+- Verification: standalone Python tests **8 passed**; `git diff --check` passed.
+  No PostgreSQL/Docker/SQLAlchemy runtime available locally: SQL execution and full
+  backend suite are **not verified**. No live DB, API, credentials, or scheduler touched.
+- This delivers a manual stage-4 foundation, not the whole remaining programme.
+  Pending: disposable PostgreSQL execution, optional queue/summary coverage, hash
+  freshness, bounded atomic scheduled runner, independent science/BG review, branch
+  integration and migration revision conflict resolution. See audit document for
+  precise limitations and operational instructions.
+- Exact next step: run `scripts/audit/catalog_quality.sql` with `psql -X -qAt
+  -v ON_ERROR_STOP=1` against a disposable PostgreSQL database at this branch's head;
+  validate known fixture counts and unchanged data, then integrate queue/summary
+  migrations before expanding the audit. Do not run repairs or enable scheduling.
+- No commit/push/merge/deploy performed in this continuation.

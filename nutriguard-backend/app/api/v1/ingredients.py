@@ -11,6 +11,7 @@ from app.models.enums import RiskLevel
 from app.repositories import ingredient_repository
 from app.schemas.common import Page
 from app.schemas.ingredient import IngredientOut
+from app.services import ingredient_summaries
 
 router = APIRouter(prefix="/ingredients", tags=["ingredients"])
 
@@ -30,6 +31,7 @@ async def list_ingredients(
     rows, total = await ingredient_repository.search(
         db, query=search, risk_level=riskLevel, page=page, page_size=pageSize
     )
+    await ingredient_summaries.attach(db, rows)
     return Page[IngredientOut](
         items=[IngredientOut.model_validate(r) for r in rows],
         page=page,
@@ -51,4 +53,5 @@ async def get_ingredient(
     ingredient = await ingredient_repository.get_by_id_or_e_number(db, ingredient_id)
     if ingredient is None:
         raise IngredientNotFoundError(f"No ingredient found for id/eNumber '{ingredient_id}'.")
+    await ingredient_summaries.attach(db, [ingredient])
     return IngredientOut.model_validate(ingredient)
