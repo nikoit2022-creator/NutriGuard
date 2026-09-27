@@ -105,6 +105,19 @@ class Settings(BaseSettings):
     # this window (see app.services.ingredient_catalog.is_within_negative_cache_window).
     INGREDIENT_NEGATIVE_CACHE_TTL_SECONDS: int = 24 * 60 * 60  # 24 hours
 
+    # --- Ingredient candidate queue (issue #23, stage 2) ---
+    # Bounded observation metadata for ingredient tokens with no curated
+    # identity (see app.services.ingredient_candidates). Hard cap on rows:
+    # once reached, a NEW candidate is not recorded (counted in a warning
+    # log) but existing ones keep counting; nothing is ever evicted
+    # automatically.
+    INGREDIENT_CANDIDATE_MAX_ROWS: int = 5000
+    # `prune` (manual, dry-run by default) only considers rows unseen for
+    # this long, seen at most INGREDIENT_CANDIDATE_PRUNE_MAX_ENCOUNTERS
+    # times, and never a FLAGGED row (those await review).
+    INGREDIENT_CANDIDATE_RETENTION_DAYS: int = 180
+    INGREDIENT_CANDIDATE_PRUNE_MAX_ENCOUNTERS: int = 2
+
     @property
     def cors_origins_list(self) -> List[str]:
         if self.CORS_ORIGINS.strip() == "*":
