@@ -1,5 +1,31 @@
 # CODEX_HANDOFF
 
+## 2026-09-27: VM verification of ingredient review list
+
+- Verified fetched `c3f2f4eefa8c7ef839c95945496471ee2871fbe9` in isolated
+  worktree `feat-backend-ingredient-review-list`; live bind-mounted checkout and
+  its existing handoff edit were left untouched. Live schema was inspected only
+  in a read-only transaction: `c6d7e8f9a0b1`, no candidate table.
+- Full Linux suite on Python 3.12.14/pinned dependencies:
+  `python -m pytest -q -p no:cacheprovider`: **701 passed, 15 skipped**;
+  disposable PostgreSQL suite: **16 passed**, including new real CLI export,
+  read-only transaction, bilingual deduplication and failure-preservation coverage.
+- Final complete suite with disposable PostgreSQL enabled: **717 passed, zero
+  skipped, 2 existing warnings**, 22.05 seconds. Disposable resources removed.
+- Disposable PostgreSQL upgrade/downgrade/re-upgrade preserved existing seeded
+  ingredients/localizations, OCR identity/alias and product references. Maintenance
+  dry runs made no changes. OpenAPI exact match; one Alembic head.
+- Added `tests/postgres/test_ingredient_review_list_postgres.py` and full report
+  `docs/INGREDIENT_REVIEW_VERIFICATION.md`; updated the review-list verification
+  guidance. No application code, sources or descriptions changed; no EFSA work.
+- Integration gates remain: truthful-unknowns uses the same `d7e8f9a0b1c2`
+  revision for different DDL; summaries introduces a sibling head; ingredient-first
+  label scanning conflicts in `food_analysis.py`. No optional branches integrated.
+- Next: review the candidate dependency and verification report, resolve conflicts
+  only on the explicitly chosen integration tree, and re-test that tree before
+  separately authorizing merge/deployment. This task authorizes committing and
+  pushing verification only; collection is still inactive on the live stack.
+
 ## 2026-09-27: authorized Git handoff to the VM
 
 - Owner explicitly authorized committing and pushing `feat/backend-ingredient-review-list`,

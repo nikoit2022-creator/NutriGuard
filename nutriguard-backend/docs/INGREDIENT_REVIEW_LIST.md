@@ -88,4 +88,7 @@ This change adds no migration/API changes. Before integration, reconcile the
 candidate migration revision `d7e8f9a0b1c2` with other unmerged branches using
 that revision ID, then test the final combined chain against disposable Postgres.
 Do not merge all parallel branches blindly or deploy this branch over unrelated
-Android/backend work. Linux and PostgreSQL verification remain required.
+Android/backend work. Linux and disposable PostgreSQL verification of commit
+`c3f2f4e` is complete; see `INGREDIENT_REVIEW_VERIFICATION.md` for exact results,
+the added PostgreSQL CLI regression, and unresolved cross-branch integration gates.
+Any combined integration tree still needs its own full verification.
