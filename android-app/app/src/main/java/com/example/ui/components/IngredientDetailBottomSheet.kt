@@ -55,6 +55,8 @@ import com.example.ui.theme.RiskRed
 import com.example.ui.theme.getRiskUiColor
 import com.example.ui.theme.getWhoIarcUiColor
 import com.example.ui.model.localizedContent
+import com.example.ui.model.parseIngredientSummary
+import com.example.ui.model.summarySectionTitle
 import java.math.BigDecimal
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -67,6 +69,7 @@ fun IngredientDetailBottomSheet(
 
     val language = LocalAppLanguage.current
     val localized = ingredient.localizedContent(language)
+    val structuredSummary = parseIngredientSummary(ingredient.summaryJson, language)
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val riskUi = getRiskUiColor(ingredient.riskLevel)
     val riskLabel = when (ingredient.riskLevel) {
@@ -164,6 +167,23 @@ fun IngredientDetailBottomSheet(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(10.dp))
 
+            structuredSummary?.let { summary ->
+                DetailGroupTitle("Source-backed summary")
+                if (!summary.humanReviewed) {
+                    Text(
+                        text = "Source verified · Human review pending",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                summary.sections.forEach { section ->
+                    InfoSectionItem(
+                        summarySectionTitle(section.kind, section.jurisdiction),
+                        section.text
+                    )
+                }
+            }
+
             val hasOverview = localized.description.cleanOrNull() != null ||
                 localized.purposeInFood.cleanOrNull() != null
             val hasHealthInformation = localized.healthConcerns.cleanOrNull() != null ||
@@ -212,11 +232,12 @@ fun IngredientDetailBottomSheet(
             InfoSectionItem("Evidence", localized.evidenceLevel)
             InfoSectionItem("Restricted in", localized.countriesRestrictedOrBanned)
 
-            if (sources.isNotEmpty()) {
+            val allSources = (sources + structuredSummary.orEmptySources()).distinct()
+            if (allSources.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(8.dp))
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 TextButton(onClick = { sourcesExpanded = !sourcesExpanded }) {
-                    Text("Sources (${sources.size})")
+                    Text("Sources (${allSources.size})")
                     Spacer(modifier = Modifier.width(4.dp))
                     Icon(
                         imageVector = if (sourcesExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
@@ -228,7 +249,7 @@ fun IngredientDetailBottomSheet(
                 }
                 if (sourcesExpanded) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        sources.forEach { source ->
+                        allSources.forEach { source ->
                             Text(
                                 text = source,
                                 style = MaterialTheme.typography.bodySmall,
@@ -243,6 +264,9 @@ fun IngredientDetailBottomSheet(
         }
     }
 }
+
+private fun com.example.ui.model.IngredientSummaryUi?.orEmptySources(): List<String> =
+    this?.citations?.map { "${it.label}: ${it.url}" }.orEmpty()
 
 private fun hasKnownRegulatoryStatus(rawStatus: String?): Boolean = when (rawStatus.cleanOrNull()?.uppercase()) {
     "APPROVED", "NOT_APPROVED" -> true

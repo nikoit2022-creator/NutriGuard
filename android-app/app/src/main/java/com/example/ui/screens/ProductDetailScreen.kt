@@ -47,6 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.IngredientEntity
+import com.example.data.remote.dto.cleanOrNull
 import com.example.ui.components.DietaryBadgesRow
 import com.example.ui.components.HealthScoreGauge
 import com.example.ui.components.HealthFactor
@@ -66,6 +67,16 @@ import com.example.ui.theme.ScannerSlateMuted
 import com.example.ui.theme.ScannerViolet
 import com.example.ui.viewmodel.AnalysisUiState
 import com.example.ui.viewmodel.MainViewModel
+
+/** Presentation-only filtering also covers cached responses from older backends. */
+internal fun productIdentityText(value: String?): String? = value.cleanOrNull()?.takeUnless {
+    it.lowercase() in setOf("scanned label product", "scanned product", "analyzed brand",
+        "analyzed food", "general food", "unknown brand", "unknown product")
+}
+
+internal fun productIdentitySubtitle(brand: String?, category: String?): String =
+    listOfNotNull(productIdentityText(brand), productIdentityText(category))
+        .distinct().joinToString(" • ")
 
 @Composable
 fun ProductDetailScreen(
@@ -186,13 +197,14 @@ fun ProductDetailScreen(
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = product.productName,
+                                text = productIdentityText(product.productName) ?: "Ingredients recognized",
                                 style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
-                            Text(
-                                text = "${product.brand} • ${product.category}",
+                            val subtitle = productIdentitySubtitle(product.brand, product.category)
+                            if (subtitle.isNotEmpty()) Text(
+                                text = subtitle,
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -216,16 +228,11 @@ fun ProductDetailScreen(
                             onSodiumClick = { selectedHealthFactor = HealthFactor.SODIUM },
                             onSaturatedFatClick = { selectedHealthFactor = HealthFactor.SATURATED_FAT }
                         )
-                    } else {
-                        PendingHealthScoreCard(
-                            hasVerifiedIngredients = product.hasVerifiedIngredients,
-                            hasVerifiedNutrition = product.hasVerifiedNutrition
-                        )
                     }
                 }
 
                 // Dietary Suitability Badges
-                item {
+                if (product.isVerified) item {
                     Column {
                         Text(
                             text = "Dietary Suitability",
@@ -312,6 +319,13 @@ fun ProductDetailScreen(
                     )
                 }
 
+                if (analysis.healthScore == null) item {
+                    PendingHealthScoreCard(
+                        hasVerifiedIngredients = analysis.ingredients.isNotEmpty(),
+                        hasVerifiedNutrition = product.hasVerifiedNutrition
+                    )
+                }
+
                 // Raw OCR Text Inspection (Collapsible / Subtle Card)
                 if (product.rawIngredientText.isNotBlank()) {
                     item {
@@ -358,9 +372,9 @@ fun ProductDetailScreen(
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = if (analysis.isFromDatabaseCache)
-                                "Verified from Food Safety Database"
+                                "Loaded from saved product data"
                             else
-                                "Analyzed via NutriGuard Scientific Engine",
+                                "Processed by NutriGuard",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                         )
@@ -440,7 +454,7 @@ private fun PendingHealthScoreCard(
             Text(
                 text = when {
                     hasVerifiedIngredients && !hasVerifiedNutrition ->
-                        "Ingredients were recognized successfully. Scan the nutrition table to calculate a Health Score."
+                        "A nutrition photo is optional and can help calculate a Health Score"
                     !hasVerifiedIngredients && hasVerifiedNutrition ->
                         "Nutrition data was found, but the ingredient list still needs a clearer scan."
                     else ->

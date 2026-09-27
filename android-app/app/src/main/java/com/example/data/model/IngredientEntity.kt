@@ -45,6 +45,8 @@ data class IngredientEntity(
      * The canonical fields above remain the backward-compatible fallback.
      */
     val localizationsJson: String = "",
+    /** Source-backed structured summary returned by the backend; empty when unavailable. */
+    val summaryJson: String = "",
     val isGluten: Boolean? = null,
     val isLactose: Boolean? = null,
     val isVegan: Boolean? = null,

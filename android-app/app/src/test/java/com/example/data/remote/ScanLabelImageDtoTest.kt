@@ -20,6 +20,20 @@ import org.robolectric.annotation.Config
 @Config(sdk = [36])
 class ScanLabelImageDtoTest {
 
+    @Test
+    fun namelessIngredientSuccessPreservesNullScoreDespiteNestedLegacyZero() {
+        val dto = ScanLabelImageResponseDto.fromJson(JSONObject("""
+            {"product":{"barcode":"img_123","productName":"","brand":"Analyzed Brand",
+            "healthScore":0,"hasVerifiedNutrition":false,"hasVerifiedIngredients":true,"isVerified":false},
+            "healthScore":null,"ingredients":[{"id":"oats","commonName":"Oats","riskAssessmentAvailable":false}]}
+        """))
+        val parsed = dto.toParsedEntities()
+        assertNull(parsed.product.healthScore)
+        assertEquals("Oats", parsed.ingredients.single().commonName)
+        assertFalse(parsed.ingredients.single().riskAssessmentAvailable)
+        assertFalse(parsed.product.hasVerifiedNutrition)
+    }
+
     private val fullResponseJson = """
         {
           "product": {
@@ -76,6 +90,14 @@ class ScanLabelImageDtoTest {
               "adiMaxMgPerKgBwPerDay": 40.0,
               "adiSource": "EFSA Journal 2013;11(12):3496",
               "sourceUrl": "https://www.efsa.europa.eu/example",
+              "summary": {
+                "scope": "E_NUMBER_GENERIC",
+                "evidenceState": "SOURCE_VERIFIED",
+                "humanReviewed": false,
+                "sections": [{"kind":"ORIGIN","text":"Produced from amino acids.","citationIds":["efsa"]}],
+                "citations": [{"id":"efsa","label":"EFSA","url":"https://www.efsa.europa.eu/example","documentDate":"2013","accessType":"OFFICIAL_PAGE","supports":["ORIGIN"]}],
+                "localizations": {}
+              },
               "localizations": {
                 "en": {
                   "commonName": "Aspartame",
@@ -179,6 +201,8 @@ class ScanLabelImageDtoTest {
         assertEquals("https://www.efsa.europa.eu/example", ingredient.sourceUrl)
         assertTrue(ingredient.localizationsJson.contains("Аспартам"))
         assertTrue(ingredient.localizationsJson.contains("MACHINE_TRANSLATED"))
+        assertTrue(ingredient.summaryJson.contains("E_NUMBER_GENERIC"))
+        assertTrue(ingredient.summaryJson.contains("Produced from amino acids."))
         assertFalse(ingredient.badForDiabetes)
         assertFalse(ingredient.badForHypertension)
         assertTrue(ingredient.badForKidneyDisease)
