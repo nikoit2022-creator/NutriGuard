@@ -1,5 +1,62 @@
 # CODEX_HANDOFF
 
+## 2026-09-27: authorized Git handoff to the VM
+
+- Owner explicitly authorized committing and pushing `feat/backend-ingredient-review-list`,
+  without merging or changing the server. This entry accompanies that delivery.
+- Focused review-list suite rerun: 15 passed. Full-suite platform limitations
+  and unmerged candidate dependency documented below remain applicable.
+- VM agent: fetch this branch without switching the live bind-mounted checkout.
+  Read `AGENTS.md`, `docs/INGREDIENT_REVIEW_LIST.md`, and
+  `docs/INGREDIENT_CANDIDATE_QUEUE.md` in an isolated worktree. Inspect current
+  deployed schema/branch and resolve integration conflicts there, not on live data.
+- Retain current scientific information sources; no EFSA/OpenFoodTox integration,
+  generated descriptions, evidence promotion, or scheduled monitoring is requested.
+- Run Linux full suite and disposable PostgreSQL migration/concurrency/export
+  checks; document results and remaining deployment gates. Do not automatically
+  merge or deploy this handoff branch. Collection is not activated by a Git push.
+
+## 2026-09-27: activation requested; remote authentication blocked
+
+- User requested applying the names-only collection, retaining existing information sources.
+- Re-read repository instructions and checked the local review-list changes are intact.
+- Refreshed origin/main: still `32bd7efc05750470da6f48eab7c4111e45db1d26`.
+- Read-only SSH connection test to the previously configured VM address with
+  BatchMode and strict host-key checking reached SSH but returned
+  `Permission denied (publickey,password)`. No remote command executed.
+- No production files/database/services changed; collection is NOT activated.
+  No push/merge performed. Prior integration and Linux/Postgres gates remain.
+- Next: obtain approved SSH authentication through the normal local key setup,
+  or hand execution to the existing VM agent. Inspect deployed state first,
+  reconcile dependencies, test and back up before any production migration.
+
+## 2026-09-26: owner EN/BG ingredient review export (local, not deployed)
+
+- Inspected main (`32bd7ef`), catalog audit and existing candidate collection.
+  Reused candidate branch `d372985` in isolated task branch
+  `feat/backend-ingredient-review-list`; main and other worktrees unchanged.
+- Added `app/services/ingredient_review_list.py` (read-only canonical grouping,
+  explicit-language names, collision flags, observation metadata) and
+  `app/seed/ingredient_review_list.py` (manual JSON view/atomic file snapshot).
+  See `docs/INGREDIENT_REVIEW_LIST.md` for operator commands and limitations.
+- Added `tests/integration/test_ingredient_review_list.py`: 15 tests passed
+  using isolated Python 3.12.14 with repository requirements. Final full suite:
+  698 passed, 15 skipped, 3 failed. Failures are
+  unchanged POSIX-only scan diagnostics tests on Windows (`fcntl`/`fork`),
+  not suppressed or edited (confirmed unchanged against `d372985`). PostgreSQL
+  opt-in tests not executed here. `git diff --check` passed; `alembic heads`
+  reports the existing single head `d7e8f9a0b1c2`.
+- No live connection, migration, content update, API change, push, commit,
+  merge, deployment, or automatic monitoring performed. Existing collection
+  remains the source: known curated identities are not candidates, queue limits
+  still apply. Export does not import hand-edited scientific content.
+- Important limitation: untagged OCR names stay unnamed pending language review;
+  internal originals remain available by candidate ID. This avoids guessing EN/BG.
+  Same-name different identities are flagged rather than unsafe auto-merged.
+- Next: independently review this extension and candidate dependency; reconcile
+  migration ID collisions across unmerged branches, run Linux/Postgres checks
+  on the combined branch, then separately authorize push/review/deployment.
+
 ## 2026-09-17 (later): code-review follow-up -- translation correctness, EN/BG contract, diagnostic accuracy (Claude Code, isolated worktree)
 
 Continuation of the entry immediately below, addressing a code review of commit `8ca0119fac1fbffb47bb64b5cb50a0f5ada83fb7` on the same branch (`feat/backend-ingredient-language-diagnostics`). Also tracked as GitHub issue #19 (shared Claude/Codex task record); a copy of this report was intended to be posted there, with a fallback to committing it into this repo when API/comment access isn't available in this session -- see `docs/INGREDIENT_LANGUAGE_REVIEW.md` if present. Worked in the same isolated worktree as before; live checkout/database/containers untouched throughout. One subagent used (issue 3, non-overlapping file ownership: `app/services/ingredient_segmentation.py` + its test file only).
