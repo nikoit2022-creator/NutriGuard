@@ -12,12 +12,15 @@ what was built, how it was verified, and what remains.
 
 ## Commits on this branch
 
-1. `6038024` — contract publication: header middleware/generation,
-   ingestion endpoint, schemas, README/`.env.example`/`openapi.json`
-   updates, 35 tests, a fix to a latent validation-error-handler bug.
-2. (this commit) — operator CLI, its tests, and this report.
+1. `603802418ca591d82cf3aff055d5e4c8dfc6a681` — contract publication:
+   header middleware/generation, ingestion endpoint, schemas,
+   README/`.env.example`/`openapi.json` updates, 35 tests, a fix to a
+   latent validation-error-handler bug.
+2. `9d4e91e243aed0e52742c8b2ef7b17dd7e82d7c8` — operator CLI, its
+   tests, and this report.
 
 Run `git log origin/main..HEAD` on the branch for the exact set.
+`HEAD` at the time of this report is `9d4e91e243aed0e52742c8b2ef7b17dd7e82d7c8`.
 
 ## What was delivered
 
