@@ -50,12 +50,14 @@ contract-level detail. Summary:
 
 Round 1: `6038024` (contract publication), `9d4e91e` (operator CLI +
 round-1 report), `497a4ab` (round-1 SHA correction).
-Round 2: see `git log origin/main..HEAD` on the branch for the exact,
-current set — this report is committed alongside the round-2 code, so
-its own commit is necessarily among them; the completion report commit
-message states the exact SHA it corresponds to (mirrors round 1's own
-practice of correcting SHA references in a trailing commit — see
-round-1 history above).
+Round 2: `85abdfbbc44fc9d01f032e53e7059831c74eddf3` (all 7 Codex
+review findings — pipeline tracing, truthful ack, cross-process
+ledger, owner scoping, CLI fixes, streaming enforcement, contract
+reconciliation).
+
+`HEAD` at the time of this report is
+`85abdfbbc44fc9d01f032e53e7059831c74eddf3`. Run
+`git log origin/main..HEAD` on the branch for the exact, current set.
 
 ## What was delivered (cumulative, both rounds)
 
