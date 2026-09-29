@@ -345,10 +345,16 @@ Android displayed/copied for them):
 
 1. Confirm diagnostics are enabled on the target environment and
    locate `SCAN_DIAGNOSTICS_PATH` (plus its `.1` backup, if present).
-2. Use the read-only operator CLI (once delivered — see the completion
-   report's remaining-work section for its current status) to filter
-   both the current file and the one backup for that exact 16-digit id,
-   across both `origin` values, and print a chronological timeline.
+2. Run the read-only operator CLI:
+   `python -m app.seed.scan_attempt_trace 0042135790246813` (add
+   `--human` for a plain-text timeline instead of JSON, or
+   `--request-id <uuid>` to narrow to one internal request). It reads
+   the current file and every retained rotated backup under a shared
+   lock (never blocks a writer for longer than one append), across
+   both `origin` values, sorted chronologically by the server's own
+   receipt timestamp, and flags an `ambiguousCollision` instead of
+   silently merging records that might belong to two different
+   attempts/owners.
 3. Read the timeline as: client-observed lifecycle (`origin: android`)
    interleaved with backend-observed stages (`origin: backend`),
    correlated only by `scanAttemptId`/`requestSequence` — never treat a

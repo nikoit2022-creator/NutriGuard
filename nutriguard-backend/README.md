@@ -2924,9 +2924,14 @@ Full contract (headers, request/response schemas, every enum, every
 limit, dedup/retention behavior, and the shared storage-cap trade-off):
 `docs/SCAN_ATTEMPT_DIAGNOSTICS.md`.
 
+A read-only operator CLI (`app/seed/scan_attempt_trace.py`, run as
+`python -m app.seed.scan_attempt_trace <scanAttemptId>`) looks up one
+attempt across the current journal file and its rotated backup(s),
+distinguishes origins/requests, flags an ambiguous id collision instead
+of silently merging records, and never mutates anything.
+
 **Not yet implemented** (see that doc's scope notes and the completion
 report for current status): per-internal-stage entry/exit
 instrumentation inside `app.services.food_analysis` beyond the
-router's existing coarse stage marker, and the read-only operator CLI
-for querying the journal by attempt id.
+router's existing coarse stage marker.
 

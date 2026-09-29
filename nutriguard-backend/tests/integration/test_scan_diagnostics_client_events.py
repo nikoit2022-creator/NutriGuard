@@ -51,6 +51,22 @@ async def test_requires_authentication(app_client):
     assert resp.status_code == 401
 
 
+@pytest.mark.asyncio
+async def test_enforces_its_own_rate_limit(app_client):
+    headers = await _register_device(app_client, "diag-events-rate-limit")
+
+    last_resp = None
+    for i in range(121):  # default RATE_LIMIT_DIAGNOSTICS_PER_HOUR is 120
+        last_resp = await app_client.post(
+            "/api/v1/scan-diagnostics/client-events",
+            json={"events": [_event(eventId=f"22222222-2222-4222-8222-222222222{i:03d}", sequence=i)]},
+            headers=headers,
+        )
+
+    assert last_resp.status_code == 429
+    assert last_resp.json()["error"]["code"] == "RATE_LIMIT_EXCEEDED"
+
+
 # --- Happy path / dedup ------------------------------------------------------
 
 
