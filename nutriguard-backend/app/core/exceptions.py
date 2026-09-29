@@ -103,6 +103,14 @@ class RateLimitExceededError(AppError):
     status_code = 429
 
 
+class PayloadTooLargeError(AppError):
+    """Issue #30: the raw request body for a client diagnostic-event
+    batch exceeded `settings.SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BODY_BYTES`."""
+
+    code = "PAYLOAD_TOO_LARGE"
+    status_code = 413
+
+
 class InternalError(AppError):
     code = "INTERNAL_ERROR"
     status_code = 500

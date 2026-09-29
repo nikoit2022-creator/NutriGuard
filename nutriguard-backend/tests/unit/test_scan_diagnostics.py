@@ -1,7 +1,16 @@
 import json
 import multiprocessing as mp
 
+import pytest
+
 from app.core import scan_diagnostics
+
+
+@pytest.fixture(autouse=True)
+def _reset_client_event_dedup_cache():
+    scan_diagnostics.reset_client_event_dedup_cache()
+    yield
+    scan_diagnostics.reset_client_event_dedup_cache()
 
 
 def test_scan_diagnostic_is_bounded_and_contains_no_payload(tmp_path, monkeypatch):
@@ -71,6 +80,38 @@ def test_scan_diagnostic_write_error_never_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(scan_diagnostics.settings, "SCAN_DIAGNOSTICS_PATH", str(blocker / "scan.jsonl"))
 
     scan_diagnostics.record_scan_diagnostic(barcode="3800123456789", outcome="success")  # must not raise
+
+
+# --- Client diagnostic-event replay dedup (issue #30) -----------------------
+
+
+def test_first_submission_of_an_event_id_is_not_a_duplicate():
+    assert scan_diagnostics.is_duplicate_client_event("user-1", "event-1") is False
+
+
+def test_resubmitting_the_same_event_id_is_a_duplicate():
+    scan_diagnostics.is_duplicate_client_event("user-1", "event-1")
+    assert scan_diagnostics.is_duplicate_client_event("user-1", "event-1") is True
+
+
+def test_dedup_is_scoped_per_user_not_global():
+    assert scan_diagnostics.is_duplicate_client_event("user-1", "event-1") is False
+    # A different user submitting the SAME eventId is never a "duplicate"
+    # of another user's event -- see the contract doc's "never silently
+    # mix owners" requirement.
+    assert scan_diagnostics.is_duplicate_client_event("user-2", "event-1") is False
+
+
+def test_dedup_cache_is_bounded_and_evicts_oldest_first(monkeypatch):
+    monkeypatch.setattr(scan_diagnostics.settings, "SCAN_DIAGNOSTICS_CLIENT_EVENTS_DEDUP_CACHE_SIZE", 3)
+    for i in range(5):
+        assert scan_diagnostics.is_duplicate_client_event("user-1", f"event-{i}") is False
+
+    # The two oldest (event-0, event-1) were evicted -- resubmitting them
+    # now looks like a brand new event, a documented limitation of a
+    # bounded, process-local cache, not a bug.
+    assert scan_diagnostics.is_duplicate_client_event("user-1", "event-0") is False
+    assert scan_diagnostics.is_duplicate_client_event("user-1", "event-4") is True
 
 
 # --- Multi-process safety --------------------------------------------------

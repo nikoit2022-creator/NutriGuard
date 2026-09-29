@@ -173,8 +173,17 @@ def _translation_fields(result: dict) -> dict:
 
 
 def _diagnostic_base(request: Request, *, operation: str, barcode: str | None) -> dict:
+    # Issue #30: `scan_attempt_context` is set by `app.main`'s
+    # `scan_attempt_context_middleware`, scoped to exactly these three
+    # routes, so it is always present here in practice -- `getattr`
+    # with a `None` fallback is defensive only (e.g. a direct unit test
+    # that calls this function without going through the real app).
+    scan_attempt_context = getattr(request.state, "scan_attempt_context", None)
     return {
         "requestId": getattr(request.state, "request_id", None),
+        "origin": "backend",
+        "scanAttemptId": scan_attempt_context.attempt_id if scan_attempt_context else None,
+        "requestSequence": scan_attempt_context.request_sequence if scan_attempt_context else None,
         "operation": operation,
         # The REAL observed origin of the data behind this response
         # ("cache" for an already-verified existing row served as-is, a

@@ -621,6 +621,7 @@ All 11 endpoints from the API Contract, plus the two auth endpoints it specifies
 | PUT | `/api/v1/health-profile` | 6.9 |
 | GET | `/api/v1/scan-history` | 6.10 |
 | DELETE | `/api/v1/scan-history` | 6.11 |
+| POST | `/api/v1/scan-diagnostics/client-events` | not in the original contract — additive, issue #30, see section 15 |
 
 Every endpoint: Pydantic request/response schemas, JWT auth dependency
 (except `/auth/*`), per-tier rate limiting, and the standard error
@@ -2901,4 +2902,31 @@ change (`openapi.json` identical):
 
 Full design, guarantees, maintenance commands and verification:
 `docs/INGREDIENT_CANDIDATE_QUEUE.md`.
+
+## 15. Scan-attempt tracing and client diagnostic event ingestion (issue #30)
+
+Every request to the three `/scan/*` endpoints now carries a 16-digit
+`X-Scan-Attempt-Id` (server-generated if the client omits or sends a
+malformed one) and an `X-Scan-Request-Sequence`, echoed back on success
+and on every handled failure. A new additive, authenticated endpoint,
+`POST /api/v1/scan-diagnostics/client-events`, lets a client report a
+bounded batch (≤20 events, ≤16 KiB) of its own already-queued,
+strictly-enumerated diagnostic events (no free text, no images, no
+OCR/ingredient text, no barcode values, no device identifiers — see the
+contract doc's privacy allowlist), deduplicated per authenticated user
+and written into the existing bounded, multi-process-safe scan-
+diagnostics journal (`app.core.scan_diagnostics`) alongside backend-
+authored lines, disambiguated by an `origin` field. No wire-format
+change to any existing endpoint; `openapi.json` only gained the new
+path and schemas.
+
+Full contract (headers, request/response schemas, every enum, every
+limit, dedup/retention behavior, and the shared storage-cap trade-off):
+`docs/SCAN_ATTEMPT_DIAGNOSTICS.md`.
+
+**Not yet implemented** (see that doc's scope notes and the completion
+report for current status): per-internal-stage entry/exit
+instrumentation inside `app.services.food_analysis` beyond the
+router's existing coarse stage marker, and the read-only operator CLI
+for querying the journal by attempt id.
 

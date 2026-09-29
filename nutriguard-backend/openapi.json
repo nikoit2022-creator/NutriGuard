@@ -229,6 +229,52 @@
         ]
       }
     },
+    "/api/v1/scan-diagnostics/client-events": {
+      "post": {
+        "tags": [
+          "scan-diagnostics"
+        ],
+        "summary": "Submit Client Events",
+        "operationId": "submit_client_events_api_v1_scan_diagnostics_client_events_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClientEventBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientEventBatchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/products": {
       "get": {
         "tags": [
@@ -720,6 +766,190 @@
           "image"
         ],
         "title": "Body_scan_label_image_api_v1_scan_label_image_post"
+      },
+      "ClientDiagnosticEvent": {
+        "properties": {
+          "eventId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "title": "Eventid",
+            "description": "UUID string; used for replay dedup."
+          },
+          "scanAttemptId": {
+            "type": "string",
+            "pattern": "^[0-9]{16}$",
+            "title": "Scanattemptid"
+          },
+          "requestSequence": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 999999999.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requestsequence"
+          },
+          "sequence": {
+            "type": "integer",
+            "maximum": 100000.0,
+            "minimum": 0.0,
+            "title": "Sequence"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Occurredat"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/ClientDiagnosticStage"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ClientDiagnosticOutcome"
+          },
+          "durationMs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 86400000.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Durationms"
+          },
+          "appVersion": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.+-]{1,32}$",
+            "title": "Appversion"
+          },
+          "reasonCode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClientDiagnosticReasonCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "metrics": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metrics"
+          }
+        },
+        "type": "object",
+        "required": [
+          "eventId",
+          "scanAttemptId",
+          "sequence",
+          "occurredAt",
+          "stage",
+          "outcome",
+          "appVersion"
+        ],
+        "title": "ClientDiagnosticEvent"
+      },
+      "ClientDiagnosticOutcome": {
+        "type": "string",
+        "enum": [
+          "STARTED",
+          "SUCCEEDED",
+          "FAILED",
+          "RETRIED",
+          "CANCELLED"
+        ],
+        "title": "ClientDiagnosticOutcome",
+        "description": "Per-event lifecycle outcome (distinct from the existing,\nper-request `outcome` string already written by\n`app.api.v1.scan` -- see the contract doc's \"outcome means two\ndifferent things by origin\" note)."
+      },
+      "ClientDiagnosticReasonCode": {
+        "type": "string",
+        "enum": [
+          "NETWORK_TIMEOUT",
+          "NETWORK_OFFLINE",
+          "AUTH_EXPIRED",
+          "AUTH_RETRY",
+          "SERVER_ERROR",
+          "RATE_LIMITED",
+          "VALIDATION_REJECTED",
+          "USER_CANCELLED",
+          "DECODE_ERROR",
+          "UNKNOWN"
+        ],
+        "title": "ClientDiagnosticReasonCode",
+        "description": "Closed, allowlisted reason vocabulary -- never arbitrary text."
+      },
+      "ClientDiagnosticStage": {
+        "type": "string",
+        "enum": [
+          "ATTEMPT_START",
+          "CAPTURE_COMPLETE",
+          "UPLOAD_START",
+          "UPLOAD_RETRY",
+          "RESPONSE_RECEIVED",
+          "TERMINAL_SUCCESS",
+          "TERMINAL_FAILURE",
+          "TERMINAL_CANCELLED"
+        ],
+        "title": "ClientDiagnosticStage",
+        "description": "Client-observable lifecycle points for one scan attempt. A\nSTRICT subset of the full stage vocabulary documented in\ndocs/SCAN_ATTEMPT_DIAGNOSTICS.md -- Android may only ever report\nwhat it itself observed, never a backend-side stage it cannot see."
+      },
+      "ClientEventBatchRequest": {
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/ClientDiagnosticEvent"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Events"
+          }
+        },
+        "type": "object",
+        "required": [
+          "events"
+        ],
+        "title": "ClientEventBatchRequest"
+      },
+      "ClientEventBatchResponse": {
+        "properties": {
+          "acceptedEventIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Acceptedeventids"
+          },
+          "duplicateEventIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Duplicateeventids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "acceptedEventIds",
+          "duplicateEventIds"
+        ],
+        "title": "ClientEventBatchResponse"
       },
       "DeviceAuthRequest": {
         "properties": {

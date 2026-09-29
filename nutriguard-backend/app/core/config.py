@@ -55,6 +55,28 @@ class Settings(BaseSettings):
     RATE_LIMIT_READ_PER_HOUR: int = 300
     RATE_LIMIT_PROFILE_PER_HOUR: int = 60
     RATE_LIMIT_AUTH_PER_MINUTE: int = 10
+    RATE_LIMIT_DIAGNOSTICS_PER_HOUR: int = 120
+
+    # --- Scan-attempt tracing and client diagnostic event ingestion
+    # (issue #30, see docs/SCAN_ATTEMPT_DIAGNOSTICS.md) ---
+    # Bounded, process-local set of the most recently server-generated
+    # `scanAttemptId` values, consulted only to avoid immediately
+    # reusing one -- never a global uniqueness guarantee (see the
+    # contract doc's "residual collision risk" section).
+    SCAN_ATTEMPT_ID_RECENT_CACHE_SIZE: int = 500
+    # A batch of client-submitted diagnostic events (POST
+    # /api/v1/scan-diagnostics/client-events) is rejected if it has more
+    # events, or a larger raw request body, than these bounds.
+    SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BATCH: int = 20
+    SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BODY_BYTES: int = 16 * 1024
+    # Bounded, process-local LRU of (user, eventId) pairs already
+    # accepted, consulted so a resubmitted/retried event is reported
+    # back as a duplicate instead of inflating the event count. Eviction
+    # is oldest-first once this bound is exceeded; the cache is not
+    # persisted, so a resubmission handled by a different worker
+    # process, or after a restart, will not be recognized as a
+    # duplicate -- a documented limitation, not a bug.
+    SCAN_DIAGNOSTICS_CLIENT_EVENTS_DEDUP_CACHE_SIZE: int = 2000
 
     # --- Barcode product discovery (multi-source lookup on a local miss) ---
     # Master switch: when false, an unknown barcode goes straight to the
