@@ -27,13 +27,24 @@ class ClientDiagnosticStage(str, Enum):
     """Client-observable lifecycle points for one scan attempt. A
     STRICT subset of the full stage vocabulary documented in
     docs/SCAN_ATTEMPT_DIAGNOSTICS.md -- Android may only ever report
-    what it itself observed, never a backend-side stage it cannot see."""
+    what it itself observed, never a backend-side stage it cannot see.
+
+    `IMAGE_PREPARATION`/`PARSING`/`PERSISTENCE` added (Codex review
+    round 2, finding 7 -- contract reconciliation): the original set
+    could not represent client-side image compression/resize before
+    upload, client-side response parsing after upload, or the client's
+    own local outbox persistence -- each is now its own explicit stage
+    rather than being silently folded into `CAPTURE_COMPLETE` or
+    `RESPONSE_RECEIVED`."""
 
     ATTEMPT_START = "ATTEMPT_START"
     CAPTURE_COMPLETE = "CAPTURE_COMPLETE"
+    IMAGE_PREPARATION = "IMAGE_PREPARATION"
     UPLOAD_START = "UPLOAD_START"
     UPLOAD_RETRY = "UPLOAD_RETRY"
     RESPONSE_RECEIVED = "RESPONSE_RECEIVED"
+    PARSING = "PARSING"
+    PERSISTENCE = "PERSISTENCE"
     TERMINAL_SUCCESS = "TERMINAL_SUCCESS"
     TERMINAL_FAILURE = "TERMINAL_FAILURE"
     TERMINAL_CANCELLED = "TERMINAL_CANCELLED"
@@ -43,13 +54,24 @@ class ClientDiagnosticOutcome(str, Enum):
     """Per-event lifecycle outcome (distinct from the existing,
     per-request `outcome` string already written by
     `app.api.v1.scan` -- see the contract doc's "outcome means two
-    different things by origin" note)."""
+    different things by origin" note).
+
+    `PARTIAL`/`INTERRUPTED` added (Codex review round 2, finding 7):
+    the original set could not faithfully represent a `labelScanRequired`-
+    style partial result (previously had to be misreported as `FAILED`,
+    or a fabricated `SUCCEEDED`) or an attempt genuinely interrupted
+    (app killed/backgrounded, process death) rather than user-cancelled
+    (`CANCELLED`) or network/server-failed (`FAILED`). Never map a
+    partial result to `FAILED`, and never invent a `SUCCEEDED` merely to
+    fit the old enum -- report what was actually observed."""
 
     STARTED = "STARTED"
     SUCCEEDED = "SUCCEEDED"
+    PARTIAL = "PARTIAL"
     FAILED = "FAILED"
     RETRIED = "RETRIED"
     CANCELLED = "CANCELLED"
+    INTERRUPTED = "INTERRUPTED"
 
 
 class ClientDiagnosticReasonCode(str, Enum):
@@ -129,5 +151,18 @@ class ClientEventBatchRequest(ORMModel):
 
 
 class ClientEventBatchResponse(ORMModel):
+    # Every `eventId` from the request appears in EXACTLY ONE of these
+    # three lists (Codex review round 2, finding 2 -- truthful
+    # acknowledgment):
+    #   - accepted: durably written to the journal by the time this
+    #     response was sent. Safe for the client to drop from its
+    #     outbox.
+    #   - duplicate: already durably written by an EARLIER accepted
+    #     submission. Also safe to drop.
+    #   - retryable: NOT durably written (diagnostics disabled, a
+    #     journal I/O failure, or a concurrent in-flight retry of the
+    #     same event elsewhere) -- the client MUST keep it in its
+    #     outbox and retry later; it was never falsely acknowledged.
     accepted_event_ids: list[str]
     duplicate_event_ids: list[str]
+    retryable_event_ids: list[str]

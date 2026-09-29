@@ -7,8 +7,10 @@ from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user_id
+from app.core import pipeline_trace
 from app.core.config import settings
 from app.core.exceptions import AppError, ImageTooLargeError, ProductNotFoundError, ValidationAppError
+from app.core.owner_scope import pseudonymous_owner_scope
 from app.core.rate_limit import SCAN_RATE, limiter
 from app.core.scan_diagnostics import record_scan_diagnostic
 from app.database.session import get_db
@@ -172,16 +174,36 @@ def _translation_fields(result: dict) -> dict:
     }
 
 
-def _diagnostic_base(request: Request, *, operation: str, barcode: str | None) -> dict:
+def _diagnostic_base(request: Request, *, operation: str, barcode: str | None, user_id: UUID) -> dict:
     # Issue #30: `scan_attempt_context` is set by `app.main`'s
     # `scan_attempt_context_middleware`, scoped to exactly these three
     # routes, so it is always present here in practice -- `getattr`
     # with a `None` fallback is defensive only (e.g. a direct unit test
     # that calls this function without going through the real app).
     scan_attempt_context = getattr(request.state, "scan_attempt_context", None)
+    request_id = getattr(request.state, "request_id", None)
+    # Issue #30 (Codex review round 2, finding 1): binds THIS request's
+    # correlation ids into `app.core.pipeline_trace` before
+    # `food_analysis` runs, so its internal entry/success/failure stage
+    # events (see that module) are attributed to the right request. Each
+    # request is handled by its own fresh asyncio Task (see that
+    # module's docstring), so this can never leak into a sibling or
+    # later request.
+    pipeline_trace.bind(
+        scan_attempt_id=scan_attempt_context.attempt_id if scan_attempt_context else None,
+        request_sequence=scan_attempt_context.request_sequence if scan_attempt_context else None,
+        request_id=request_id,
+        operation=operation,
+    )
     return {
-        "requestId": getattr(request.state, "request_id", None),
+        "requestId": request_id,
         "origin": "backend",
+        # Codex review round 2, finding 4: a stable, one-way pseudonymous
+        # scope (never the raw user id -- see app.core.owner_scope),
+        # persisted alongside every journal line so the operator CLI can
+        # tell two different owners' attempts apart when their
+        # `scanAttemptId`s happen to collide.
+        "ownerScope": pseudonymous_owner_scope(user_id),
         "scanAttemptId": scan_attempt_context.attempt_id if scan_attempt_context else None,
         "requestSequence": scan_attempt_context.request_sequence if scan_attempt_context else None,
         "operation": operation,
@@ -271,7 +293,9 @@ async def scan_barcode(
     if not body.barcode.strip():
         raise ValidationAppError("barcode must not be empty.")
 
-    diagnostic_base = _diagnostic_base(request, operation="scan_barcode", barcode=body.barcode.strip())
+    diagnostic_base = _diagnostic_base(
+        request, operation="scan_barcode", barcode=body.barcode.strip(), user_id=user_id
+    )
     try:
         result = await food_analysis.analyze_barcode(db, user_id, body.barcode.strip())
         diagnostic_base["stage"] = "analysis_complete"
@@ -285,6 +309,7 @@ async def scan_barcode(
         # scan endpoints already classify it (task: "classify partial
         # results consistently across scan endpoints").
         details = exc.details if isinstance(exc.details, dict) else {}
+        pipeline_trace.record_pending_failure(exc.code)
         _safe_record_scan_diagnostic(
             **diagnostic_base,
             dataSource=_observed_data_source(None, details),
@@ -294,6 +319,7 @@ async def scan_barcode(
         )
         raise
     except AppError as exc:
+        pipeline_trace.record_pending_failure(exc.code)
         _safe_record_scan_diagnostic(
             **diagnostic_base,
             outcome="failed",
@@ -302,6 +328,7 @@ async def scan_barcode(
         )
         raise
     except Exception:
+        pipeline_trace.record_pending_failure("INTERNAL_ERROR")
         _safe_record_scan_diagnostic(
             **diagnostic_base,
             outcome="failed",
@@ -341,7 +368,7 @@ async def scan_ocr_text(
         raise ValidationAppError("rawText must be at least 3 characters.")
 
     barcode = clean_optional(body.barcode)
-    diagnostic_base = _diagnostic_base(request, operation="scan_ocr_text", barcode=barcode)
+    diagnostic_base = _diagnostic_base(request, operation="scan_ocr_text", barcode=barcode, user_id=user_id)
     # Assigned only once `food_analysis` actually returns; stays `None`
     # if it raises before ever returning (e.g. a genuine internal error
     # mid-pipeline) -- referenced defensively below, never assumed set.
@@ -359,6 +386,7 @@ async def scan_ocr_text(
         diagnostic_base["stage"] = "response_built"
     except ProductNotFoundError as exc:
         details = exc.details if isinstance(exc.details, dict) else {}
+        pipeline_trace.record_pending_failure(exc.code)
         _safe_record_scan_diagnostic(
             **{**diagnostic_base, "barcode": barcode},
             dataSource=_observed_data_source(None, details),
@@ -376,6 +404,7 @@ async def scan_ocr_text(
         )
         raise
     except AppError as exc:
+        pipeline_trace.record_pending_failure(exc.code)
         _safe_record_scan_diagnostic(
             **diagnostic_base,
             outcome="failed",
@@ -389,6 +418,7 @@ async def scan_ocr_text(
         # succeeded and returned `result` must not silently drop the
         # translation work it already observed -- `result` is `None`
         # only when `food_analysis` itself never returned at all.
+        pipeline_trace.record_pending_failure("INTERNAL_ERROR")
         _safe_record_scan_diagnostic(
             **diagnostic_base,
             outcome="failed",
@@ -439,7 +469,9 @@ async def scan_label_image(
     # get a diagnostic record too -- previously these raised before
     # `diagnostic_base` was even built, so the diagnostics journal
     # silently had no coverage of them at all.
-    diagnostic_base = _diagnostic_base(request, operation="scan_label_image", barcode=cleaned_barcode)
+    diagnostic_base = _diagnostic_base(
+        request, operation="scan_label_image", barcode=cleaned_barcode, user_id=user_id
+    )
     diagnostic_base["stage"] = "content_type_validated"
 
     if image.content_type not in _ALLOWED_IMAGE_TYPES:
@@ -491,6 +523,7 @@ async def scan_label_image(
     except ProductNotFoundError as exc:
         details = exc.details if isinstance(exc.details, dict) else {}
         ingredients = details.get("ingredients")
+        pipeline_trace.record_pending_failure(exc.code)
         _safe_record_scan_diagnostic(
             **diagnostic_base,
             dataSource=_observed_data_source(None, details),
@@ -507,6 +540,7 @@ async def scan_label_image(
         )
         raise
     except AppError as exc:
+        pipeline_trace.record_pending_failure(exc.code)
         _safe_record_scan_diagnostic(
             **diagnostic_base,
             outcome="failed",
@@ -519,6 +553,7 @@ async def scan_label_image(
         # already observed and returned before a LATER response-
         # construction/serialization failure -- `result` is `None` only
         # when `food_analysis` itself never returned at all.
+        pipeline_trace.record_pending_failure("INTERNAL_ERROR")
         _safe_record_scan_diagnostic(
             **diagnostic_base,
             outcome="failed",

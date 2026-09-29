@@ -26,8 +26,6 @@ running with diagnostics disabled -- never breaks a non-POSIX host.
 
 import json
 import os
-import threading
-from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -84,11 +82,22 @@ def _append_locked(path: Path, line: bytes, max_bytes: int, backup_count: int) -
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def record_scan_diagnostic(**fields: Any) -> None:
-    """Best-effort write; diagnostic I/O must never break a scan."""
+def record_scan_diagnostic(**fields: Any) -> bool:
+    """Best-effort write; diagnostic I/O must never break a scan.
+
+    Returns whether a line was actually, durably appended: `False` when
+    diagnostics are disabled (nothing was ever attempted) OR when the
+    write itself failed (I/O error, lock contention, anything) --
+    deliberately the SAME signal for both, since a caller that needs to
+    know "was this truly persisted?" (Codex review round 2, finding 2 --
+    truthful client-event acknowledgment, see
+    `app.api.v1.scan_diagnostics`) must treat "skipped" and "failed"
+    identically: neither means the data now exists on disk. Callers
+    that don't need this (the router's own fire-and-forget diagnostic
+    writes) simply ignore the return value, exactly as before."""
     try:
         if not settings.SCAN_DIAGNOSTICS_ENABLED:
-            return
+            return False
         payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "backendVersion": settings.APP_VERSION,
@@ -102,43 +111,8 @@ def record_scan_diagnostic(**fields: Any) -> None:
             settings.SCAN_DIAGNOSTICS_MAX_BYTES,
             settings.SCAN_DIAGNOSTICS_BACKUP_COUNT,
         )
+        return True
     except Exception:
         # This journal is observational only. Normal application logging
         # remains responsible for reporting operational failures.
-        return
-
-
-# --- Client diagnostic-event replay dedup (issue #30) ----------------------
-#
-# Bounded, process-local, NOT persisted. Keyed by (authenticated user,
-# eventId) so one user's event ids can never be reported as duplicates
-# of another user's. This is a best-effort reduction of duplicate
-# counting for retried submissions within one worker process's memory,
-# not an authoritative/global dedup index -- see
-# docs/SCAN_ATTEMPT_DIAGNOSTICS.md for the documented limitation
-# (a resubmission handled by a different worker process, or after a
-# restart, is not recognized as a duplicate).
-
-_dedup_lock = threading.Lock()
-_recent_client_event_ids: "OrderedDict[tuple[str, str], None]" = OrderedDict()
-
-
-def is_duplicate_client_event(user_id: str, event_id: str) -> bool:
-    """Atomically checks-and-records. Returns True (duplicate, do not
-    re-store) if this (user, eventId) pair was already accepted within
-    the current dedup window; otherwise records it and returns False."""
-    key = (user_id, event_id)
-    with _dedup_lock:
-        if key in _recent_client_event_ids:
-            _recent_client_event_ids.move_to_end(key)
-            return True
-        _recent_client_event_ids[key] = None
-        while len(_recent_client_event_ids) > settings.SCAN_DIAGNOSTICS_CLIENT_EVENTS_DEDUP_CACHE_SIZE:
-            _recent_client_event_ids.popitem(last=False)
         return False
-
-
-def reset_client_event_dedup_cache() -> None:
-    """Test-only helper -- the cache is process-global module state."""
-    with _dedup_lock:
-        _recent_client_event_ids.clear()

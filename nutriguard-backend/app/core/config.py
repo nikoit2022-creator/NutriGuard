@@ -69,14 +69,24 @@ class Settings(BaseSettings):
     # events, or a larger raw request body, than these bounds.
     SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BATCH: int = 20
     SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BODY_BYTES: int = 16 * 1024
-    # Bounded, process-local LRU of (user, eventId) pairs already
-    # accepted, consulted so a resubmitted/retried event is reported
-    # back as a duplicate instead of inflating the event count. Eviction
-    # is oldest-first once this bound is exceeded; the cache is not
-    # persisted, so a resubmission handled by a different worker
-    # process, or after a restart, will not be recognized as a
-    # duplicate -- a documented limitation, not a bug.
-    SCAN_DIAGNOSTICS_CLIENT_EVENTS_DEDUP_CACHE_SIZE: int = 2000
+    # Cross-process-safe, bounded replay-dedup ledger for client
+    # diagnostic events (see app.core.client_event_ledger; Codex review
+    # round 2, finding 3 -- replaces the previous process-local-only
+    # in-memory cache, which could never coordinate across the multiple
+    # Uvicorn worker processes production actually runs). A SQLite
+    # database file, deliberately separate from the application's own
+    # Postgres database.
+    CLIENT_EVENT_LEDGER_PATH: str = "/var/log/nutriguard/scan-diagnostics-client-events.sqlite3"
+    # An event reserved (persistence attempt started) but never
+    # committed or released within this window is treated as abandoned
+    # (its owning worker crashed mid-write) and reclaimable by a future
+    # retry, rather than a permanent lock.
+    SCAN_DIAGNOSTICS_CLIENT_EVENTS_RESERVATION_TIMEOUT_SECONDS: int = 30
+    # Hard cap on total ledger rows (reserved + committed); beyond this,
+    # the oldest rows are pruned first. Once a committed row is pruned,
+    # that event id is no longer recognized as a duplicate if
+    # resubmitted -- a documented, bounded-storage limitation.
+    SCAN_DIAGNOSTICS_CLIENT_EVENTS_DEDUP_MAX_ROWS: int = 20000
 
     # --- Barcode product discovery (multi-source lookup on a local miss) ---
     # Master switch: when false, an unknown barcode goes straight to the

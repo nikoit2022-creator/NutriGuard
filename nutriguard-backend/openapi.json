@@ -870,12 +870,14 @@
         "enum": [
           "STARTED",
           "SUCCEEDED",
+          "PARTIAL",
           "FAILED",
           "RETRIED",
-          "CANCELLED"
+          "CANCELLED",
+          "INTERRUPTED"
         ],
         "title": "ClientDiagnosticOutcome",
-        "description": "Per-event lifecycle outcome (distinct from the existing,\nper-request `outcome` string already written by\n`app.api.v1.scan` -- see the contract doc's \"outcome means two\ndifferent things by origin\" note)."
+        "description": "Per-event lifecycle outcome (distinct from the existing,\nper-request `outcome` string already written by\n`app.api.v1.scan` -- see the contract doc's \"outcome means two\ndifferent things by origin\" note).\n\n`PARTIAL`/`INTERRUPTED` added (Codex review round 2, finding 7):\nthe original set could not faithfully represent a `labelScanRequired`-\nstyle partial result (previously had to be misreported as `FAILED`,\nor a fabricated `SUCCEEDED`) or an attempt genuinely interrupted\n(app killed/backgrounded, process death) rather than user-cancelled\n(`CANCELLED`) or network/server-failed (`FAILED`). Never map a\npartial result to `FAILED`, and never invent a `SUCCEEDED` merely to\nfit the old enum -- report what was actually observed."
       },
       "ClientDiagnosticReasonCode": {
         "type": "string",
@@ -899,15 +901,18 @@
         "enum": [
           "ATTEMPT_START",
           "CAPTURE_COMPLETE",
+          "IMAGE_PREPARATION",
           "UPLOAD_START",
           "UPLOAD_RETRY",
           "RESPONSE_RECEIVED",
+          "PARSING",
+          "PERSISTENCE",
           "TERMINAL_SUCCESS",
           "TERMINAL_FAILURE",
           "TERMINAL_CANCELLED"
         ],
         "title": "ClientDiagnosticStage",
-        "description": "Client-observable lifecycle points for one scan attempt. A\nSTRICT subset of the full stage vocabulary documented in\ndocs/SCAN_ATTEMPT_DIAGNOSTICS.md -- Android may only ever report\nwhat it itself observed, never a backend-side stage it cannot see."
+        "description": "Client-observable lifecycle points for one scan attempt. A\nSTRICT subset of the full stage vocabulary documented in\ndocs/SCAN_ATTEMPT_DIAGNOSTICS.md -- Android may only ever report\nwhat it itself observed, never a backend-side stage it cannot see.\n\n`IMAGE_PREPARATION`/`PARSING`/`PERSISTENCE` added (Codex review\nround 2, finding 7 -- contract reconciliation): the original set\ncould not represent client-side image compression/resize before\nupload, client-side response parsing after upload, or the client's\nown local outbox persistence -- each is now its own explicit stage\nrather than being silently folded into `CAPTURE_COMPLETE` or\n`RESPONSE_RECEIVED`."
       },
       "ClientEventBatchRequest": {
         "properties": {
@@ -942,12 +947,20 @@
             },
             "type": "array",
             "title": "Duplicateeventids"
+          },
+          "retryableEventIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Retryableeventids"
           }
         },
         "type": "object",
         "required": [
           "acceptedEventIds",
-          "duplicateEventIds"
+          "duplicateEventIds",
+          "retryableEventIds"
         ],
         "title": "ClientEventBatchResponse"
       },
