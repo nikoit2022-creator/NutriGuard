@@ -1,5 +1,47 @@
 # CODEX_HANDOFF
 
+## 2026-09-30: OpenFoodTox IUCLID dataset audit (offline, not integrated)
+
+- Scope: offline inventory/integrity/structural audit and staging
+  catalogue extraction of the transferred OpenFoodTox IUCLID dossier
+  archives (`/home/vboxuser/nutriguard-data/openfoodtox/originals/2026-09-30/dossiers/`,
+  11,613 files), in an isolated worktree on branch
+  `feat/backend-openfoodtox-dataset-audit`. No import into the live
+  database, no API/Health Score change, no container restart, no
+  deploy, no merge. Originals and the live stack were not touched.
+- Added `nutriguard-backend/scripts/openfoodtox/` (safe bounded
+  zip/XML handling with no external entities/no path traversal/no
+  stylesheet execution; manifest and `.i6d` parsing; a code->label
+  registry harvested from the dossiers' own shipped `.xsl` stylesheets;
+  domain classification; a repeatable `extract` CLI with
+  `inventory`/`codebook`/`catalogue`/`identity-audit`/`e250`
+  subcommands) and 52 new unit tests in
+  `tests/unit/test_openfoodtox_*.py` (all synthetic fixtures, no
+  dependency on the real dataset).
+- Full run against the transferred set: file count and total bytes
+  matched the expected 11,613 files / 1,100,741,293 bytes exactly;
+  11,613/11,613 archives valid (zero corrupt/unsafe/duplicate); 11,613
+  dossiers cataloged with zero parse failures; identity audit found
+  zero name/CAS conflicts needing manual review. Sodium nitrite/E250
+  matched exactly one dossier by CAS `7632-00-0`/EC `231-555-9`; full
+  profile in `reports/e250_sodium_nitrite_profile.md`.
+- Full detail, output schemas, and known limitations (generic vs.
+  per-subtype endpoint parsing, value-code decoding scoped per
+  stylesheet, no license/reuse-terms metadata transferred with the
+  dataset, ~985 MB catalogue size) in
+  `docs/OPENFOODTOX_DATASET_AUDIT.md`.
+- Tests: `python -m pytest -q` (full backend suite) → **753 passed, 16
+  skipped** (skips pre-exist this change), 0 failed — no regression in
+  existing app/backend behavior; nothing under `app/` was touched.
+- Generated staging/reports data lives outside git under
+  `/home/vboxuser/nutriguard-data/openfoodtox/{staging,reports}/` —
+  not committed (per task scope: no dataset, no bulk generated output,
+  no secrets in the commit).
+- Next: see `docs/OPENFOODTOX_DATASET_AUDIT.md` §9 (recommended next
+  integration stage) — not started here; needs its own explicit
+  scoping/authorization before any of this data reaches the live
+  product.
+
 ## 2026-09-27: VM verification of ingredient review list
 
 - Verified fetched `c3f2f4eefa8c7ef839c95945496471ee2871fbe9` in isolated
