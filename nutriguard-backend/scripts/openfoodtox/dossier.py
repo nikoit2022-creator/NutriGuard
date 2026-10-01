@@ -78,6 +78,7 @@ def build_dossier_record(
 
         doc_type_counts: dict[str, int] = {}
         domain_counts: dict[str, int] = {}
+        incomplete_evidence_count = 0
 
         for entry_name, manifest_doc in entry_by_href.items():
             if entry_name not in zh.member_names:
@@ -97,29 +98,36 @@ def build_dossier_record(
             dt = doc["document_type"] or "UNKNOWN"
             doc_type_counts[dt] = doc_type_counts.get(dt, 0) + 1
             domain_counts[doc["domain"]] = domain_counts.get(doc["domain"], 0) + 1
+            if not doc["evidence_complete"]:
+                incomplete_evidence_count += 1
 
             if dt == "DOSSIER":
                 result["dossier_summary"] = doc["derived"]
                 result["title"] = doc["name"]
             elif dt == "SUBSTANCE":
                 result["identity"].setdefault("substances", []).append(
-                    {"document_key": doc["document_key"], **doc["derived"], "source": doc["source"]}
+                    {"document_key": doc["document_key"], "evidence_complete": doc["evidence_complete"], **doc["derived"], "source": doc["source"]}
                 )
             elif dt == "REFERENCE_SUBSTANCE":
                 result["identity"].setdefault("reference_substances", []).append(
-                    {"document_key": doc["document_key"], **doc["derived"], "source": doc["source"]}
+                    {"document_key": doc["document_key"], "evidence_complete": doc["evidence_complete"], **doc["derived"], "source": doc["source"]}
                 )
             elif dt == "LEGAL_ENTITY":
                 result["legal_entities"].append(
-                    {"document_key": doc["document_key"], **doc["derived"], "source": doc["source"]}
+                    {"document_key": doc["document_key"], "evidence_complete": doc["evidence_complete"], **doc["derived"], "source": doc["source"]}
                 )
             elif dt == "LITERATURE":
                 result["literature"].append(
-                    {"document_key": doc["document_key"], **doc["derived"], "source": doc["source"]}
+                    {"document_key": doc["document_key"], "evidence_complete": doc["evidence_complete"], **doc["derived"], "source": doc["source"]}
                 )
             elif dt == "FLEXIBLE_SUMMARY" and doc["document_sub_type"] == "ToxRefValues":
                 for rv in doc["derived"].get("reference_values", []):
-                    result["reference_values"].append({**rv, "source": doc["source"], "parse_warnings": doc.get("parse_warnings", [])})
+                    result["reference_values"].append({
+                        **rv,
+                        "evidence_complete": doc["evidence_complete"],
+                        "source": doc["source"],
+                        "parse_warnings": doc.get("parse_warnings", []),
+                    })
             elif dt in ("ENDPOINT_SUMMARY", "ENDPOINT_STUDY_RECORD"):
                 bucket = result["endpoints"].get(doc["domain"], result["endpoints"]["unclassified"])
                 bucket.append(
@@ -128,6 +136,7 @@ def build_dossier_record(
                         "document_type": dt,
                         "document_sub_type": doc["document_sub_type"],
                         "name": doc["name"],
+                        "evidence_complete": doc["evidence_complete"],
                         **doc["derived"],
                         "source": doc["source"],
                     }
@@ -137,6 +146,7 @@ def build_dossier_record(
             "documents_by_type": doc_type_counts,
             "documents_by_domain": domain_counts,
             "total_documents": len(result["documents"]),
+            "documents_with_incomplete_evidence": incomplete_evidence_count,
         }
 
     return result

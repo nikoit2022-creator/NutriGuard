@@ -118,7 +118,8 @@ class TestSubstanceAndReferenceSubstance:
         assert d["name"] == "Sodium nitrite"
         assert d["cas_number"] == "7632-00-0"
         assert d["ec_number"] == "231-555-9"
-        assert d["e_number"] == "E 250"
+        assert d["e_numbers"]["recognized_count"] == 1
+        assert d["e_numbers"]["candidates"][0]["normalized"] == "E250"
         assert "Sodium nitrite" in d["synonyms"]
         assert d["molecular_formula"] == "NNaO2"
 
@@ -137,7 +138,7 @@ class TestSubstanceAndReferenceSubstance:
         doc = records.build_document_record("a.i6z", "e.i6d", xml, None)
         assert doc["derived"]["cas_number"] is None
         assert doc["derived"]["ec_number"] is None
-        assert doc["derived"]["e_number"] is None
+        assert doc["derived"]["e_numbers"]["recognized_count"] == 0
 
 
 class TestLegalEntityAndLiterature:
@@ -345,3 +346,69 @@ class TestRawFieldsProvenance:
         doc = records.build_document_record("a.i6z", "e.i6d", xml, None)
         assert doc["raw_fields_truncated"] is True
         assert len(doc["raw_fields"]) <= 2
+        assert doc["evidence_complete"] is False
+        assert any("may be incomplete" in w for w in doc["parse_warnings"])
+
+
+class TestTruncationBoundaryAccuracy:
+    """Regression coverage for the confirmed defect: the old
+    implementation stopped the leaf walk exactly at the cap and treated
+    "the running counter hit zero" as proof of truncation, which is
+    wrong when a document has *exactly* that many leaves and nothing
+    more (false positive) -- and separately gave no way to tell whether
+    omitted leaves included fields derived views actually depend on.
+    The fix measures the true, complete leaf count first and only then
+    decides whether the cap had to cut anything."""
+
+    def _xml_with_n_leaves(self, n: int) -> bytes:
+        inner = "".join(f"<F{i}>v{i}</F{i}>" for i in range(n))
+        return _i6d("SUBSTANCE", None, inner)
+
+    def test_below_cap_not_truncated(self, monkeypatch):
+        monkeypatch.setattr(records, "MAX_RAW_FIELDS_PER_DOCUMENT", 10)
+        xml = self._xml_with_n_leaves(5)
+        doc = records.build_document_record("a.i6z", "e.i6d", xml, None)
+        assert doc["raw_fields_truncated"] is False
+        assert doc["evidence_complete"] is True
+        assert len(doc["raw_fields"]) == 5
+
+    def test_exactly_at_cap_is_not_a_false_positive(self, monkeypatch):
+        """The core regression: a document with exactly cap-many leaves
+        and nothing beyond must NOT be flagged as truncated."""
+        monkeypatch.setattr(records, "MAX_RAW_FIELDS_PER_DOCUMENT", 10)
+        xml = self._xml_with_n_leaves(10)
+        doc = records.build_document_record("a.i6z", "e.i6d", xml, None)
+        assert doc["raw_fields_truncated"] is False
+        assert doc["evidence_complete"] is True
+        assert len(doc["raw_fields"]) == 10
+
+    def test_one_above_cap_is_truncated_and_quarantined(self, monkeypatch):
+        monkeypatch.setattr(records, "MAX_RAW_FIELDS_PER_DOCUMENT", 10)
+        xml = self._xml_with_n_leaves(11)
+        doc = records.build_document_record("a.i6z", "e.i6d", xml, None)
+        assert doc["raw_fields_truncated"] is True
+        assert doc["evidence_complete"] is False
+        assert len(doc["raw_fields"]) == 10
+
+    def test_critical_field_beyond_cap_is_what_truncation_actually_means(self, monkeypatch):
+        """Demonstrates concretely what "incomplete" means: a field
+        placed after the cap's worth of filler leaves is dropped from
+        raw_fields, and the document is correctly flagged so that drop
+        is never silently treated as "this substance has no such
+        field"."""
+        monkeypatch.setattr(records, "MAX_RAW_FIELDS_PER_DOCUMENT", 3)
+        inner = "<Filler1>a</Filler1><Filler2>b</Filler2><Filler3>c</Filler3><ChemicalName>Critical</ChemicalName>"
+        xml = _i6d("SUBSTANCE", None, inner)
+        doc = records.build_document_record("a.i6z", "e.i6d", xml, None)
+        assert doc["raw_fields_truncated"] is True
+        assert doc["derived"]["chemical_name"] is None  # dropped by the cap
+        assert doc["evidence_complete"] is False  # ...and this says so
+
+    def test_safety_ceiling_is_independent_of_coverage_cap(self, monkeypatch):
+        monkeypatch.setattr(records, "_SAFETY_CEILING_LEAVES", 5)
+        monkeypatch.setattr(records, "MAX_RAW_FIELDS_PER_DOCUMENT", 1000)
+        xml = self._xml_with_n_leaves(20)
+        doc = records.build_document_record("a.i6z", "e.i6d", xml, None)
+        assert doc["raw_fields_safety_ceiling_hit"] is True
+        assert len(doc["raw_fields"]) <= 5
+        assert any("safety ceiling" in w for w in doc["parse_warnings"])

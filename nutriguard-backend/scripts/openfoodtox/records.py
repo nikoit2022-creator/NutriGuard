@@ -31,11 +31,37 @@ from typing import Any
 from . import safe_io
 from .codebook import Codebook
 from .domains import classify
+from .chemical_basis import extract_chemical_basis
+from .e_numbers import collect_e_numbers
 
 MANIFEST_NS = "http://iuclid6.echa.europa.eu/namespaces/manifest/v1"
 XLINK_NS = "http://www.w3.org/1999/xlink"
 I6_FIELDS_NS = "http://iuclid6.echa.europa.eu/namespaces/platform-fields/v1"
-MAX_RAW_FIELDS_PER_DOCUMENT = 400
+
+# Coverage target: a full, unbounded leaf-count survey of every document
+# in the transferred dataset (221,377 documents) found a true maximum of
+# 1,405 informative leaves in a single document (an
+# ENDPOINT_STUDY_RECORD.BiodegradationInSoil record); 467 documents
+# (0.2%) exceeded the *old* 400-leaf cap, all of them environmental/
+# physicochemical, none human-health/identity/reference-value. This cap
+# is set with a ~2.8x margin over that measured maximum so no real
+# document in this dataset is truncated by it. It is a *coverage*
+# threshold, not the memory-safety backstop (see _SAFETY_CEILING_LEAVES
+# below) -- raising it alone would not by itself prove nothing is
+# dropped, which is why truncation detection (see parse_i6d) measures
+# the true leaf count unconditionally rather than inferring truncation
+# from whether a running counter happened to hit this number.
+MAX_RAW_FIELDS_PER_DOCUMENT = 4000
+
+# Hard memory-safety ceiling, independent of the coverage target above:
+# bounds worst-case memory from a single pathological/adversarial
+# document built from many small same-tag leaf elements (a resource-
+# exhaustion shape distinct from the entity-expansion attacks safe_io.py
+# already blocks, and not fully covered by safe_io's byte-size caps,
+# since many short elements can fit in a modest byte budget). Walking
+# never collects more than this many leaves, no matter how large
+# MAX_RAW_FIELDS_PER_DOCUMENT is set to.
+_SAFETY_CEILING_LEAVES = 50_000
 
 
 def _local(tag: str) -> str:
@@ -114,7 +140,7 @@ PLATFORM_META_NS = "http://iuclid6.echa.europa.eu/namespaces/platform-metadata/v
 PLATFORM_CONTAINER_NS = "http://iuclid6.echa.europa.eu/namespaces/platform-container/v2"
 
 
-def _walk_leaves(elem, path: list[str], out: list[dict], budget: list[int], entry_uuid: str | None = None) -> None:
+def _walk_leaves(elem, path: list[str], out: list[dict], ceiling: list[int], entry_uuid: str | None = None) -> None:
     """Flatten ``elem`` into leaf (path, text) records.
 
     IUCLID puts the ``i6:uuid`` that identifies a repeatable entry
@@ -123,8 +149,16 @@ def _walk_leaves(elem, path: list[str], out: list[dict], budget: list[int], entr
     We propagate the nearest enclosing such uuid down to every leaf
     below it as ``entry_uuid`` so callers can group repeated entries
     correctly without depending on document order alone.
+
+    ``ceiling`` is the hard memory-safety stop
+    (``_SAFETY_CEILING_LEAVES``), not the coverage target
+    (``MAX_RAW_FIELDS_PER_DOCUMENT``) -- this function always walks the
+    *entire* tree (up to that hard ceiling) so the caller can compare
+    the true leaf count against the coverage target and know for
+    certain whether anything was actually left out, rather than
+    inferring it from a counter that stopped early.
     """
-    if budget[0] <= 0:
+    if ceiling[0] <= 0:
         return
     tag = _local(elem.tag)
     new_path = path + [tag]
@@ -143,11 +177,11 @@ def _walk_leaves(elem, path: list[str], out: list[dict], budget: list[int], entr
             if effective_uuid:
                 row["entry_uuid"] = effective_uuid
             out.append(row)
-            budget[0] -= 1
+            ceiling[0] -= 1
         return
     for child in children:
-        _walk_leaves(child, new_path, out, budget, entry_uuid=effective_uuid)
-        if budget[0] <= 0:
+        _walk_leaves(child, new_path, out, ceiling, entry_uuid=effective_uuid)
+        if ceiling[0] <= 0:
             break
 
 
@@ -172,12 +206,21 @@ def parse_i6d(xml_bytes: bytes) -> dict[str, Any]:
     content_el = root.find(_q(PLATFORM_CONTAINER_NS, "Content"))
     raw_fields: list[dict] = []
     truncated = False
+    safety_ceiling_hit = False
     tag_counts: dict[str, int] = {}
     if content_el is not None and len(content_el):
         payload = list(content_el)[0]  # the single <DOCUMENTTYPE ...> element
-        budget = [MAX_RAW_FIELDS_PER_DOCUMENT]
-        _walk_leaves(payload, [], raw_fields, budget)
-        truncated = budget[0] <= 0
+        full_leaves: list[dict] = []
+        ceiling = [_SAFETY_CEILING_LEAVES]
+        _walk_leaves(payload, [], full_leaves, ceiling)
+        safety_ceiling_hit = ceiling[0] <= 0
+        true_count = len(full_leaves)
+        if true_count > MAX_RAW_FIELDS_PER_DOCUMENT:
+            raw_fields = full_leaves[:MAX_RAW_FIELDS_PER_DOCUMENT]
+            truncated = True
+        else:
+            raw_fields = full_leaves
+            truncated = False
         for e in payload.iter():
             t = _local(e.tag)
             tag_counts[t] = tag_counts.get(t, 0) + 1
@@ -186,6 +229,7 @@ def parse_i6d(xml_bytes: bytes) -> dict[str, Any]:
         "metadata": meta,
         "raw_fields": raw_fields,
         "raw_fields_truncated": truncated,
+        "raw_fields_safety_ceiling_hit": safety_ceiling_hit,
         "tag_counts": tag_counts,
     }
 
@@ -231,28 +275,23 @@ def derive_reference_substance(raw_fields: list[dict]) -> dict:
         ):
             ec_code = entries[0]["text"]
     synonyms = []
-    e_number = None
     for path, entries in idx.items():
         if path.endswith("Synonyms/Synonyms/entry/Name"):
             for e in entries:
                 if e["text"]:
                     synonyms.append(e["text"])
-                    if e["text"].upper().replace(" ", "").startswith("E") and e["text"][1:2].strip().isdigit():
-                        pass
-    for s in synonyms:
-        stripped = s.strip()
-        if stripped.upper().startswith("E ") or (stripped.upper().startswith("E") and stripped[1:].strip().isdigit()):
-            rest = stripped[1:].strip()
-            if rest.isdigit():
-                e_number = stripped
-                break
+    e_numbers = collect_e_numbers(synonyms)
     return {
         "name": _first_text(idx, "ReferenceSubstanceName"),
         "iupac_name": _first_text(idx, "IupacName"),
         "cas_number": cas or None,
         "ec_number": ec if ec_code == "EC" else None,
         "synonyms": synonyms,
-        "e_number": e_number,
+        # Structured, conflict-aware E-number recognition (see
+        # e_numbers.py). A record can have zero, one, or (if the data
+        # ever warrants it) multiple distinct recognized candidates --
+        # never collapsed to a single guessed scalar.
+        "e_numbers": e_numbers,
         "molecular_formula": _first_text(idx, "MolecularFormula"),
         "smiles": _first_text(idx, "SmilesNotation"),
         "inchi": _first_text(idx, "InChl"),
@@ -384,6 +423,9 @@ def derive_reference_values(raw_fields: list[dict]) -> list[dict]:
             elif tail.startswith("ReferenceValueDescriptor") and leaf == "other":
                 entry["reference_value_descriptor_label"] = f["text"]
         if any(v is not None for k, v in entry.items() if k != "value_type"):
+            stored_value = entry["value"] or entry["lower_value"]
+            basis_result = extract_chemical_basis(stored_value, entry["justification_and_comments"])
+            entry["chemical_basis"] = basis_result.to_dict()
             results.append(entry)
     return results
 
@@ -531,6 +573,24 @@ def build_document_record(
         xsl_name = _xsl_name_for(doc_type, sub_type)
         _decode_in_place(derived, codebook, xsl_name)
 
+    if parsed["raw_fields_truncated"]:
+        # Quarantine: a truncated document's derived view may be missing
+        # fields that exist beyond the coverage cap, so it must not be
+        # silently counted as usable evidence anywhere downstream (see
+        # dossier.py / extract.py, which check this flag before counting
+        # a document as usable human-health evidence or surfacing it in
+        # a profile without a caveat).
+        parse_warnings.append(
+            f"raw field extraction stopped at {MAX_RAW_FIELDS_PER_DOCUMENT} leaves for this "
+            "document; derived fields may be incomplete and must not be treated as usable "
+            "evidence without manual review (see evidence_complete=False)."
+        )
+    if parsed["raw_fields_safety_ceiling_hit"]:
+        parse_warnings.append(
+            f"raw field extraction hit the hard safety ceiling ({_SAFETY_CEILING_LEAVES} leaves); "
+            "this document may have far more content than was walked at all."
+        )
+
     return {
         "document_key": meta.get("documentKey"),
         "parent_document_key": meta.get("parentDocumentKey"),
@@ -543,6 +603,11 @@ def build_document_record(
         "derived": derived,
         "raw_fields": parsed["raw_fields"],
         "raw_fields_truncated": parsed["raw_fields_truncated"],
+        "raw_fields_safety_ceiling_hit": parsed["raw_fields_safety_ceiling_hit"],
+        # False whenever raw-field extraction was truncated -- callers
+        # must exclude such documents from "usable evidence" counts and
+        # surface them as incomplete rather than silently include them.
+        "evidence_complete": not parsed["raw_fields_truncated"],
         "parse_warnings": parse_warnings,
         "source": {
             "archive": archive_rel_path,

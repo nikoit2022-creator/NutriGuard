@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.openfoodtox import safe_io  # noqa: E402
 from scripts.openfoodtox.codebook import Codebook, harvest_codebook  # noqa: E402
 from scripts.openfoodtox.dossier import build_dossier_record  # noqa: E402
+from scripts.openfoodtox.records import MAX_RAW_FIELDS_PER_DOCUMENT  # noqa: E402
 
 EXPECTED_FILE_COUNT = 11613
 EXPECTED_TOTAL_BYTES = 1_100_741_293
@@ -207,7 +208,12 @@ def cmd_catalogue(args: argparse.Namespace) -> int:
     cas_to_dossiers: dict[str, set] = defaultdict(set)
     ec_to_dossiers: dict[str, set] = defaultdict(set)
     name_to_cas: dict[str, set] = defaultdict(set)
-    dossiers_with_human_health = 0
+    dossiers_with_usable_human_health = 0
+    dossiers_with_any_incomplete_evidence = 0
+    documents_with_incomplete_evidence_total = 0
+    reference_substances_total = 0
+    reference_substances_with_recognized_e_number = 0
+    reference_substances_with_e_number_conflict = 0
     t0 = time.time()
 
     with open(cat_path, "w", encoding="utf-8") as out:
@@ -220,8 +226,16 @@ def cmd_catalogue(args: argparse.Namespace) -> int:
                 doc_type_counts[dt] += c
             for dm, c in record.get("counts", {}).get("documents_by_domain", {}).items():
                 domain_counts[dm] += c
-            if any(record["endpoints"].get("human_health")):
-                dossiers_with_human_health += 1
+            # Quarantine rule: a human-health endpoint only counts as
+            # "usable" evidence if its own raw-field extraction was not
+            # truncated (evidence_complete=True). A dossier with only
+            # incomplete human-health records is not counted here.
+            if any(e.get("evidence_complete") for e in record["endpoints"].get("human_health", [])):
+                dossiers_with_usable_human_health += 1
+            incomplete_here = record.get("counts", {}).get("documents_with_incomplete_evidence", 0)
+            documents_with_incomplete_evidence_total += incomplete_here
+            if incomplete_here:
+                dossiers_with_any_incomplete_evidence += 1
 
             for rs in record.get("identity", {}).get("reference_substances", []):
                 cas = rs.get("cas_number")
@@ -233,6 +247,12 @@ def cmd_catalogue(args: argparse.Namespace) -> int:
                     ec_to_dossiers[ec].add(rel)
                 if name and cas:
                     name_to_cas[name].add(cas)
+                reference_substances_total += 1
+                e_numbers = rs.get("e_numbers") or {}
+                if e_numbers.get("recognized_count"):
+                    reference_substances_with_recognized_e_number += 1
+                if e_numbers.get("conflict"):
+                    reference_substances_with_e_number_conflict += 1
 
             out.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -245,7 +265,12 @@ def cmd_catalogue(args: argparse.Namespace) -> int:
         "status_counts": dict(status_counts),
         "documents_by_type": dict(doc_type_counts),
         "documents_by_domain": dict(domain_counts),
-        "dossiers_with_human_health_endpoint": dossiers_with_human_health,
+        "dossiers_with_usable_human_health_endpoint": dossiers_with_usable_human_health,
+        "documents_with_incomplete_evidence_total": documents_with_incomplete_evidence_total,
+        "dossiers_with_any_incomplete_evidence": dossiers_with_any_incomplete_evidence,
+        "reference_substances_total": reference_substances_total,
+        "reference_substances_with_recognized_e_number": reference_substances_with_recognized_e_number,
+        "reference_substances_with_e_number_conflict": reference_substances_with_e_number_conflict,
         "unique_cas_numbers": len(cas_to_dossiers),
         "unique_ec_numbers": len(ec_to_dossiers),
         "cas_numbers_used_across_multiple_dossiers": {
@@ -283,7 +308,22 @@ def cmd_catalogue(args: argparse.Namespace) -> int:
         lines.append(f"- {dm}: {count}")
     lines += [
         "",
-        f"## Dossiers with at least one human-health endpoint record: {dossiers_with_human_health} / {len(files)}",
+        f"## Dossiers with at least one *usable* (non-truncated) human-health endpoint record: {dossiers_with_usable_human_health} / {len(files)}",
+        "(a human-health endpoint record only counts here if its own raw-field extraction was not truncated -- see Coverage/completeness below)",
+        "",
+        "## Coverage / completeness (bounded extraction)",
+        "",
+        f"- Documents with truncated raw-field extraction (exceeded the {MAX_RAW_FIELDS_PER_DOCUMENT}-leaf coverage cap): {documents_with_incomplete_evidence_total}",
+        f"- Dossiers containing at least one such truncated document: {dossiers_with_any_incomplete_evidence}",
+        "- Truncated documents are excluded from the \"usable human-health endpoint\" count above and from every",
+        "  derived summary that depends on completeness; they remain in the catalogue with their partial",
+        "  raw_fields and an explicit `evidence_complete: false` flag for manual review.",
+        "",
+        "## E-number recognition (REFERENCE_SUBSTANCE synonym parsing)",
+        "",
+        f"- REFERENCE_SUBSTANCE records examined: {reference_substances_total}",
+        f"- With at least one recognized E-number-shaped synonym: {reference_substances_with_recognized_e_number}",
+        f"- With a flagged E-number conflict (multiple distinct candidates on one record): {reference_substances_with_e_number_conflict}",
         "",
         f"## Unique CAS numbers observed: {len(cas_to_dossiers)}",
         f"## Unique EC numbers observed: {len(ec_to_dossiers)}",
@@ -422,6 +462,15 @@ def cmd_e250(args: argparse.Namespace) -> int:
     }
 
     for record, ref_sub in matches:
+        human_health_endpoints = record["endpoints"].get("human_health", [])
+        reference_values = record.get("reference_values") or []
+        incomplete_parts = []
+        if not ref_sub.get("evidence_complete", True):
+            incomplete_parts.append("identity")
+        if any(not rv.get("evidence_complete", True) for rv in reference_values):
+            incomplete_parts.append("reference_values")
+        if any(not ep.get("evidence_complete", True) for ep in human_health_endpoints):
+            incomplete_parts.append("human_health_endpoints")
         dossier_entry = {
             "dossier_file": record["dossier_file"],
             "title": record.get("title"),
@@ -429,11 +478,12 @@ def cmd_e250(args: argparse.Namespace) -> int:
             "identity": ref_sub,
             "legal_entities": record.get("legal_entities"),
             "literature": record.get("literature"),
-            "reference_values": record.get("reference_values"),
-            "human_health_endpoints": record["endpoints"].get("human_health", []),
+            "reference_values": reference_values,
+            "human_health_endpoints": human_health_endpoints,
             "other_domain_endpoint_counts": {
                 k: len(v) for k, v in record["endpoints"].items() if k != "human_health"
             },
+            "incomplete_evidence_in": incomplete_parts,
         }
         profile["dossiers"].append(dossier_entry)
 
@@ -473,6 +523,9 @@ def _render_e250_markdown(profile: dict) -> str:
     for d in profile["dossiers"]:
         lines.append(f"## Dossier: `{d['dossier_file']}`")
         lines.append("")
+        if d.get("incomplete_evidence_in"):
+            lines.append(f"**⚠ INCOMPLETE EVIDENCE in: {', '.join(d['incomplete_evidence_in'])} — see each item below, do not treat as fully usable without manual review.**")
+            lines.append("")
         lines.append(f"- Title: {d.get('title')}")
         ds = d.get("dossier_summary") or {}
         if ds.get("persistent_identifier"):
@@ -488,7 +541,15 @@ def _render_e250_markdown(profile: dict) -> str:
         lines.append(f"- IUPAC name: {idn.get('iupac_name')}")
         lines.append(f"- CAS number: {idn.get('cas_number')}")
         lines.append(f"- EC number: {idn.get('ec_number')}")
-        lines.append(f"- E-number synonym (raw): {idn.get('e_number')}")
+        e_numbers = idn.get("e_numbers") or {}
+        recognized = [c for c in e_numbers.get("candidates", []) if c.get("recognized")]
+        if recognized:
+            shown = "; ".join(f"{c['raw']} (normalized: {c['normalized']})" for c in recognized)
+            lines.append(f"- E-number synonym (recognized, raw + normalized): {shown}")
+            if e_numbers.get("conflict"):
+                lines.append("  - ⚠ multiple distinct E-number candidates found on this record — not auto-resolved")
+        else:
+            lines.append("- E-number synonym (recognized): none")
         lines.append(f"- Molecular formula: {idn.get('molecular_formula')}")
         lines.append(f"- SMILES: {idn.get('smiles')}")
         lines.append(f"- Source: `{idn['source']['archive']}` / `{idn['source']['entry']}`")
@@ -515,6 +576,24 @@ def _render_e250_markdown(profile: dict) -> str:
                     f"(population: {rv.get('population_label') or rv.get('population_code')}, "
                     f"overall uncertainty factor: {rv.get('overall_uncertainty')})"
                 )
+                if not rv.get("evidence_complete", True):
+                    lines.append("  - ⚠ INCOMPLETE EVIDENCE: this record's raw-field extraction was truncated; do not treat as usable evidence without manual review.")
+                cb = rv.get("chemical_basis") or {}
+                if cb.get("status") == "resolved":
+                    lines.append(
+                        f"  - Chemical basis (from this record's own justification text): **{cb['basis']}** "
+                        f"(matched text: \"{cb['evidence']}\")"
+                    )
+                    for other in cb.get("other_values_mentioned", []):
+                        lines.append(
+                            f"    - Also mentioned in the same text, on a **different** basis -- kept separate, "
+                            f"not merged/converted: {other['value']} mg {other['basis']}/kg bw "
+                            f"(\"{other['evidence']}\")"
+                        )
+                elif cb.get("status", "").startswith("unresolved"):
+                    lines.append(f"  - Chemical basis: **unresolved** ({cb.get('status')}) — not suitable for consumer intake guidance without checking the cited opinion directly.")
+                    for other in cb.get("other_values_mentioned", []):
+                        lines.append(f"    - Text mentions a different value/basis that did not match the stored figure: {other['value']} mg {other['basis']}/kg bw")
                 if rv.get("justification_and_comments"):
                     lines.append(f"  - Justification (raw): {rv['justification_and_comments']}")
                 if rv.get("parse_warnings"):
@@ -529,6 +608,8 @@ def _render_e250_markdown(profile: dict) -> str:
             lines.append("### Human-health endpoint findings (raw)")
             for ep in d["human_health_endpoints"]:
                 lines.append(f"- **{ep['document_sub_type']}** — {ep.get('name')}")
+                if not ep.get("evidence_complete", True):
+                    lines.append("  - ⚠ INCOMPLETE EVIDENCE: this record's raw-field extraction was truncated; do not treat as usable evidence without manual review.")
                 if ep.get("key_information"):
                     lines.append(f"  - Key information (raw): {ep['key_information']}")
                 if ep.get("discussion"):
@@ -567,6 +648,28 @@ def _render_e250_markdown(profile: dict) -> str:
         "absence of a field (e.g. a missing ARfD in this dataset) as evidence that no such "
         "value exists in the source EFSA opinion — only that this transferred IUCLID export "
         "does not carry it."
+    )
+    lines.append("")
+    lines.append(
+        "**External verification (NOT raw IUCLID extraction — a separate check against the "
+        "actual cited opinion, done 2026-10-01):** the IUCLID `JustificationAndComments` text "
+        "quoted above is a near-verbatim match of the source opinion's own sentence: "
+        "\"Using the lowest BMDL of 9.63 mg/kg bw per day for males, and applying the default "
+        "factor of 100, an ADI of 0.1 mg sodium nitrite/kg bw per day was calculated by the "
+        "Panel, corresponding to 0.07 mg nitrite ion/kg bw per day\" (EFSA Journal 2017;15(6):4786, "
+        "doi:10.2903/j.efsa.2017.4786). The Panel calculates and states *both* figures "
+        "explicitly as two chemical-basis expressions of the one BMDL-derived ADI -- they are "
+        "not conflicting values and this audit does not treat them as such; this extractor "
+        "resolves `chemical_basis` to \"sodium nitrite\" for the stored 0.1 figure and keeps "
+        "the 0.07 mg nitrite ion/kg bw figure as a separate, clearly labeled mention for "
+        "exactly that reason, never merging or converting between them. Some third-party "
+        "summaries of this opinion paraphrase the ADI as \"0.07 mg nitrite ion/kg bw/day\" "
+        "alone (likely because that basis is what aggregate nitrite-exposure assessments "
+        "compare against); readers relying on this profile for anything beyond this audit's "
+        "own scope should consult the primary opinion directly rather than either paraphrase. "
+        "Sources consulted: https://efsa.europa.eu/en/efsajournal/pub/4786 (official EFSA "
+        "Journal record) and https://pmc.ncbi.nlm.nih.gov/articles/PMC7009987 (open-access "
+        "full text, fetched 2026-10-01 to confirm the exact sentence quoted above)."
     )
     return "\n".join(lines) + "\n"
 

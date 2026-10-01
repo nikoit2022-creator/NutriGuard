@@ -1,5 +1,50 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: OpenFoodTox audit review fixes implemented (Claude)
+
+- Implemented all three fixes requested in `docs/OPENFOODTOX_REVIEW_TASK.md`
+  (reviewed baseline `8dd62355281c147bc84c9266341a47b60a509846`) in an isolated
+  worktree on `feat/backend-openfoodtox-dataset-audit`, fast-forwarded to the
+  handoff commit `48981ae` first (no drift/conflicts).
+- **E-number suffixes**: added `scripts/openfoodtox/e_numbers.py` — conservative,
+  survey-driven recognition (plain, letter-suffixed, roman-numeral-qualified,
+  trailing-qualifier, and range forms; rejects E/Z stereodescriptor look-alikes).
+  Never collapses E150a/b/c/d; flags (does not silently resolve) multi-candidate
+  conflicts. Measured impact: 495 -> 619 recognized records (124 previously missed),
+  0 conflicts, across all 15,705 REFERENCE_SUBSTANCE records.
+- **Bounded extraction vs. completeness**: measured the true per-document leaf
+  count across all 221,377 documents (max 1,405; 467 docs/0.2% exceeded the old
+  400-leaf cap, all environmental/physicochemical, none human-health/identity/
+  reference-value). Fixed the truncation flag (was a false-positive-prone
+  "counter hit zero" check; now compares the true complete count against the
+  cap). Raised the cap to 4,000 (~2.8x margin) and added an independent 50,000-leaf
+  hard safety ceiling. Added an `evidence_complete` quarantine flag propagated from
+  document -> dossier -> catalogue/identity-audit/E250 profile, excluding any
+  truncated record from "usable evidence" counts rather than silently including it.
+  Measured result after the fix: 0 documents truncated in the full dataset.
+- **E250 chemical basis**: added `scripts/openfoodtox/chemical_basis.py` — recovers
+  the ADI's chemical basis from the record's own justification text (ties the
+  stored 0.1 value to "sodium nitrite", keeps the 0.07 mg nitrite ion/kg bw figure
+  as a separate, non-merged mention). Externally verified (separately from raw
+  IUCLID extraction) against the actual cited EFSA opinion via
+  efsa.europa.eu/en/efsajournal/pub/4786 and pmc.ncbi.nlm.nih.gov/articles/PMC7009987
+  (fetched 2026-10-01): the IUCLID text is a near-verbatim match of the opinion's
+  own sentence, and the Panel itself states both figures as two bases of one ADI —
+  not a discrepancy to resolve.
+- Also fixed an arithmetic error in the prior version of `docs/OPENFOODTOX_DATASET_AUDIT.md`
+  (documents-by-type summed to 232,377; correct total is 221,377).
+- Tests: added `test_openfoodtox_e_numbers.py` (24 tests), `test_openfoodtox_chemical_basis.py`
+  (8 tests), plus new truncation-boundary and quarantine-propagation cases in the
+  existing records/dossier test files. `python -m pytest -q` (full backend suite,
+  from `nutriguard-backend/`): **790 passed, 16 skipped** (pre-existing skips), 0 failed.
+- Reran the full offline extraction/audit into a **new versioned output folder**
+  (`staging/v2/`, `reports/v2/`) rather than overwriting the 2026-09-30 outputs,
+  which remain unchanged at their original location for comparison.
+- `docs/OPENFOODTOX_DATASET_AUDIT.md` updated with a new §8 (the three fixes,
+  measured impact, external-verification sources/dates) and corrected §6/§7/§9.
+- No import into the live database, no API/Health Score change, no container
+  restart, no deploy, no merge. Originals and the live stack were not touched.
+
 ## 2026-10-01: Codex review handoff for Claude (documentation only)
 
 - Reviewed audit baseline `8dd62355281c147bc84c9266341a47b60a509846`.

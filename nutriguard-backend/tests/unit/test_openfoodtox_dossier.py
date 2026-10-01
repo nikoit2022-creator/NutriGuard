@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import zipfile
 
+from scripts.openfoodtox import records
 from scripts.openfoodtox.dossier import build_dossier_record
 
 MANIFEST_TMPL = """<?xml version='1.0' encoding='UTF-8'?><manifest xmlns="http://iuclid6.echa.europa.eu/namespaces/manifest/v1" xmlns:xlink="http://www.w3.org/1999/xlink">
@@ -141,3 +142,18 @@ class TestDuplicateIdentityAcrossDossiers:
         # Each record independently traces back to its own archive.
         assert rec1["identity"]["reference_substances"][0]["source"]["archive"] == "a1.i6z"
         assert rec2["identity"]["reference_substances"][0]["source"]["archive"] == "a2.i6z"
+
+
+class TestEvidenceQuarantinePropagation:
+    """A document whose raw-field extraction was truncated must carry its
+    evidence_complete=False flag all the way into the dossier-level
+    buckets and counts, not just the per-document record."""
+
+    def test_truncated_document_flagged_through_to_dossier_counts(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(records, "MAX_RAW_FIELDS_PER_DOCUMENT", 1)
+        archive = tmp_path / "big.i6z"
+        _make_simple_dossier_zip(str(archive), cas="999-99-9", name="Big Record")
+        rec = build_dossier_record(str(archive), "big.i6z", None)
+        assert rec["status"] == "ok"
+        assert rec["counts"]["documents_with_incomplete_evidence"] >= 1
+        assert rec["identity"]["reference_substances"][0]["evidence_complete"] is False

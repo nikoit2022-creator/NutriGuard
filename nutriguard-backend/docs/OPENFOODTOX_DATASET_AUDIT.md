@@ -103,14 +103,19 @@ writing the extractor, is what the evidence-domain classification in
 
 All commands are run from `nutriguard-backend/` and only ever read
 from `--dossiers-dir` and write to `--staging-dir`/`--reports-dir`
-(both outside git). Run in this order:
+(both outside git). Point `STAGING`/`REPORTS` at a **new versioned
+subfolder** for each rerun that changes extraction logic (e.g.
+`staging/v2/`, `reports/v2/`) rather than overwriting the previous
+output in place, so prior results stay recoverable for comparison —
+this is why `staging/v2/`/`reports/v2/` exist alongside the original
+`staging/`/`reports/` from 2026-09-30 (see §8). Run in this order:
 
 ```bash
 cd nutriguard-backend
 
 DOSSIERS=/home/vboxuser/nutriguard-data/openfoodtox/originals/2026-09-30/dossiers
-STAGING=/home/vboxuser/nutriguard-data/openfoodtox/staging
-REPORTS=/home/vboxuser/nutriguard-data/openfoodtox/reports
+STAGING=/home/vboxuser/nutriguard-data/openfoodtox/staging/v2
+REPORTS=/home/vboxuser/nutriguard-data/openfoodtox/reports/v2
 
 # 1. Hash + integrity-check every archive
 python3 -m scripts.openfoodtox.extract inventory \
@@ -142,7 +147,9 @@ python3 -m pytest tests/unit/test_openfoodtox_safe_io.py \
   tests/unit/test_openfoodtox_records.py \
   tests/unit/test_openfoodtox_dossier.py \
   tests/unit/test_openfoodtox_codebook.py \
-  tests/unit/test_openfoodtox_domains.py -v
+  tests/unit/test_openfoodtox_domains.py \
+  tests/unit/test_openfoodtox_e_numbers.py \
+  tests/unit/test_openfoodtox_chemical_basis.py -v
 
 # or the whole backend suite, to confirm no regression:
 python3 -m pytest -q
@@ -182,17 +189,22 @@ manifest reference).
 
 Every `*.i6d` document is parsed twice:
 
-1. **`raw_fields`** — a generic, bounded (400 leaves/document) walk of
-   every leaf element in the document's content payload, each tagged
-   with its full path (e.g.
+1. **`raw_fields`** — a generic, bounded walk of every leaf element in
+   the document's content payload, each tagged with its full path
+   (e.g.
    `ENDPOINT_STUDY_RECORD.RepeatedDoseToxicityOther/ResultsAndDiscussion/
    EffectLevels/Efflevel/entry/EffectLevel/lowerValue`) and, where
    IUCLID puts a `i6:uuid` on the repeatable `<entry>` wrapper (e.g.
    grouping multiple `Efflevel` entries), the enclosing `entry_uuid` is
-   propagated down to every leaf beneath it. This guarantees every
-   field actually present is captured with its exact source path, even
-   for the ~80 endpoint subtypes this module does not hand-model
-   individually (see §7.1).
+   propagated down to every leaf beneath it. The walk always runs to
+   completion first and is only *then* capped at a 4,000-leaf coverage
+   target (measured with a large safety margin against this dataset's
+   true maximum — see §8.2 for how that number was chosen and how
+   truncation, on the rare document that exceeds it, is detected and
+   quarantined rather than silently included or silently dropped).
+   This captures every field actually present with its exact source
+   path, even for the ~80 endpoint subtypes this module does not
+   hand-model individually.
 2. **Derived convenience fields**, layered on top for the record types
    this audit specifically targets: substance/reference-substance
    identity, legal entities, literature citations, dossier-level
@@ -229,7 +241,7 @@ first-seen hash and would flag drift if it existed). The harvested
 codebook: **428 unit codes** (a single global vocabulary — cross-
 checked as consistent across every stylesheet that renders a unit) and
 **16,515 value codes across 71 stylesheets** (scoped **per stylesheet
-filename**, not merged globally — see the limitation in §7.2), with
+filename**, not merged globally — see the limitation in §9), with
 **zero label conflicts or cross-archive stylesheet variants** detected.
 
 One additional pattern needs no codebook at all: several fields carry
@@ -255,7 +267,7 @@ and wildlife), `physicochemical`, `supporting` (composition/use/
 metabolite/test-material context, not itself a finding),
 `assessment_summary` (dossier/literature/reference-value containers),
 and `identity`. Any subtype not in the table is `unclassified`, never
-guessed into a bucket. See §7.3 for the corresponding limitation.
+guessed into a bucket. See §9 for the corresponding limitation.
 
 ### 5.4 Never converted, never inferred
 
@@ -278,9 +290,14 @@ Per the audit's explicit constraints, the extractor:
 
 ## 6. Results: inventory, integrity, catalogue, identity audit
 
-All figures below are from the actual run against the full transferred
+All figures below are from the first full run against the transferred
 set on 2026-09-30 (reproducible via the commands in §3;
-machine-readable versions are in `reports/*.json`).
+machine-readable versions are in `reports/*.json`). **§8 documents
+three fixes applied on 2026-10-01 and the corresponding rerun under
+`staging/v2/`/`reports/v2/`** — the figures below are superseded where
+§8 says so (E-number recognition counts, the "usable" qualifier on the
+human-health endpoint count, and the new completeness counters); every
+other figure here was re-confirmed unchanged by that rerun.
 
 **Inventory & integrity** (`reports/inventory_summary.json`,
 `inventory_report.md`):
@@ -314,14 +331,20 @@ machine-readable versions are in `reports/*.json`).
   `ENDPOINT_SUMMARY` 29,139; `FLEXIBLE_SUMMARY` 23,465; `LEGAL_ENTITY`
   23,226; `REFERENCE_SUBSTANCE` 15,705; `SUBSTANCE` 14,791;
   `LITERATURE` 14,343; `DOSSIER` 11,613; `TEST_MATERIAL_INFORMATION`
-  866; `FLEXIBLE_RECORD` 275 (232,377 documents total)
+  866; `FLEXIBLE_RECORD` 275 (221,377 documents total — corrected from an
+  arithmetic error in the original version of this document, which summed
+  the same per-type counts to 232,377)
 - By evidence domain: `human_health` 57,651; `identity` 53,722;
   `assessment_summary` 47,528; `physicochemical` 38,548;
   `environmental` 20,594; `supporting` 3,034; `livestock_animal_health`
   300
 - Dossiers with at least one human-health endpoint record:
-  **11,394 / 11,613**
+  **11,394 / 11,613** (confirmed, after the §8.2 fix, that all 11,394 are
+  *usable* — zero were truncated)
 - Unique CAS numbers observed: **4,352**; unique EC numbers: **3,357**
+- Reference substances with a recognized E-number-shaped synonym:
+  **619 / 15,705** after the §8.1 fix (495 before it — 124 previously
+  missed by the original buggy recognizer)
 
 **Identity & duplication audit** (`reports/identity_audit.{md,json}`):
 
@@ -349,7 +372,8 @@ found by **exact CAS (`7632-00-0`) and EC (`231-555-9`) match** on its
 `REFERENCE_SUBSTANCE` record's `Inventory` block, cross-checked
 against that substance's own `Synonyms` entry containing the literal
 string `"E 250"` — not a name-similarity guess. Full source-linked
-profile: `reports/e250_sodium_nitrite_profile.{md,json}`.
+profile (current version, with the §8 fixes applied):
+`reports/v2/e250_sodium_nitrite_profile.{md,json}`.
 
 Summary of what the dataset actually contains for it (raw evidence,
 reproduced from the profile — see the file itself for the complete,
@@ -362,10 +386,14 @@ split):
   nitrite (E 250) as food additives", EFSA ANS Panel, 2017,
   `doi:10.2903/j.efsa.2017.4786`, adoption date 2017-04-05,
   publication date 2017-06-15, Regulation (EC) No 257/2010.
-- **Reference value**: ADI = 0.1 mg/kg bw/day (population code 8521,
-  decoded via the shipped codebook as "consumers"; overall uncertainty
-  factor 100), with the Panel's own justification text quoted verbatim
-  (derived from a BMDL of 9.63 mg/kg bw/day with a default UF of 100).
+- **Reference value**: ADI = 0.1 mg/kg bw/day on a **sodium nitrite**
+  chemical basis (population code 8521, decoded via the shipped
+  codebook as "consumers"; overall uncertainty factor 100), resolved
+  and externally verified in §8.3 — the same justification text also
+  states a corresponding 0.07 mg nitrite ion/kg bw/day figure, kept as
+  a separate, clearly labeled value rather than merged with the
+  primary one. Derived from a BMDL of 9.63 mg/kg bw/day with a default
+  UF of 100, per the Panel's own justification text, quoted verbatim.
 - **Human-health endpoints present**: a repeated-dose (sub-chronic,
   other route) toxicity study record carrying that same BMDL of 9.63
   mg/kg bw/day (methaemoglobin increase, NTP 2001 study, rat,
@@ -378,15 +406,151 @@ split):
   absence — not converted, not inferred, not treated as a safety
   claim.
 
-## 8. Coverage, limitations, and unresolved mappings
+## 8. Follow-up review and fixes (2026-10-01)
+
+A follow-up review (`docs/OPENFOODTOX_REVIEW_TASK.md`, reviewed
+baseline `8dd62355281c147bc84c9266341a47b60a509846`) found three real
+issues in the first version of this audit. All three are fixed,
+tested, and reflected in a regenerated catalogue/audit/profile under
+`staging/v2/` and `reports/v2/` (the original `staging/`/`reports/`
+from 2026-09-30 are preserved unchanged for comparison).
+
+### 8.1 E-number suffixes were silently dropped (confirmed defect, fixed)
+
+`derive_reference_substance` only recognized a synonym as an E-number
+when the text after "E" was entirely numeric, so letter-suffixed
+identifiers (`E150d`, distinct from E150a/b/c) and roman-numeral-
+qualified ones (`E 101(i)`) never reached the derived `e_number`
+field — only the plain `E 250`-style form worked. Fixed in the new
+`scripts/openfoodtox/e_numbers.py`, built from a full survey of every
+E-number-shaped synonym string in the dataset (276 distinct strings),
+covering: plain 2-5 digit codes (`E 100`, `E765` with no space),
+single-letter suffixes (`E150a`..`E150d`, `E472a`..`f`), roman-numeral
+qualifiers (`E 101(i)`, `E 954(iv)`), letter+roman combinations
+(`E160a(i)`), a trailing free-text qualifier (`E 161(i) (feed)`), and
+an explicit two-code range (`E 251-252`, kept as a range, never
+reduced to one endpoint). Confirmed rejected: E/Z stereochemistry
+descriptors in IUPAC names (`E-4-Undecenal`, `E-5-Decen-1-ol`, ...),
+which look superficially similar but are not food-additive codes.
+
+The derived field is now `e_numbers` (plural, structured: a list of
+candidates plus a `conflict` flag), not a single scalar — a record
+with more than one distinct recognized candidate is flagged, never
+silently resolved to the first one found (not observed for real: zero
+of 15,705 REFERENCE_SUBSTANCE records have more than one, but the
+mechanism is tested). **Measured coverage change**: re-running
+recognition across the full dataset moved recognized-E-number records
+from 495 (old logic) to 619 (new logic) — 124 previously-missed
+records, zero newly-introduced conflicts. See
+`reports/v2/catalogue_summary.md` ("E-number recognition") for the
+counts and `tests/unit/test_openfoodtox_e_numbers.py` for the
+regression suite (numeric, suffixed, spaced, lowercase, range,
+qualifier, conflicting, and malformed/look-alike cases).
+
+### 8.2 Bounded extraction vs. completeness (confirmed mismatch, fixed)
+
+Two separate problems existed in the original 400-leaf cap
+(`MAX_RAW_FIELDS_PER_DOCUMENT`):
+
+1. **The cap was too low for some real documents.** A full, unbounded
+   leaf-count survey of all 221,377 documents in the dataset found a
+   true maximum of **1,405** informative leaves in a single document,
+   and **467 documents (0.2%)** exceeded the old 400-leaf cap — all of
+   them `ENDPOINT_STUDY_RECORD` environmental/physicochemical subtypes
+   (`BiodegradationInSoil`, `AdsorptionDesorption`,
+   `BiodegradationInWaterAndSedimentSimulationTests`, `Hydrolysis`,
+   `PhotoTransformationInSoil`). **None were human-health, identity
+   (`SUBSTANCE`/`REFERENCE_SUBSTANCE`), or reference-value
+   (`ToxRefValues`, max 32 leaves) documents** — so this never affected
+   the E250 profile or any human-health-evidence count, but it was a
+   real, silent gap for the affected environmental records.
+2. **The truncation flag itself was wrong.** The old code treated "the
+   running leaf counter hit exactly the cap" as proof of truncation —
+   which is a false positive for any document with *exactly* that many
+   leaves and nothing more, and gave no actual guarantee either way.
+
+Fixed in `scripts/openfoodtox/records.py`: the leaf walk now always
+runs to completion (up to a separate, much higher hard safety ceiling
+of 50,000 leaves, which exists purely to bound memory against a
+pathological/adversarial document and is independent of the coverage
+question), and `raw_fields_truncated` is set by comparing the *true*
+total leaf count against the cap — never inferred from where a counter
+stopped. `MAX_RAW_FIELDS_PER_DOCUMENT` is raised to 4,000 (a ~2.8x
+margin over the measured 1,405 maximum). **This is not "raising the
+cap and claiming completeness" by itself**: every document now also
+carries an `evidence_complete` flag (`False` whenever truncated), and
+every place that counts something as usable evidence —
+`dossiers_with_usable_human_health_endpoint` in the catalogue summary,
+the identity audit, and the E250 profile — checks that flag and
+excludes/flags incomplete records explicitly rather than silently
+including them. **Measured result after the fix: 0 documents in the
+full dataset are truncated under the new cap** (confirmed by rerunning
+the full catalogue: `documents_with_incomplete_evidence_total: 0`), so
+the quarantine mechanism exists and is tested
+(`TestTruncationBoundaryAccuracy`,
+`TestEvidenceQuarantinePropagation`) but does not currently exclude
+anything real. If the dataset grows a larger document in the future,
+the mechanism will catch it and say so rather than silently including
+or silently truncating it.
+
+### 8.3 E250 reference-value chemical basis (verification request, resolved)
+
+The original E250 profile reported "ADI 0.1 mg/kg bw/day" without
+stating what that 0.1 is a mass fraction *of* — the IUCLID
+`FLEXIBLE_SUMMARY.ToxRefValues` schema has no dedicated chemical-basis
+field at all; `unitCode` only ever encodes the unit (mg/kg bw/day),
+not the chemical basis. The basis is only present as free text in
+`JustificationAndComments`: *"...the Panel derived an ADI of 0.1 mg
+sodium nitrite/kg bw per day, corresponding to 0.07 mg nitrite ion/kg
+bw per day."*
+
+Added `scripts/openfoodtox/chemical_basis.py`: a conservative
+extractor that looks for a `<number> mg <basis phrase>/kg bw` mention
+in the record's own justification text that matches the *stored*
+numeric value, and reports that phrase as the basis — tying the
+recovered basis to the specific number actually in the structured
+field, not just "the first number-like phrase in the paragraph."
+*Any other* mg/.../kg bw figure mentioned in the same text is kept as
+a separate `other_values_mentioned` entry, never merged, converted, or
+treated as equivalent. If no matching mention exists, the basis is
+`"unresolved"` — never guessed. For sodium nitrite this resolves to
+`basis: "sodium nitrite"` for the stored `0.1`, with `0.07 mg nitrite
+ion/kg bw` kept as a separate mention.
+
+**External verification** (explicitly separate from raw IUCLID
+extraction, done 2026-10-01 against the actual cited opinion, not a
+paraphrase): fetched the EFSA ANS Panel opinion itself
+(doi:10.2903/j.efsa.2017.4786, EFSA Journal 2017;15(6):4786) via
+<https://efsa.europa.eu/en/efsajournal/pub/4786> and its open-access
+mirror <https://pmc.ncbi.nlm.nih.gov/articles/PMC7009987>. The source
+opinion's own sentence is a near-verbatim match of the IUCLID text:
+*"Using the lowest BMDL of 9.63 mg/kg bw per day for males, and
+applying the default factor of 100, an ADI of 0.1 mg sodium
+nitrite/kg bw per day was calculated by the Panel, corresponding to
+0.07 mg nitrite ion/kg bw per day."* This confirms (a) the IUCLID
+export faithfully reproduces the opinion's text, and (b) the Panel
+itself states both figures as two chemical-basis expressions of the
+*same* BMDL-derived ADI — they are not a discrepancy to resolve, which
+is exactly why this extractor keeps both, labeled by basis, rather
+than picking one. One secondary note for future readers: some
+third-party summaries of this opinion paraphrase the ADI as "0.07 mg
+nitrite ion/kg bw/day" alone; this audit's own extraction and the
+primary source text both place "0.1 mg sodium nitrite/kg bw per day"
+as the figure the Panel calculated, with 0.07 as the stated
+corresponding nitrite-ion figure — readers needing more than this
+audit's scope should consult the primary opinion, not a paraphrase.
+Tests: `tests/unit/test_openfoodtox_chemical_basis.py`.
+
+## 9. Coverage, limitations, and unresolved mappings
 
 - **Not every endpoint subtype has a bespoke field-level parser.**
   `derive_endpoint` is deliberately generic (shared across all
   `ENDPOINT_SUMMARY`/`ENDPOINT_STUDY_RECORD` subtypes) rather than
-  hand-modeling all ~80 subtypes individually; `raw_fields` guarantees
-  nothing is silently dropped, but a subtype-specific consumer (e.g. a
-  future physicochemical-properties integration) would want its own
-  derived view the way `ToxRefValues` has one here.
+  hand-modeling all ~80 subtypes individually. `raw_fields` is designed
+  to capture everything within the coverage cap (§8.2) — measured as
+  complete for every document in this dataset — but a subtype-specific
+  consumer (e.g. a future physicochemical-properties integration) would
+  still want its own derived view the way `ToxRefValues` has one here.
 - **`value`-code decoding is scoped per stylesheet filename, not per
   field**, because the bare `<value>` element name is reused by many
   unrelated picklists (species, sex, population, literature type,
@@ -403,6 +567,15 @@ split):
   ever violates it, `parse_warnings` flags that document's reference
   values as needing manual review instead of merging them (tested in
   `test_multiple_occurrences_of_same_container_flags_warning`).
+- **Chemical-basis recovery (§8.3) is text-pattern-based**, scoped to
+  the literal `mg ... /kg bw` shape actually observed in this dataset's
+  justification text. A differently-worded justification (no explicit
+  basis phrase, or a different unit shape) will correctly report
+  `"unresolved"` rather than guess — which means basis recovery will
+  often be unresolved for other substances' reference values, not just
+  sodium nitrite. This was verified only for the E250 case end-to-end;
+  a broader sweep of how often it resolves across all 21,572
+  `ToxRefValues` documents was not performed in this pass.
 - **Domain classification is schema-level** (by declared
   `documentSubType`), not a per-record re-verification of the species/
   route actually described in each study's text (see §5.3).
@@ -410,16 +583,18 @@ split):
   dataset** (§1) — resolving this needs a direct check against EFSA's
   own published OpenFoodTox terms, out of scope for this offline
   audit.
-- **`staging/catalogue.jsonl` is large (~985 MB)** because it carries
-  full `raw_fields` provenance for every document, by design (nothing
-  silently dropped). A future integration stage would likely want a
-  leaner "derived-fields-only" export variant for anything that loads
-  the whole catalogue into memory.
+- **`staging/v2/catalogue.jsonl` is large (~1.3 GB, larger than the
+  original ~985 MB `staging/catalogue.jsonl`** because every reference
+  value now also carries the `chemical_basis` structure and every
+  reference substance the expanded `e_numbers` structure). A future
+  integration stage would likely want a leaner "derived-fields-only"
+  export variant for anything that loads the whole catalogue into
+  memory.
 - **Transfer-fidelity scope**: see the note in §6 — the sha256
   manifest is a local integrity baseline, not an end-to-end
   transfer-fidelity proof against the original source.
 
-## 9. Recommended next integration stage (not implemented here)
+## 10. Recommended next integration stage (not implemented here)
 
 This audit deliberately stops at a read-only staging catalogue. The
 next stage, if/when authorized, would need its own explicit scoping
@@ -434,7 +609,7 @@ Health Score pipeline, given they are Panel-derived risk-assessment
 outputs, not raw study data, and the existing Health Score/ingredient
 regulatory logic (`app/services/ingredient_regulatory.py`) has its own
 documented, tested conventions this would need to integrate with
-rather than bypass; (3) resolving the EFSA reuse-terms question in §8
+rather than bypass; (3) resolving the EFSA reuse-terms question in §9
 before any data derived from this set is surfaced to end users; and
 (4) a leaner derived-only export path if the full-provenance
 `catalogue.jsonl` proves too large for whatever loads it next. None of
