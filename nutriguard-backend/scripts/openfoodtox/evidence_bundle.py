@@ -33,7 +33,49 @@ from typing import Any
 from .catalogue_snapshot import CatalogueIdentity
 from .codebook import Codebook
 from .dossier import build_dossier_record
+from .editorial_content import EDITORIAL_CONTENT_VERSION, EditorialEntry, get_editorial_entry
 from .matcher import DossierHit, MatchResult, resolve_subject_links
+
+# Exact-equivalent-only BG translations for the specific controlled-vocabulary
+# terms this pilot actually encounters, used only in the consumer-facing
+# draft text (the underlying extracted record keeps its original,
+# machine-readable English value untouched -- see `rv["population_label"]`
+# etc. in deduplicated_reference_values). Deliberately a small, curated
+# allowlist, not a generic translator: anything not listed here is left in
+# its original form rather than guessed at.
+_POPULATION_LABEL_BG = {
+    "consumers": "общото население (потребители)",
+    "general population": "общото население",
+}
+_UNIT_LABEL_BG = {
+    "mg/kg bw/day": "мг/кг телесно тегло дневно",
+    "mg/kg bw": "мг/кг телесно тегло",
+    "mg/kg": "мг/кг",
+    "µg/kg bw/day": "мкг/кг телесно тегло дневно",
+}
+_BASIS_LABEL_BG = {
+    "sodium nitrite": "натриев нитрит",
+    "aspartame": "аспартам",
+    "citric acid": "лимонена киселина",
+}
+
+
+def _bg_population(label: str | None) -> str:
+    if not label:
+        return "неустановена популация"
+    return _POPULATION_LABEL_BG.get(label.strip().lower(), label)
+
+
+def _bg_unit(label: str | None) -> str:
+    if not label:
+        return "неустановена единица"
+    return _UNIT_LABEL_BG.get(label.strip(), label)
+
+
+def _bg_basis(basis: str | None) -> str | None:
+    if not basis:
+        return None
+    return _BASIS_LABEL_BG.get(basis.strip().lower(), basis)
 
 # Reference-value types that represent a human dietary intake limit at
 # all. AOEL/AAOEL are *operator* (occupational: dermal/inhalation/mixed
@@ -97,7 +139,10 @@ class DossierBundle:
 
 
 def build_dossier_bundles(
-    hits: list[DossierHit], dossiers_dir: str, codebook: Codebook | None
+    hits: list[DossierHit],
+    dossiers_dir: str,
+    codebook: Codebook | None,
+    editorial_basis: dict | None = None,
 ) -> list[DossierBundle]:
     bundles: list[DossierBundle] = []
     for hit in hits:
@@ -133,7 +178,10 @@ def build_dossier_bundles(
                 **rv,
                 "feed_or_livestock_context": feed_context,
                 "review_eligibility": _assess_review_eligibility(
-                    rv, feed_context=feed_context, identity_evidence_complete=identity_evidence_complete
+                    rv,
+                    feed_context=feed_context,
+                    identity_evidence_complete=identity_evidence_complete,
+                    editorial_basis=editorial_basis,
                 ).to_dict(),
             }
             for rv in bucket["reference_values"]
@@ -191,22 +239,32 @@ class ReviewEligibility:
     # completeness) is the applicable shape for one.
     consumer_guidance_eligible: bool
     reasons: list[str] = field(default_factory=list)
+    # "automated" (chemical_basis.py resolved it from the record's own
+    # text), "editorial_override" (the automated check did not resolve
+    # it, but this session directly confirmed the basis by reading
+    # primary source text -- see editorial_content.py -- and recorded an
+    # explicit citation for it), or "unresolved" (neither).
+    basis_source: str = "unresolved"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "operator_inspectable": self.operator_inspectable,
             "consumer_guidance_eligible": self.consumer_guidance_eligible,
             "reasons": self.reasons,
+            "basis_source": self.basis_source,
         }
 
 
-def _assess_review_eligibility(rv: dict, *, feed_context: bool, identity_evidence_complete: bool) -> ReviewEligibility:
+def _assess_review_eligibility(
+    rv: dict, *, feed_context: bool, identity_evidence_complete: bool, editorial_basis: dict | None = None
+) -> ReviewEligibility:
     """Distinguish "safe for an operator to inspect" (always true -- a
     record is never hidden from review for being incomplete or
     inapplicable) from "eligible for numeric human intake guidance"
     (strict and fail-closed: every one of completeness, resolved subject
-    linkage, resolved chemical basis, a known unit, an applicable
-    reference-value type, and a general-consumer population must hold).
+    linkage, a known unit, an applicable reference-value type, and a
+    general-consumer population must hold; chemical basis must be either
+    automated-resolved or editorially confirmed -- never guessed).
     Every reason a record fails the strict check is recorded, never
     silently dropped, so an operator sees exactly why."""
     reasons: list[str] = []
@@ -224,8 +282,18 @@ def _assess_review_eligibility(rv: dict, *, feed_context: bool, identity_evidenc
         reasons.append(f"subject linkage was not cleanly resolved (basis={subject_basis!r})")
 
     basis_status = (rv.get("chemical_basis") or {}).get("status")
-    if basis_status != "resolved":
+    if basis_status == "resolved":
+        basis_source = "automated"
+    elif editorial_basis is not None:
+        # The automated text-pattern match did not resolve it, but this
+        # session has directly read the primary source and recorded an
+        # explicit, citable confirmation -- never a silent guess. See
+        # editorial_content.py's module docstring for when this is and
+        # is not used.
+        basis_source = "editorial_override"
+    else:
         reasons.append(f"chemical basis is not resolved (status={basis_status!r})")
+        basis_source = "unresolved"
     if not rv.get("unit_label"):
         reasons.append("unit was not resolved")
 
@@ -244,7 +312,9 @@ def _assess_review_eligibility(rv: dict, *, feed_context: bool, identity_evidenc
     if feed_context:
         reasons.append("sourced from an animal-feed/non-food (FEEDAP) assessment, not a human food evaluation")
 
-    return ReviewEligibility(operator_inspectable=True, consumer_guidance_eligible=not reasons, reasons=reasons)
+    return ReviewEligibility(
+        operator_inspectable=True, consumer_guidance_eligible=not reasons, reasons=reasons, basis_source=basis_source
+    )
 
 
 def _dedupe_reference_values(bundles: list[DossierBundle]) -> list[dict]:
@@ -278,6 +348,57 @@ def _dedupe_reference_values(bundles: list[DossierBundle]) -> list[dict]:
     return list(groups.values())
 
 
+def _group_for_consumer_display(values: list[dict]) -> list[dict]:
+    """Coarser grouping than `_dedupe_reference_values`, used only for the
+    consumer-facing draft text: several assessments that state the exact
+    same type/magnitude/unit/population (varying only in incidental
+    justification wording, e.g. E951's five near-identical ADI
+    restatements) are rendered as ONE statement citing every contributing
+    date, instead of repeating near-identical paragraphs once per
+    assessment (presentation spec: "avoid repetitive sections"). Nothing
+    is discarded -- the finer-grained per-assessment detail (each exact
+    quote) remains available in `deduplicated_reference_values`/
+    `internal_evidence_en`, which iterate the un-merged list. Eligibility
+    for a merged group is the AND of every member's own eligibility
+    (fail-closed: one incomplete/ineligible assessment of an otherwise
+    identical claim is enough to withhold the whole group's number)."""
+    groups: dict[tuple, dict] = {}
+    member_eligibilities: dict[tuple, list[dict]] = {}
+    for rv in values:
+        key = (
+            rv.get("value_type"),
+            rv.get("value"),
+            rv.get("lower_value"),
+            rv.get("upper_value"),
+            rv.get("unit_label"),
+            rv.get("population_label"),
+        )
+        if key not in groups:
+            groups[key] = {**rv, "asserted_in": []}
+            member_eligibilities[key] = []
+        groups[key]["asserted_in"].extend(rv["asserted_in"])
+        member_eligibilities[key].append(rv["review_eligibility"])
+
+    merged: list[dict] = []
+    for key, g in groups.items():
+        elig_list = member_eligibilities[key]
+        all_eligible = all(e["consumer_guidance_eligible"] for e in elig_list)
+        reasons = sorted({r for e in elig_list for r in e["reasons"]})
+        basis_sources = {e["basis_source"] for e in elig_list}
+        basis_source = (
+            "automated" if "automated" in basis_sources else "editorial_override" if "editorial_override" in basis_sources else "unresolved"
+        )
+        g["review_eligibility"] = {
+            "operator_inspectable": True,
+            "consumer_guidance_eligible": all_eligible,
+            "reasons": reasons,
+            "basis_source": basis_source,
+        }
+        g["asserted_in"] = sorted(g["asserted_in"], key=lambda a: a.get("date_of_evaluation") or "")
+        merged.append(g)
+    return merged
+
+
 _VALUE_TYPE_LABEL_EN = {
     "ADI": "Acceptable Daily Intake (ADI)",
     "ARfD": "Acute Reference Dose (ARfD)",
@@ -309,75 +430,129 @@ def _claim_citation(rv: dict) -> str:
     return " ".join(parts) if parts else "(source dossier not identified)"
 
 
-def _paraphrase_reference_value_en(rv: dict) -> str:
-    """A readable EN paraphrase built only from structured, already-
-    extracted fields (never from reformatting the free-text
-    justification -- see module docstring). The verbatim source text
-    lives separately in the internal evidence section this claim links
-    to via `_claim_citation`."""
+def _short_citation(rv: dict) -> str:
+    """A concise inline citation (dates only) for a paragraph -- the full
+    title/DOI already lives once in the Sources section, so paragraphs
+    are not overwhelmed by repeating it (task: "should not overwhelm each
+    paragraph")."""
+    dates = _claim_dates(rv)
+    return f"({', '.join(dates)})" if dates else "(date not extracted)"
+
+
+def _resolved_basis_text(rv: dict, editorial: EditorialEntry | None) -> tuple[str | None, str | None]:
+    """Returns (basis_en, basis_bg) -- from the automated field when
+    resolved, from the editorial override when that's how this record
+    became eligible, else (None, None). Never guesses."""
+    basis_source = (rv.get("review_eligibility") or {}).get("basis_source")
+    if basis_source == "automated":
+        basis = (rv.get("chemical_basis") or {}).get("basis")
+        return basis, _bg_basis(basis)
+    if basis_source == "editorial_override" and editorial and editorial.editorial_chemical_basis:
+        eb = editorial.editorial_chemical_basis
+        return eb["basis_en"], eb["basis_bg"]
+    return None, None
+
+
+def _finding_sentence_en(rv: dict, editorial: EditorialEntry | None) -> str:
+    """Describes one finding for "Effects and conditions". Shows the
+    actual magnitude only when the record is consumer_guidance_eligible
+    -- the exact same test "Intake guidance" uses (task: "moving a number
+    between headings must not bypass the same ... eligibility rules")."""
+    eligible = rv["review_eligibility"]["consumer_guidance_eligible"]
     value_type = rv.get("value_type")
-    type_label = _VALUE_TYPE_LABEL_EN.get(value_type, value_type or "an unspecified reference value")
+    type_label = _VALUE_TYPE_LABEL_EN.get(value_type, value_type or "a reference value")
+    n = len(rv["asserted_in"])
+    cite = _short_citation(rv)
+    reaffirmed = f" Reaffirmed across {n} separate assessments." if n > 1 else ""
     magnitude = rv.get("value") or rv.get("lower_value") or rv.get("upper_value")
     unit = rv.get("unit_label")
-    population = rv.get("population_label")
-    basis = (rv.get("chemical_basis") or {}).get("basis")
-    n = len(rv["asserted_in"])
-    citation = _claim_citation(rv)
 
-    if rv.get("feed_or_livestock_context"):
-        lead = f"An animal-feed (not human food) assessment considered {type_label}"
-        if magnitude and unit:
-            lead += f" of {magnitude} {unit}"
-        if population:
-            lead += f" for the population described as {population!r}"
-        lead += "."
-        tail = " This is a feed/occupational-context finding and is not applicable to human dietary guidance."
-    elif magnitude and unit and population:
-        basis_phrase = f", with a chemical basis of {basis}" if basis else " (the figure's exact chemical basis was not resolved from the source text)"
-        lead = f"EFSA set {type_label} of {magnitude} {unit} for the general {population} population{basis_phrase}."
-        tail = f" Reaffirmed in {n} separate EFSA assessments." if n > 1 else ""
-    elif not magnitude:
-        lead = f"EFSA's opinion on {type_label} did not state a specific numeric limit for this identity in the extracted text."
-        tail = " See the internal evidence quote below for the source's own wording."
-    else:
-        lead = f"EFSA recorded {type_label} with some fields ({'unit' if not unit else ''}{' and ' if not unit and not population else ''}{'population' if not population else ''}) not resolved from the source text."
-        tail = ""
-    return f"{lead}{tail} (Source: {citation}.)"
+    if eligible and magnitude and unit:
+        basis_en, _ = _resolved_basis_text(rv, editorial)
+        basis_phrase = f", chemical basis: {basis_en}" if basis_en else ""
+        return f"EFSA set {type_label} of {magnitude} {unit} for the general consumer population{basis_phrase}. {cite}{reaffirmed}"
+    if not magnitude:
+        return f"EFSA's opinion on {type_label} did not state a specific numeric limit for this identity in the extracted text. {cite} See internal evidence for the source's own wording."
+    return (
+        f"EFSA's opinion references {type_label} for this identity, but the specific figure is not shown "
+        f"here pending review of this preview's eligibility criteria (see the internal review notes for "
+        f"exactly which criterion). {cite} See internal evidence and Sources for detail."
+    )
 
 
-def _paraphrase_reference_value_bg(rv: dict) -> str:
-    """BG counterpart of `_paraphrase_reference_value_en`, expressing the
-    same certainty and conditions -- not a translation of the EN string,
-    but an independent rendering of the same structured facts, so a
-    reviewer can check either against the same underlying data."""
+def _finding_sentence_bg(rv: dict, editorial: EditorialEntry | None) -> str:
+    """BG counterpart of `_finding_sentence_en` -- an independent
+    rendering of the same structured facts and the same eligibility
+    gate, not a translation of the EN string."""
+    eligible = rv["review_eligibility"]["consumer_guidance_eligible"]
     value_type = rv.get("value_type")
-    type_label = _VALUE_TYPE_LABEL_BG.get(value_type, value_type or "неопределена референтна стойност")
+    type_label = _VALUE_TYPE_LABEL_BG.get(value_type, value_type or "референтна стойност")
+    n = len(rv["asserted_in"])
+    cite = _short_citation(rv)
+    reaffirmed = f" Потвърдено в {n} отделни оценки." if n > 1 else ""
     magnitude = rv.get("value") or rv.get("lower_value") or rv.get("upper_value")
     unit = rv.get("unit_label")
-    population = rv.get("population_label")
-    basis = (rv.get("chemical_basis") or {}).get("basis")
-    n = len(rv["asserted_in"])
-    citation = _claim_citation(rv)
 
-    if rv.get("feed_or_livestock_context"):
-        lead = f"Оценка за фуражна добавка (не за храна за хора) определя {type_label}"
-        if magnitude and unit:
-            lead += f" от {magnitude} {unit}"
-        if population:
-            lead += f" за популация, описана като {population!r}"
-        lead += "."
-        tail = " Това е констатация в контекст на фураж/условия на труд и не е приложима като насока за хранене на хора."
-    elif magnitude and unit and population:
-        basis_phrase = f", с химична основа {basis}" if basis else " (точната химична основа на стойността не е установена от текста на източника)"
-        lead = f"ЕФСА определя {type_label} от {magnitude} {unit} за общата популация от потребители{basis_phrase}."
-        tail = f" Потвърдено в {n} отделни оценки на ЕФСА." if n > 1 else ""
-    elif not magnitude:
-        lead = f"Становището на ЕФСА относно {type_label} не посочва конкретна числена граница за тази идентичност в извлечения текст."
-        tail = " Вижте вътрешния цитат по-долу за точната формулировка на източника."
-    else:
-        lead = f"ЕФСА е регистрирала {type_label}, като някои полета не са установени от текста на източника."
-        tail = ""
-    return f"{lead}{tail} (Източник: {citation}.)"
+    if eligible and magnitude and unit:
+        _, basis_bg = _resolved_basis_text(rv, editorial)
+        basis_phrase = f", химична основа: {basis_bg}" if basis_bg else ""
+        return f"ЕФСА определя {type_label} от {magnitude} {_bg_unit(unit)} за общото население (потребители){basis_phrase}. {cite}{reaffirmed}"
+    if not magnitude:
+        return f"Становището на ЕФСА относно {type_label} не посочва конкретна числена граница за тази идентичност в извлечения текст. {cite} Вижте вътрешния цитат за точната формулировка на източника."
+    return (
+        f"Становището на ЕФСА споменава {type_label} за тази идентичност, но конкретната стойност не е "
+        f"показана тук до извършване на преглед на критериите за допустимост на този преглед (вижте "
+        f"вътрешните бележки за преглед за точния критерий). {cite} Вижте вътрешния цитат и източниците за подробности."
+    )
+
+
+_PERIOD_EN = {"ADI": "a chronic, daily intake limit", "ARfD": "an acute, single-dose intake limit"}
+_PERIOD_BG = {"ADI": "хроничен, дневен лимит на прием", "ARfD": "остър лимит на прием при еднократна доза"}
+
+
+def _intake_sentence_en(rv: dict, editorial: EditorialEntry | None) -> str:
+    value_type = rv.get("value_type")
+    type_label = _VALUE_TYPE_LABEL_EN.get(value_type, value_type)
+    magnitude = rv.get("value") or rv.get("lower_value") or rv.get("upper_value")
+    unit = rv.get("unit_label")
+    basis_en, _ = _resolved_basis_text(rv, editorial)
+    period = _PERIOD_EN.get(value_type, "an intake limit")
+    cite = _short_citation(rv)
+    n = len(rv["asserted_in"])
+    reaffirmed = f" Established/reaffirmed across {n} separate EFSA assessments." if n > 1 else ""
+    text = f"{type_label}: {magnitude} {unit}, for the general consumer population, expressed as {period}"
+    if basis_en:
+        text += f" (chemical basis: {basis_en})"
+    text += f". {cite}{reaffirmed}"
+    text += (
+        " This is a regulatory reference threshold, not a recommended target intake and not a product "
+        "portion size -- it does not by itself indicate how much of any specific product can be safely "
+        "consumed, which depends on that product's actual ingredient concentration (not calculated here)."
+    )
+    return text
+
+
+def _intake_sentence_bg(rv: dict, editorial: EditorialEntry | None) -> str:
+    value_type = rv.get("value_type")
+    type_label = _VALUE_TYPE_LABEL_BG.get(value_type, value_type)
+    magnitude = rv.get("value") or rv.get("lower_value") or rv.get("upper_value")
+    unit = rv.get("unit_label")
+    _, basis_bg = _resolved_basis_text(rv, editorial)
+    period = _PERIOD_BG.get(value_type, "лимит на прием")
+    cite = _short_citation(rv)
+    n = len(rv["asserted_in"])
+    reaffirmed = f" Установено/потвърдено в {n} отделни оценки на ЕФСА." if n > 1 else ""
+    text = f"{type_label}: {magnitude} {_bg_unit(unit)}, за общото население (потребители), изразено като {period}"
+    if basis_bg:
+        text += f" (химична основа: {basis_bg})"
+    text += f". {cite}{reaffirmed}"
+    text += (
+        " Това е регулаторен референтен праг, а не препоръчителна целева доза и не е размер на порция "
+        "продукт -- само по себе си не показва каква точно количество от конкретен продукт може да се "
+        "консумира безопасно, което зависи от действителната концентрация на съставката в продукта (не е "
+        "изчислено тук)."
+    )
+    return text
 
 
 def _internal_evidence_entry(rv: dict) -> str:
@@ -387,6 +562,18 @@ def _internal_evidence_entry(rv: dict) -> str:
     quote = rv.get("justification_and_comments") or "(no justification text extracted)"
     citation = _claim_citation(rv)
     return f"[{rv.get('value_type')}, {citation}] “{quote}”"
+
+
+_EVIDENCE_TYPE_TAG_EN = {
+    "human": "(human evidence)",
+    "animal_in_vitro": "(animal/in-vitro evidence)",
+    "assessment_conclusion": "(assessment conclusion)",
+}
+_EVIDENCE_TYPE_TAG_BG = {
+    "human": "(данни при хора)",
+    "animal_in_vitro": "(данни от животни/ин витро)",
+    "assessment_conclusion": "(заключение на оценката)",
+}
 
 
 def build_profile(
@@ -402,11 +589,22 @@ def build_profile(
     if match_result.overall_status != "exact_match":
         raise ValueError("build_profile only applies to an exact_match MatchResult")
 
-    bundles = build_dossier_bundles(match_result.exact_dossiers, dossiers_dir, codebook)
+    editorial = get_editorial_entry(catalogue_identity.e_number_normalized)
+    editorial_basis = editorial.editorial_chemical_basis if editorial else None
+
+    bundles = build_dossier_bundles(match_result.exact_dossiers, dossiers_dir, codebook, editorial_basis=editorial_basis)
     ok_bundles = [b for b in bundles if b.status == "ok"]
     extraction_errors = [b for b in bundles if b.status != "ok"]
 
     deduped_values = _dedupe_reference_values(ok_bundles)
+    # Feed/worker (FEEDAP, occupational) findings are kept in full in
+    # deduped_values/dossier_bundles for operator inspection, but never
+    # appear anywhere in the consumer-facing draft at all (task: "Keep
+    # feed/worker guidance out of the consumer preview, retaining it only
+    # in operator evidence") -- not merely caveated inline as before.
+    consumer_values = [v for v in deduped_values if not v.get("feed_or_livestock_context")]
+    # Coarser grouping for the draft text only -- see _group_for_consumer_display.
+    display_values = _group_for_consumer_display(consumer_values)
     human_health_total = sum(len(b.human_health_endpoints or []) for b in ok_bundles)
     all_evidence_complete = all(b.evidence_complete for b in ok_bundles) if ok_bundles else False
 
@@ -426,51 +624,106 @@ def build_profile(
     else:
         outcome = "ready_for_human_review"
 
-    # Fields the presentation spec's "What it is" / "Purpose in food"
-    # sections would need: this dataset's own reference values and
-    # endpoint summaries never carry plain-language identity/origin or
-    # technological-function text, so those two sections are never
-    # fabricated -- omitted from both drafts, with the omission recorded
-    # here (internal-only; task: "retain omitted-field notes internally"
-    # even when the empty section itself is hidden from the drafts).
-    omitted_sections = [
-        {
-            "section": "What it is",
-            "reason": "no plain-language identity/origin text is extracted from OpenFoodTox reference values or endpoints",
-        },
-        {
-            "section": "Purpose in food",
-            "reason": "no sourced technological-function text is extracted from OpenFoodTox for this identity",
-        },
-        {
-            "section": "Intake guidance",
-            "reason": (
-                "gated on scientific review (statuses.scientific_review); every profile in this pilot is "
-                "deliberately not_reviewed, so no numeric guidance section is ever shown, even for a "
-                "consumer_guidance_eligible reference value"
-            ),
-        },
-    ]
+    claim_matrix: list[dict[str, str]] = []
 
+    def _claim(section: str, claim_en: str, source_kind: str, source: str) -> None:
+        claim_matrix.append({"section": section, "claim_en": claim_en, "source_kind": source_kind, "source": source})
+
+    omitted_sections: list[dict[str, str]] = []
     en_sections: list[str] = []
     bg_sections: list[str] = []
-    internal_evidence: list[str] = []
-    if deduped_values:
-        en_sections.append(
-            "## Effects and conditions\n\n" + "\n\n".join(_paraphrase_reference_value_en(v) for v in deduped_values)
-        )
-        bg_sections.append(
-            "## Ефекти и условия\n\n" + "\n\n".join(_paraphrase_reference_value_bg(v) for v in deduped_values)
-        )
-        internal_evidence = [_internal_evidence_entry(v) for v in deduped_values]
+
+    # --- What it is / Purpose in food -----------------------------------
+    if editorial and editorial.identity:
+        en_sections.append(f"## What it is\n\n{editorial.identity.en}")
+        bg_sections.append(f"## Какво представлява\n\n{editorial.identity.bg}")
+        _claim("what_it_is", editorial.identity.en, editorial.identity.source_kind, editorial.identity.source)
     else:
-        en_sections.append(
-            "## Effects and conditions\n\n(No reference-value evidence was extracted for this identity in the matched dossiers; hidden rather than shown empty.)"
-        )
-        bg_sections.append(
-            "## Ефекти и условия\n\n(За тази идентичност не са извлечени референтни стойности от съпоставените досиета.)"
+        omitted_sections.append({"section": "What it is", "reason": "no sourced identity/origin content available for this identity"})
+
+    if editorial and editorial.purpose:
+        en_sections.append(f"## Purpose in food\n\n{editorial.purpose.en}")
+        bg_sections.append(f"## Роля в храната\n\n{editorial.purpose.bg}")
+        _claim("purpose_in_food", editorial.purpose.en, editorial.purpose.source_kind, editorial.purpose.source)
+    else:
+        omitted_sections.append({"section": "Purpose in food", "reason": "no sourced technological-function content available for this identity"})
+
+    # --- Effects and conditions ------------------------------------------
+    effects_en: list[str] = []
+    effects_bg: list[str] = []
+    has_assessment_conclusion = False
+    if editorial:
+        for note in editorial.effects:
+            effects_en.append(f"{note.text.en} {_EVIDENCE_TYPE_TAG_EN[note.evidence_type]}")
+            effects_bg.append(f"{note.text.bg} {_EVIDENCE_TYPE_TAG_BG[note.evidence_type]}")
+            _claim("effects", note.text.en, note.text.source_kind, note.text.source)
+            if note.evidence_type == "assessment_conclusion":
+                has_assessment_conclusion = True
+
+    # Population exceptions (e.g. PKU) must sit adjacent to a shown ADI or
+    # general-population safety conclusion, not be buried under Sources --
+    # placed once here (right after any assessment-conclusion narrative)
+    # and again in Intake guidance below if that section exists, rather
+    # than after every single sentence (which would itself violate "avoid
+    # repetitive sections").
+    if editorial and editorial.population_exceptions and has_assessment_conclusion:
+        for exc in editorial.population_exceptions:
+            effects_en.append(exc.en)
+            effects_bg.append(exc.bg)
+            _claim("effects_population_exception", exc.en, exc.source_kind, exc.source)
+
+    for rv in display_values:
+        finding_en = _finding_sentence_en(rv, editorial)
+        effects_en.append(finding_en)
+        effects_bg.append(_finding_sentence_bg(rv, editorial))
+        _claim("effects_reference_value", finding_en, "openfoodtox_dossier", _claim_citation(rv))
+        if rv["review_eligibility"]["consumer_guidance_eligible"] and editorial and editorial.population_exceptions and not has_assessment_conclusion:
+            # Only reached if no editorial assessment-conclusion note already carried the exception above.
+            for exc in editorial.population_exceptions:
+                effects_en.append(exc.en)
+                effects_bg.append(exc.bg)
+                _claim("effects_population_exception", exc.en, exc.source_kind, exc.source)
+
+    if editorial and editorial.group_scope_note:
+        effects_en.append(editorial.group_scope_note.en)
+        effects_bg.append(editorial.group_scope_note.bg)
+        _claim("effects_group_scope", editorial.group_scope_note.en, editorial.group_scope_note.source_kind, editorial.group_scope_note.source)
+
+    if effects_en:
+        en_sections.append("## Effects and conditions\n\n" + "\n\n".join(effects_en))
+        bg_sections.append("## Ефекти и условия\n\n" + "\n\n".join(effects_bg))
+    else:
+        en_sections.append("## Effects and conditions\n\n(No substantive effects evidence was extracted for this identity in the matched dossiers; hidden rather than shown empty.)")
+        bg_sections.append("## Ефекти и условия\n\n(За тази идентичност не са извлечени съществени данни за ефекти от съпоставените досиета.)")
+
+    internal_evidence = [_internal_evidence_entry(v) for v in deduped_values]
+
+    # --- Intake guidance ---------------------------------------------------
+    eligible_values = [v for v in display_values if v["review_eligibility"]["consumer_guidance_eligible"]]
+    if eligible_values:
+        intake_en: list[str] = []
+        intake_bg: list[str] = []
+        for rv in eligible_values:
+            intake_sentence_en = _intake_sentence_en(rv, editorial)
+            intake_en.append(intake_sentence_en)
+            intake_bg.append(_intake_sentence_bg(rv, editorial))
+            _claim("intake_guidance", intake_sentence_en, "openfoodtox_dossier", _claim_citation(rv))
+            if editorial and editorial.population_exceptions:
+                for exc in editorial.population_exceptions:
+                    intake_en.append(exc.en)
+                    intake_bg.append(exc.bg)
+                    _claim("intake_guidance_population_exception", exc.en, exc.source_kind, exc.source)
+        en_sections.append("## Intake guidance\n\n" + "\n\n".join(intake_en))
+        bg_sections.append("## Насоки за прием\n\n" + "\n\n".join(intake_bg))
+    else:
+        omitted_sections.append(
+            {
+                "section": "Intake guidance",
+                "reason": "no reference value for this identity is consumer_guidance_eligible (see each value's review_eligibility.reasons)",
+            }
         )
 
+    # --- Sources -------------------------------------------------------------
     sources_en = ["## Sources"]
     sources_bg = ["## Източници"]
     for b in ok_bundles:
@@ -479,11 +732,34 @@ def build_profile(
             cite += f" -- {b.persistent_identifier}"
         sources_en.append(cite)
         sources_bg.append(cite)  # citations are not translated (titles/DOIs stay as published)
+    if editorial and editorial.external_sources:
+        sources_en.append("\n**External sources** (editorial content for this review task, distinct from OpenFoodTox-extracted evidence above):")
+        sources_bg.append("\n**Външни източници** (редакционно съдържание за тази задача за преглед, отделно от извлечените по-горе доказателства от OpenFoodTox):")
+        for s in editorial.external_sources:
+            line = f"- {s['title']} -- {s['url']} (accessed {s['access_date']})"
+            if s.get("note"):
+                line += f" {s['note']}"
+            sources_en.append(line)
+            sources_bg.append(line)  # titles/URLs intentionally kept in their original language
     en_sections.append("\n".join(sources_en))
     bg_sections.append("\n".join(sources_bg))
 
     header_en = f"# {catalogue_identity.common_name} ({catalogue_identity.e_number_raw})\n\nStatus: DRAFT -- not scientifically reviewed, not translation-reviewed, not publication-ready."
     header_bg = f"# {catalogue_identity.common_name} ({catalogue_identity.e_number_raw})\n\nСтатус: ЧЕРНОВА -- не е научно прегледано, не е прегледан преводът, не е готово за публикуване."
+
+    remaining_uncertainties = [o["reason"] for o in omitted_sections]
+    for rv in display_values:
+        if not rv["review_eligibility"]["consumer_guidance_eligible"]:
+            remaining_uncertainties.append(
+                f"{rv.get('value_type')} ({_claim_citation(rv)}): " + "; ".join(rv["review_eligibility"]["reasons"])
+            )
+    if editorial_basis:
+        remaining_uncertainties.append(
+            f"Chemical basis for the eligible reference value above (shown in the draft as "
+            f"{editorial_basis['basis_en']!r}) relies on this session's direct reading of the primary "
+            f"source text (editorial_override), not on the automated chemical_basis.py match: "
+            f"{editorial_basis.get('explanation_en', '')} Source: {editorial_basis.get('source', '')}"
+        )
 
     return {
         "catalogue_identity": catalogue_identity.to_dict(),
@@ -497,7 +773,12 @@ def build_profile(
         "dossier_bundles": [b.to_dict() for b in bundles],
         "extraction_errors": [b.to_dict() for b in extraction_errors],
         "deduplicated_reference_values": deduped_values,
+        "consumer_draft_excluded_feed_or_worker_value_count": len(deduped_values) - len(consumer_values),
         "human_health_endpoint_count": human_health_total,
+        "editorial_content_version": EDITORIAL_CONTENT_VERSION if editorial else None,
+        "editorial_chemical_basis": editorial_basis,
+        "claim_source_matrix": claim_matrix,
+        "remaining_uncertainties": remaining_uncertainties,
         "omitted_sections_internal_note": omitted_sections,
         "statuses": statuses,
         "outcome": outcome,
@@ -506,28 +787,3 @@ def build_profile(
         "internal_evidence_en": "## Internal evidence (verbatim source quotations -- not for direct publication)\n\n"
         + ("\n\n".join(internal_evidence) if internal_evidence else "(none extracted)"),
     }
-
-
-def _format_reference_value_bg(rv: dict) -> str:
-    magnitude = rv.get("value") or rv.get("lower_value") or rv.get("upper_value")
-    unit = rv.get("unit_label") or "(единицата не е установена)"
-    population = rv.get("population_label") or "(популацията не е установена)"
-    basis = (rv.get("chemical_basis") or {}).get("basis")
-    dates = sorted({a["date_of_evaluation"] for a in rv["asserted_in"] if a.get("date_of_evaluation")})
-    date_note = f" (дата(и) на оценка: {', '.join(dates)})" if dates else " (датата на оценката не е извлечена)"
-    n = len(rv["asserted_in"])
-    reaffirmed_note = f" Потвърдено в {n} отделни оценки на ЕФСА." if n > 1 else ""
-    basis_note = (
-        f" Химична основа: {basis}." if basis else " Химичната основа не е установена от текста -- не е одобрено за числени насоки към потребителя в този вид."
-    )
-    feed_note = (
-        " ЗАБЕЛЕЖКА: тази референтна стойност произлиза от оценка за фуражна добавка (FEEDAP), а не от оценка за храна за хора, и не трябва да се представя като насока за хранене на хора."
-        if rv.get("feed_or_livestock_context")
-        else ""
-    )
-    quote = rv.get("justification_and_comments") or "(не е извлечен обосноваващ текст)"
-    return (
-        f"Референтна стойност ({rv.get('value_type')}): {magnitude or '(не е извлечена)'} {unit}, популация: {population}.{date_note}"
-        f"{reaffirmed_note}{basis_note}{feed_note}\n"
-        f"Цитат от източника (на английски език, буквален цитат -- не е преведен, за да се избегне промяна на научния/правния смисъл): “{quote}”"
-    )

@@ -150,7 +150,20 @@ def _doc_xml(document_key: str, name: str, document_type: str, content_xml: str,
 </i6c:Document>""".encode("utf-8")
 
 
-def _make_pilot_style_dossier_zip(path: str, *, cas: str, e_number_synonym: str, name: str, adi_lower_value: str, dossier_uuid: str = "dossier-1") -> None:
+def _make_pilot_style_dossier_zip(
+    path: str,
+    *,
+    cas: str,
+    e_number_synonym: str,
+    name: str,
+    adi_lower_value: str,
+    dossier_uuid: str = "dossier-1",
+    justification: str | None = None,
+    title: str | None = None,
+    date_of_evaluation: str = "2015-01-01",
+    expert_group_code: str = "133185",
+    regulation_code: str = "133164",
+) -> None:
     rs_key = f"rs-1/{dossier_uuid}"
     sub_key = f"sub-1/{dossier_uuid}"
     flex_key = f"flex-1/{dossier_uuid}"
@@ -168,13 +181,15 @@ def _make_pilot_style_dossier_zip(path: str, *, cas: str, e_number_synonym: str,
     )
     manifest = MANIFEST_TMPL.format(documents=dossier_doc + rs_doc + sub_doc + flex_doc).encode("utf-8")
 
+    title = title or f"Opinion on {name}"
+    justification = justification or f"The Panel derived an ADI of {adi_lower_value} mg {name}/kg bw per day."
     dossier_xml = _doc_xml(
         dossier_uuid,
-        f"Opinion on {name}",
+        title,
         "DOSSIER",
         f"""<DOSSIER xmlns="http://iuclid6.echa.europa.eu/namespaces/DOSSIER/9.0">
-             <LiteratureReference><EFSAOutputTitle>Opinion on {name}</EFSAOutputTitle><DateOfEvaluation>2015-01-01</DateOfEvaluation></LiteratureReference>
-             <Domain><FoodDomain><value other="food additives">119227</value></FoodDomain><Regulation><value other="Regulation (EC) No 1331/2008">133164</value></Regulation><ExpertGroup><value other="EFSA ANS">133185</value></ExpertGroup></Domain>
+             <LiteratureReference><EFSAOutputTitle>{title}</EFSAOutputTitle><DateOfEvaluation>{date_of_evaluation}</DateOfEvaluation></LiteratureReference>
+             <Domain><FoodDomain><value>119227</value></FoodDomain><Regulation><value>{regulation_code}</value></Regulation><ExpertGroup><value>{expert_group_code}</value></ExpertGroup></Domain>
            </DOSSIER>""",
     )
     rs_xml = _doc_xml(
@@ -204,7 +219,7 @@ def _make_pilot_style_dossier_zip(path: str, *, cas: str, e_number_synonym: str,
                <AcceptableDailyIntake>
                  <Adi><unitCode>2085</unitCode><lowerValue>{adi_lower_value}</lowerValue></Adi>
                  <Population><value>8521</value></Population>
-                 <JustificationAndComments>The Panel derived an ADI of {adi_lower_value} mg {name}/kg bw per day.</JustificationAndComments>
+                 <JustificationAndComments>{justification}</JustificationAndComments>
                </AcceptableDailyIntake>
              </HumanHealthHazardCharacteristics>
            </FLEXIBLE_SUMMARY.ToxRefValues>""",
@@ -217,6 +232,36 @@ def _make_pilot_style_dossier_zip(path: str, *, cas: str, e_number_synonym: str,
         zf.writestr("rs.i6d", rs_xml)
         zf.writestr("sub.i6d", sub_xml)
         zf.writestr("flex.i6d", flex_xml)
+
+
+def _build_profile_for_single_dossier_zip(tmp_path, zip_filename: str, *, e_number_raw: str, common_name: str) -> dict:
+    """Shared end-to-end harness: parse the given zip into a tiny
+    catalogue.jsonl (for matcher.py), match it by e_number_raw, then
+    build the full profile. Reused across tests that need a real
+    build_profile() output rather than calling its internal helpers
+    directly, so they also exercise editorial_content.py's real entries
+    (looked up by e_number_normalized) end to end."""
+    import json
+
+    from scripts.openfoodtox.dossier import build_dossier_record
+
+    dossiers_dir = tmp_path / "dossiers"
+    record = build_dossier_record(str(dossiers_dir / zip_filename), zip_filename, None)
+    cat_jsonl = tmp_path / "catalogue.jsonl"
+    cat_jsonl.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    cat = CatalogueIdentity(
+        id=f"test_{e_number_raw.lower()}",
+        common_name=common_name,
+        e_number_raw=e_number_raw,
+        e_number_normalized=normalize_e_number(e_number_raw),
+        cas_number_raw=None,
+        cas_number_normalized=None,
+        source="tracked_seed_json",
+    )
+    [result] = match_catalogue_against_staging([cat], str(cat_jsonl))
+    assert result.overall_status == "exact_match", result.explanation
+    return build_profile(cat, result, str(dossiers_dir), _TEST_CODEBOOK)
 
 
 class TestBuildProfileEndToEnd:
@@ -273,11 +318,17 @@ class TestBuildProfileEndToEnd:
         assert "mg/kg bw/day" in profile["draft_en"]
         assert "The Panel derived an ADI" not in profile["draft_en"]
         assert "The Panel derived an ADI" in profile["internal_evidence_en"]
-        # Intake guidance is never populated by this pilot (nothing has
-        # been scientifically reviewed yet), even though this value is
-        # consumer_guidance_eligible in shape.
-        assert "Intake guidance" not in profile["draft_en"]
-        assert any(s["section"] == "Intake guidance" for s in profile["omitted_sections_internal_note"])
+        # This record is consumer_guidance_eligible, so Intake guidance IS
+        # now shown for it (task: show it when "adequately supported" --
+        # the whole profile still stays DRAFT/not_reviewed at the top).
+        assert "Intake guidance" in profile["draft_en"]
+        assert "target intake" in profile["draft_en"]  # ADI-is-not-a-target-intake caveat present
+        assert not any(s["section"] == "Intake guidance" for s in profile["omitted_sections_internal_note"])
+        # E250 has real editorial content (identity/purpose) -- those
+        # sections are populated, not omitted, for this substance.
+        assert "What it is" in profile["draft_en"]
+        assert "Purpose in food" in profile["draft_en"]
+        assert not any(s["section"] in ("What it is", "Purpose in food") for s in profile["omitted_sections_internal_note"])
 
     def test_build_profile_rejects_non_exact_match(self, tmp_path):
         cat = CatalogueIdentity(
@@ -292,3 +343,164 @@ class TestBuildProfileEndToEnd:
             assert False, "expected ValueError"
         except ValueError:
             pass
+
+
+class TestEditorialContentCorrections:
+    """docs/OPENFOODTOX_PROFILE_CONTENT_TASK.md's four required content
+    corrections, tested for structure/presence -- not for scientific
+    truth just because a fixture contains a string (task's own
+    instruction)."""
+
+    def test_e951_pku_exception_appears_in_both_language_drafts_adjacent_to_adi(self, tmp_path):
+        dossiers_dir = tmp_path / "dossiers"
+        dossiers_dir.mkdir()
+        _make_pilot_style_dossier_zip(
+            str(dossiers_dir / "d1.i6z"),
+            cas="22839-47-0",
+            e_number_synonym="E 951",
+            name="Aspartame",
+            adi_lower_value="40",
+            # Real aspartame dossiers never repeat the substance name
+            # immediately after "mg" -- this is what makes the automated
+            # chemical-basis check unresolved for every real assessment,
+            # which is exactly the shape the editorial override path
+            # (editorial_content.EDITORIAL_CONTENT["E951"]) exists for.
+            justification="The Panel derived an ADI of 40 mg/kg bw per day for aspartame.",
+        )
+        profile = _build_profile_for_single_dossier_zip(tmp_path, "d1.i6z", e_number_raw="E951", common_name="Aspartame")
+
+        # The automated per-record chemical-basis check genuinely can't
+        # resolve this text shape -- eligibility here must come from the
+        # editorial override, proving the override path is what's doing
+        # the work, not a change to the automated extractor.
+        rv = profile["deduplicated_reference_values"][0]
+        assert rv["chemical_basis"]["status"] != "resolved"
+        assert rv["review_eligibility"]["basis_source"] == "editorial_override"
+        assert rv["review_eligibility"]["consumer_guidance_eligible"] is True
+
+        en, bg = profile["draft_en"], profile["draft_bg"]
+        assert "phenylketonuria" in en.lower()
+        assert "фенилкетонурия" in bg
+        # Adjacent to the ADI, not buried under Sources: the PKU sentence
+        # must appear before the "Sources" heading in both languages, and
+        # at least twice (once near the ADI finding in "Effects and
+        # conditions", once in "Intake guidance") -- see the review
+        # task's "whenever the ADI or general-population safety
+        # conclusion is shown" requirement.
+        assert en.lower().count("phenylketonuria") >= 2
+        assert bg.count("фенилкетонурия") >= 2
+        assert en.lower().find("phenylketonuria") < en.find("## Sources")
+        assert bg.find("фенилкетонурия") < bg.find("## Източници")
+
+    def test_e150d_group_adi_scope_preserved_not_individual_allowance(self, tmp_path):
+        dossiers_dir = tmp_path / "dossiers"
+        dossiers_dir.mkdir()
+        _make_pilot_style_dossier_zip(
+            str(dossiers_dir / "d1.i6z"),
+            cas="",
+            e_number_synonym="E 150d",
+            name="Sulphite ammonia caramel",
+            adi_lower_value="300",
+            justification="Comments: ADI (group)",  # matches the real dossier's own terse text
+            date_of_evaluation="2011-02-03",
+        )
+        profile = _build_profile_for_single_dossier_zip(tmp_path, "d1.i6z", e_number_raw="E150d", common_name="Sulphite ammonia caramel")
+
+        rv = profile["deduplicated_reference_values"][0]
+        assert rv["chemical_basis"]["status"] != "resolved"
+        assert rv["review_eligibility"]["consumer_guidance_eligible"] is False
+
+        for draft in (profile["draft_en"], profile["draft_bg"]):
+            # Group scope is stated -- never "an independent allowance for
+            # E150d alone" (the editorial content's own group_scope note).
+            assert "group" in draft.lower() or "групов" in draft.lower()
+            # Intake guidance is never shown at all for this identity
+            # (nothing passed the eligibility gate) -- the exact same gate
+            # "Effects and conditions" uses (see next test).
+            assert "## Intake guidance" not in draft and "## Насоки за прием" not in draft
+        assert any(s["section"] == "Intake guidance" for s in profile["omitted_sections_internal_note"])
+
+    def test_numeric_gating_is_identical_between_effects_and_intake_sections(self, tmp_path):
+        """Regression for the review task's own complaint: a value that
+        is not consumer_guidance_eligible must never show its magnitude
+        in "Effects and conditions" either, just because "Intake
+        guidance" happens to be a separate, hidden section."""
+        dossiers_dir = tmp_path / "dossiers"
+        dossiers_dir.mkdir()
+        _make_pilot_style_dossier_zip(
+            str(dossiers_dir / "d1.i6z"),
+            cas="",
+            e_number_synonym="E 150d",
+            name="Sulphite ammonia caramel",
+            adi_lower_value="300",
+            justification="Comments: ADI (group)",
+        )
+        profile = _build_profile_for_single_dossier_zip(tmp_path, "d1.i6z", e_number_raw="E150d", common_name="Sulphite ammonia caramel")
+        rv = profile["deduplicated_reference_values"][0]
+        assert rv["review_eligibility"]["consumer_guidance_eligible"] is False
+        # The record's own number (300) only appears via the editorial
+        # scope narrative (independently sourced from the primary
+        # opinion, see editorial_content.py), never as a restatement of
+        # *this ineligible record's own* figure in either draft section.
+        effects_section = profile["draft_en"].split("## Effects and conditions", 1)[1].split("## Sources", 1)[0]
+        assert "not shown" in effects_section or "pending review" in effects_section
+
+    def test_date_types_kept_distinct_for_e951_superseding_opinion(self):
+        from scripts.openfoodtox.editorial_content import EDITORIAL_CONTENT
+
+        e951 = EDITORIAL_CONTENT["E951"]
+        combined = " ".join(n.text.en for n in e951.effects) + " " + " ".join(s.get("note", "") for s in e951.external_sources)
+        assert "First published: 10 September 2026" in combined
+        assert "Approved: 1 July 2026" in combined
+        # The two dates must actually be recorded as distinct strings, not
+        # collapsed into a single "adopted on" date.
+        assert "10 September 2026" != "1 July 2026"
+        # The opinion's own scope is described precisely -- never "every
+        # part of the 2013 opinion was superseded".
+        assert "within the E962 re-evaluation" in combined or "within the E 962 re-evaluation" in combined
+
+    def test_feed_context_values_excluded_from_consumer_draft_entirely(self, tmp_path):
+        """Task: "Keep feed/worker guidance out of the consumer preview,
+        retaining it only in operator evidence" -- not merely caveated
+        inline (the pre-review-task behavior)."""
+        feed_codebook = Codebook(
+            unit={"2085": "mg/kg bw/day"},
+            value_by_xsl={
+                "FLEXIBLE_SUMMARY-ToxRefValues.xsl": {"8521": "consumers"},
+                "DOSSIER.xsl": {"999001": "EFSA FEEDAP", "999002": "Regulation (EC) No 1831/2003 (amended)"},
+            },
+        )
+        dossiers_dir = tmp_path / "dossiers"
+        dossiers_dir.mkdir()
+        _make_pilot_style_dossier_zip(
+            str(dossiers_dir / "d1.i6z"),
+            cas="77-92-9",
+            e_number_synonym="E 330",
+            name="Citric acid",
+            adi_lower_value="15000",
+            expert_group_code="999001",
+            regulation_code="999002",
+            justification="Remarks: safe for the target species at 15000 mg citric acid/kg feedingstuffs.",
+        )
+        import json
+
+        from scripts.openfoodtox.dossier import build_dossier_record
+        from scripts.openfoodtox.matcher import match_catalogue_against_staging
+
+        record = build_dossier_record(str(dossiers_dir / "d1.i6z"), "d1.i6z", feed_codebook)
+        assert record["dossier_summary"]["expert_group_label"] == "EFSA FEEDAP"  # fixture sanity check
+        cat_jsonl = tmp_path / "catalogue.jsonl"
+        cat_jsonl.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        cat = CatalogueIdentity(
+            id="test_e330", common_name="Citric acid", e_number_raw="E330", e_number_normalized="E330",
+            cas_number_raw=None, cas_number_normalized=None, source="tracked_seed_json",
+        )
+        [result] = match_catalogue_against_staging([cat], str(cat_jsonl))
+        profile = build_profile(cat, result, str(dossiers_dir), feed_codebook)
+
+        rv = profile["deduplicated_reference_values"][0]
+        assert rv["feed_or_livestock_context"] is True
+        assert profile["consumer_draft_excluded_feed_or_worker_value_count"] == 1
+        assert "15000" not in profile["draft_en"]
+        assert "15000" not in profile["draft_bg"]
+        assert "15000" in profile["internal_evidence_en"]  # retained for operator inspection
