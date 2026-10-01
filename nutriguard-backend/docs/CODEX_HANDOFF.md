@@ -1,5 +1,15 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: targeted final profile review assigned (Codex, docs only)
+
+- Added docs/OPENFOODTOX_FINAL_PROFILE_REVIEW_TASK.md against b915ccd: close
+  editorial numeric-gating bypass, localize headings, and commit precise primary
+  source mappings instead of relying on seed files/vague references as evidence.
+- Requested reconciliation of summary test count (858) versus committed handoff
+  (853); neither was independently rerun by Codex. Docs-only git diff --check.
+- No implementation/live changes, main merge or deployment. Next: Claude fetches
+  this task, applies only scoped corrections and returns regenerated drafts/tests.
+
 ## 2026-10-01: four-profile content completion assigned (Codex, docs only)
 
 - Reviewed 40d063444358086c2b47dbe1a2a7386b9509349d drafts and official EFSA
