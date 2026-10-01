@@ -208,51 +208,33 @@ EDITORIAL_CONTENT: dict[str, EditorialEntry] = {
                 "assessment_conclusion",
                 SourcedText(
                     en=(
-                        "EFSA's 2011 re-evaluation set a GROUP Acceptable Daily Intake of 300 mg/kg body "
-                        "weight per day that applies to the COMBINED exposure to all four caramel "
-                        "colours (E150a, b, c and d) together -- it is not an independent allowance for "
-                        "E150d alone."
+                        "EFSA's 2011 re-evaluation set a GROUP Acceptable Daily Intake that applies to "
+                        "the COMBINED exposure to all four caramel colours (E150a, b, c and d) together "
+                        "-- it is not an individual allowance for E150d alone. Only E150c (ammonia "
+                        "caramel, a different substance from the one in this profile) carries an "
+                        "additional, stricter limit of its own within that group total, due to "
+                        "uncertainty about a possible immune-system effect observed in animals for one "
+                        "of its constituents; E150d itself carries no separate limit beyond the group "
+                        "figure. The exact figures are not shown in this preview (see Numeric gating "
+                        "note below)."
                     ),
                     bg=(
-                        "Преоценката на ЕФСА от 2011 г. определя ГРУПОВА допустима дневна доза (ADI) от "
-                        "300 мг/кг телесно тегло дневно, която се прилага за КОМБИНИРАНАТА експозиция на "
-                        "всичките четири карамелени оцветителя (E150a, b, c и d) заедно -- това не е "
-                        "самостоятелно допустимо количество само за E150d."
+                        "Преоценката на ЕФСА от 2011 г. определя ГРУПОВА допустима дневна доза (ADI), "
+                        "която се прилага за КОМБИНИРАНАТА експозиция на всичките четири карамелени "
+                        "оцветителя (E150a, b, c и d) заедно -- това не е индивидуално допустимо "
+                        "количество само за E150d. Само E150c (амонячен карамел, различно вещество от "
+                        "разглежданото в този профил) носи собствена допълнителна, по-строга граница в "
+                        "рамките на тази обща стойност, поради несигурност относно възможен ефект върху "
+                        "имунната система, наблюдаван при животни за една от съставките му; E150d не "
+                        "носи отделна граница извън груповата стойност. Точните стойности не са показани "
+                        "в този преглед (вижте бележката за числова допустимост по-долу)."
                     ),
                     source_kind="external_primary_source",
                     source=(
                         "EFSA ANS Panel, Scientific Opinion on the re-evaluation of caramel colours "
                         "(E150a,b,c,d) as food additives, doi:10.2903/j.efsa.2011.2004, March 2011; "
-                        "independently confirmed via EFSA-sourced secondary reporting, read 2026-10-01. "
-                        "The OpenFoodTox dossier's own extracted justification text for this record is "
-                        "only \"Comments: ADI (group)\" -- consistent with this figure but not itself "
-                        "sufficient to validate the number, which is why the automated chemical-basis "
-                        "check for this record remains unresolved (see group_scope_note)."
+                        "independently confirmed via EFSA-sourced secondary reporting, read 2026-10-01."
                     ),
-                ),
-            ),
-            EffectNote(
-                "assessment_conclusion",
-                SourcedText(
-                    en=(
-                        "For context, within that group total, E150c (ammonia caramel, a different "
-                        "substance from the one in this profile) alone carries an additional, stricter "
-                        "sub-ADI of 100 mg/kg bw/day, due to uncertainty about possible immune-system "
-                        "effects observed in animals for one of its constituents (THI, "
-                        "2-acetyl-4-tetrahydroxybutylimidazole). E150d itself carries no separate "
-                        "sub-ADI beyond the 300 mg/kg bw/day group figure."
-                    ),
-                    bg=(
-                        "За контекст, в рамките на тази обща групова стойност, само E150c (амонячен "
-                        "карамел, различно вещество от разглежданото в този профил) носи допълнителна, "
-                        "по-строга подгрупова ADI от 100 мг/кг телесно тегло дневно, поради несигурност "
-                        "относно възможни ефекти върху имунната система, наблюдавани при животни за "
-                        "една от съставките му (THI, 2-ацетил-4-тетрахидроксибутилимидазол). E150d не "
-                        "носи отделна подгрупова ADI извън груповата стойност от 300 мг/кг телесно "
-                        "тегло дневно."
-                    ),
-                    source_kind="external_primary_source",
-                    source="Same 2011 EFSA opinion as above; read 2026-10-01.",
                 ),
             ),
             EffectNote(
@@ -279,27 +261,40 @@ EDITORIAL_CONTENT: dict[str, EditorialEntry] = {
                 ),
             ),
         ],
-        group_scope_note=SourcedText(
-            en=(
-                "Chemical-basis note: OpenFoodTox's own extracted justification text for this specific "
-                "record is a short, non-descriptive comment (\"ADI (group)\") with no numeric magnitude "
-                "to validate -- the automated chemical-basis check for this record is kept UNRESOLVED "
-                "rather than guessed at, even though the 300 mg/kg bw/day group figure and its scope "
-                "are independently confirmed above via the primary opinion. For this reason the figure "
-                "is not shown as an eligible intake number in this preview."
-            ),
-            bg=(
-                "Бележка за химичната основа: собственият извлечен от OpenFoodTox обосноваващ текст за "
-                "този конкретен запис е кратък, неописателен коментар (\"ADI (group)\") без числена "
-                "стойност за проверка -- автоматизираната проверка на химичната основа за този запис се "
-                "запазва като НЕУСТАНОВЕНА, вместо да се предполага, въпреки че груповата стойност от "
-                "300 мг/кг телесно тегло дневно и нейният обхват са независимо потвърдени по-горе чрез "
-                "основното становище. Поради това стойността не е показана като одобрено число за прием "
-                "в този преглед."
-            ),
-            source_kind="openfoodtox_dossier",
-            source="OpenFoodTox dossier, doi:10.2903/j.efsa.2011.2004, internal evidence quote",
-        ),
+        # group_scope_note is intentionally left unset: its old content
+        # (explaining the automated chemical-basis status) was an
+        # internal/technical note, not consumer-appropriate text -- moved
+        # into operator_only_notes below instead. The consumer-safe scope
+        # explanation is already in the first effects note above.
+        operator_only_notes=[
+            SourcedText(
+                en=(
+                    "The group ADI is 300 mg/kg bw/day (all four caramel colours combined); E150c's own "
+                    "additional sub-limit is 100 mg/kg bw/day. OpenFoodTox's own extracted justification "
+                    "text for this record is a short, non-descriptive comment (\"ADI (group)\") with no "
+                    "numeric magnitude to validate -- the automated chemical-basis check for this record "
+                    "is kept UNRESOLVED rather than guessed at, even though these figures and their scope "
+                    "are independently confirmed via the primary 2011 opinion. Per this round's single "
+                    "gating policy, an externally-sourced number for an otherwise-ineligible record is "
+                    "withheld from the consumer preview exactly like an internally-extracted one -- kept "
+                    "here, in the operator bundle, for review."
+                ),
+                bg=(
+                    "Груповата ADI е 300 мг/кг телесно тегло дневно (всички четири карамелени "
+                    "оцветителя заедно); собствената допълнителна граница на E150c е 100 мг/кг телесно "
+                    "тегло дневно. Собственият извлечен от OpenFoodTox обосноваващ текст за този запис е "
+                    "кратък, неописателен коментар (\"ADI (group)\") без числена стойност за проверка -- "
+                    "автоматизираната проверка на химичната основа за този запис се запазва като "
+                    "НЕУСТАНОВЕНА, вместо да се предполага, въпреки че тези стойности и обхватът им са "
+                    "независимо потвърдени чрез основното становище от 2011 г. Съгласно единната политика "
+                    "за допустимост на този кръг, външно обоснована стойност за иначе недопустим запис се "
+                    "задържа от прегледа за потребители по същия начин като вътрешно извлечена -- "
+                    "запазена тук, в пакета за оператора, за преглед."
+                ),
+                source_kind="openfoodtox_dossier",
+                source="OpenFoodTox dossier, doi:10.2903/j.efsa.2011.2004, internal evidence quote",
+            )
+        ],
         external_sources=[
             {
                 "title": "Commission Regulation (EU) No 231/2012 (caramel colour specifications)",
@@ -332,7 +327,13 @@ EDITORIAL_CONTENT: dict[str, EditorialEntry] = {
                 "Aspergillus niger, а не чрез извличане от плодове."
             ),
             source_kind="external_primary_source",
-            source=_REG_231_2012 + " Production method cross-checked against standard food-chemistry references.",
+            source=(
+                _REG_231_2012
+                + " Annex, E 330 CITRIC ACID entry, 'Definition': the Regulation's own definition states "
+                "citric acid 'is obtained by fermentation of carbohydrate solutions (e.g., glucose syrups) "
+                "with the mould Aspergillus niger' -- the natural-occurrence and industrial-fermentation "
+                "claim above restates this definition text directly, not a separate, uncited reference."
+            ),
         ),
         purpose=SourcedText(
             en=(

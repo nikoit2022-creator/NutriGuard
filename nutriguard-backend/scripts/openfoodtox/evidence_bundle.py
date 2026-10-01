@@ -77,6 +77,32 @@ def _bg_basis(basis: str | None) -> str | None:
         return None
     return _BASIS_LABEL_BG.get(basis.strip().lower(), basis)
 
+
+# Explicit, non-technical EN/BG display names for the pilot identities,
+# used only for the draft's own H1 heading. Deliberately separate from
+# `CatalogueIdentity.common_name`, which for an ad hoc dataset query (e.g.
+# E150d, which has no tracked NutriGuard catalogue row) reads literally as
+# "(ad hoc query, not a provisioned NutriGuard ingredient: E150d)" --
+# correct and important as *operator* metadata (still present verbatim in
+# the profile's own `catalogue_identity` block), but never appropriate as
+# the consumer-facing ingredient heading. Falls back to `common_name` for
+# any identity not in this small, curated map -- never invents a display
+# name for a substance this map doesn't cover.
+_DISPLAY_NAME_BY_E_NUMBER = {
+    "E250": ("Sodium nitrite", "Натриев нитрит"),
+    "E150d": ("Sulphite ammonia caramel", "Сулфитно-амонячен карамел"),
+    "E330": ("Citric acid", "Лимонена киселина"),
+    "E951": ("Aspartame", "Аспартам"),
+}
+
+
+def _display_name(catalogue_identity: CatalogueIdentity) -> tuple[str, str]:
+    mapped = _DISPLAY_NAME_BY_E_NUMBER.get(catalogue_identity.e_number_normalized or "")
+    if mapped:
+        return mapped
+    return catalogue_identity.common_name, catalogue_identity.common_name
+
+
 # Reference-value types that represent a human dietary intake limit at
 # all. AOEL/AAOEL are *operator* (occupational: dermal/inhalation/mixed
 # handling exposure) levels, never a consumer daily/acute intake limit,
@@ -474,9 +500,8 @@ def _finding_sentence_en(rv: dict, editorial: EditorialEntry | None) -> str:
     if not magnitude:
         return f"EFSA's opinion on {type_label} did not state a specific numeric limit for this identity in the extracted text. {cite} See internal evidence for the source's own wording."
     return (
-        f"EFSA's opinion references {type_label} for this identity, but the specific figure is not shown "
-        f"here pending review of this preview's eligibility criteria (see the internal review notes for "
-        f"exactly which criterion). {cite} See internal evidence and Sources for detail."
+        f"EFSA's opinion references {type_label} for this identity; the specific figure is not included "
+        f"in this preview yet. {cite} See internal evidence and Sources for detail."
     )
 
 
@@ -500,9 +525,8 @@ def _finding_sentence_bg(rv: dict, editorial: EditorialEntry | None) -> str:
     if not magnitude:
         return f"Становището на ЕФСА относно {type_label} не посочва конкретна числена граница за тази идентичност в извлечения текст. {cite} Вижте вътрешния цитат за точната формулировка на източника."
     return (
-        f"Становището на ЕФСА споменава {type_label} за тази идентичност, но конкретната стойност не е "
-        f"показана тук до извършване на преглед на критериите за допустимост на този преглед (вижте "
-        f"вътрешните бележки за преглед за точния критерий). {cite} Вижте вътрешния цитат и източниците за подробности."
+        f"Становището на ЕФСА споменава {type_label} за тази идентичност; конкретната стойност все още не "
+        f"е включена в този преглед. {cite} Вижте вътрешния цитат и източниците за подробности."
     )
 
 
@@ -548,7 +572,7 @@ def _intake_sentence_bg(rv: dict, editorial: EditorialEntry | None) -> str:
     text += f". {cite}{reaffirmed}"
     text += (
         " Това е регулаторен референтен праг, а не препоръчителна целева доза и не е размер на порция "
-        "продукт -- само по себе си не показва каква точно количество от конкретен продукт може да се "
+        "продукт -- само по себе си не показва какво точно количество от конкретен продукт може да се "
         "консумира безопасно, което зависи от действителната концентрация на съставката в продукта (не е "
         "изчислено тук)."
     )
@@ -689,6 +713,10 @@ def build_profile(
         effects_bg.append(editorial.group_scope_note.bg)
         _claim("effects_group_scope", editorial.group_scope_note.en, editorial.group_scope_note.source_kind, editorial.group_scope_note.source)
 
+    if editorial and editorial.operator_only_notes:
+        for note in editorial.operator_only_notes:
+            _claim("operator_only", note.en, note.source_kind, note.source)
+
     if effects_en:
         en_sections.append("## Effects and conditions\n\n" + "\n\n".join(effects_en))
         bg_sections.append("## Ефекти и условия\n\n" + "\n\n".join(effects_bg))
@@ -744,8 +772,9 @@ def build_profile(
     en_sections.append("\n".join(sources_en))
     bg_sections.append("\n".join(sources_bg))
 
-    header_en = f"# {catalogue_identity.common_name} ({catalogue_identity.e_number_raw})\n\nStatus: DRAFT -- not scientifically reviewed, not translation-reviewed, not publication-ready."
-    header_bg = f"# {catalogue_identity.common_name} ({catalogue_identity.e_number_raw})\n\nСтатус: ЧЕРНОВА -- не е научно прегледано, не е прегледан преводът, не е готово за публикуване."
+    display_name_en, display_name_bg = _display_name(catalogue_identity)
+    header_en = f"# {display_name_en} ({catalogue_identity.e_number_raw})\n\nStatus: DRAFT -- not scientifically reviewed, not translation-reviewed, not publication-ready."
+    header_bg = f"# {display_name_bg} ({catalogue_identity.e_number_raw})\n\nСтатус: ЧЕРНОВА -- не е научно прегледано, не е прегледан преводът, не е готово за публикуване."
 
     remaining_uncertainties = [o["reason"] for o in omitted_sections]
     for rv in display_values:
@@ -777,6 +806,11 @@ def build_profile(
         "human_health_endpoint_count": human_health_total,
         "editorial_content_version": EDITORIAL_CONTENT_VERSION if editorial else None,
         "editorial_chemical_basis": editorial_basis,
+        # Operator-only editorial notes (e.g. externally-sourced numeric
+        # figures withheld from the consumer preview under this round's
+        # single gating policy -- see editorial_content.py) -- never
+        # included in draft_en/draft_bg, kept here for operator review.
+        "editorial_operator_only_notes": [n.to_dict() for n in editorial.operator_only_notes] if editorial else [],
         "claim_source_matrix": claim_matrix,
         "remaining_uncertainties": remaining_uncertainties,
         "omitted_sections_internal_note": omitted_sections,

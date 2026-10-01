@@ -345,6 +345,83 @@ class TestBuildProfileEndToEnd:
             pass
 
 
+class TestLocalizedDisplayTitles:
+    """docs/OPENFOODTOX_FINAL_PROFILE_REVIEW_TASK.md item 2: explicit,
+    non-technical EN/BG display names; the E-code rendered once; ad hoc
+    dataset-query status kept in operator metadata, never the heading."""
+
+    def test_e150d_heading_uses_localized_name_not_the_adhoc_query_label(self, tmp_path):
+        dossiers_dir = tmp_path / "dossiers"
+        dossiers_dir.mkdir()
+        _make_pilot_style_dossier_zip(
+            str(dossiers_dir / "d1.i6z"), cas="", e_number_synonym="E 150d", name="Sulphite ammonia caramel",
+            adi_lower_value="300", justification="Comments: ADI (group)", date_of_evaluation="2011-02-03",
+        )
+        profile = _build_profile_for_single_dossier_zip(
+            tmp_path, "d1.i6z", e_number_raw="E150d",
+            common_name="(ad hoc query, not a provisioned NutriGuard ingredient: E150d)",
+        )
+        assert profile["draft_en"].startswith("# Sulphite ammonia caramel (E150d)")
+        assert profile["draft_bg"].startswith("# Сулфитно-амонячен карамел (E150d)")
+        # The ad hoc status is still real, present operator metadata...
+        assert "ad hoc query" in profile["catalogue_identity"]["common_name"]
+        # ...but never leaks into either consumer-facing heading/draft.
+        assert "ad hoc query" not in profile["draft_en"]
+        assert "ad hoc query" not in profile["draft_bg"]
+        # The E-code appears exactly once in the heading line itself.
+        heading_line_en = profile["draft_en"].splitlines()[0]
+        assert heading_line_en.count("E150d") == 1
+
+    def test_e250_e330_e951_have_localized_bg_names(self, tmp_path):
+        from scripts.openfoodtox.evidence_bundle import _display_name
+        from scripts.openfoodtox.catalogue_snapshot import CatalogueIdentity, normalize_e_number
+
+        expected = {
+            "E250": ("Sodium nitrite", "Натриев нитрит"),
+            "E330": ("Citric acid", "Лимонена киселина"),
+            "E951": ("Aspartame", "Аспартам"),
+        }
+        for e_number, (en_name, bg_name) in expected.items():
+            cat = CatalogueIdentity(
+                id="x", common_name="irrelevant", e_number_raw=e_number, e_number_normalized=normalize_e_number(e_number),
+                cas_number_raw=None, cas_number_normalized=None, source="tracked_seed_json",
+            )
+            assert _display_name(cat) == (en_name, bg_name)
+
+
+class TestEditorialCitationCoverage:
+    """docs/OPENFOODTOX_FINAL_PROFILE_REVIEW_TASK.md item 3: every
+    editorial claim must carry a real, specific citation -- checks
+    structure/coverage, never the scientific truth of a claim."""
+
+    _VAGUE_MARKERS = ("standard food-chemistry references", "standard reference", "common knowledge", "well known")
+
+    def test_every_editorial_claim_has_a_non_empty_specific_source(self):
+        from scripts.openfoodtox.editorial_content import EDITORIAL_CONTENT
+
+        for e_number, entry in EDITORIAL_CONTENT.items():
+            fields = [entry.identity, entry.purpose, entry.group_scope_note] + [n.text for n in entry.effects]
+            fields += entry.population_exceptions + entry.operator_only_notes
+            for field in fields:
+                if field is None:
+                    continue
+                assert field.source and len(field.source.strip()) > 10, f"{e_number}: empty/trivial source"
+                assert field.source_kind in ("openfoodtox_dossier", "tracked_seed_csv", "tracked_seed_json", "external_primary_source")
+                lowered = field.source.lower()
+                assert not any(marker in lowered for marker in self._VAGUE_MARKERS), (
+                    f"{e_number}: vague, unnamed citation: {field.source!r}"
+                )
+
+    def test_every_external_source_entry_has_url_and_access_date(self):
+        from scripts.openfoodtox.editorial_content import EDITORIAL_CONTENT
+
+        for e_number, entry in EDITORIAL_CONTENT.items():
+            for s in entry.external_sources:
+                assert s.get("title")
+                assert s.get("url", "").startswith("http")
+                assert s.get("access_date"), f"{e_number}: external source missing access_date"
+
+
 class TestEditorialContentCorrections:
     """docs/OPENFOODTOX_PROFILE_CONTENT_TASK.md's four required content
     corrections, tested for structure/presence -- not for scientific
@@ -438,12 +515,97 @@ class TestEditorialContentCorrections:
         profile = _build_profile_for_single_dossier_zip(tmp_path, "d1.i6z", e_number_raw="E150d", common_name="Sulphite ammonia caramel")
         rv = profile["deduplicated_reference_values"][0]
         assert rv["review_eligibility"]["consumer_guidance_eligible"] is False
-        # The record's own number (300) only appears via the editorial
-        # scope narrative (independently sourced from the primary
-        # opinion, see editorial_content.py), never as a restatement of
-        # *this ineligible record's own* figure in either draft section.
         effects_section = profile["draft_en"].split("## Effects and conditions", 1)[1].split("## Sources", 1)[0]
-        assert "not shown" in effects_section or "pending review" in effects_section
+        assert "not included in this preview yet" in effects_section
+
+    def test_e150d_editorial_numeric_claims_also_withheld_from_consumer_preview(self, tmp_path):
+        """Regression for the final-review-task finding: editorial effects
+        text (not just structured reference-value rendering) must obey
+        the same single gating policy. The group ADI (300) and E150c's
+        own sub-limit (100) are known, well-sourced numbers -- but they
+        belong to a record this profile cannot independently confirm as
+        eligible, so neither figure may appear anywhere in the consumer
+        preview (either language, any section -- effects, intake, or
+        notes), even though they are freely available in the operator
+        bundle."""
+        dossiers_dir = tmp_path / "dossiers"
+        dossiers_dir.mkdir()
+        _make_pilot_style_dossier_zip(
+            str(dossiers_dir / "d1.i6z"),
+            cas="",
+            e_number_synonym="E 150d",
+            name="Sulphite ammonia caramel",
+            adi_lower_value="300",
+            justification="Comments: ADI (group)",
+            date_of_evaluation="2011-02-03",
+        )
+        profile = _build_profile_for_single_dossier_zip(tmp_path, "d1.i6z", e_number_raw="E150d", common_name="Sulphite ammonia caramel")
+
+        for draft in (profile["draft_en"], profile["draft_bg"]):
+            assert "300" not in draft
+            assert "100" not in draft
+        # ... while both numbers remain fully available for operator review.
+        operator_text = " ".join(n["en"] for n in profile["editorial_operator_only_notes"])
+        assert "300 mg/kg bw/day" in operator_text
+        assert "100 mg/kg bw/day" in operator_text
+        # The group-scope qualifier itself is still preserved in the
+        # consumer preview -- just without the specific figures.
+        assert "group" in profile["draft_en"].lower()
+        assert "групов" in profile["draft_bg"].lower()
+
+    def test_unrelated_numbers_are_not_suppressed_by_the_gating_policy(self, tmp_path):
+        """The single gating policy must only withhold *intake-claim*
+        numbers for ineligible records -- it must never strip an
+        unrelated number such as a year or an E-code from the preview."""
+        dossiers_dir = tmp_path / "dossiers"
+        dossiers_dir.mkdir()
+        _make_pilot_style_dossier_zip(
+            str(dossiers_dir / "d1.i6z"),
+            cas="",
+            e_number_synonym="E 150d",
+            name="Sulphite ammonia caramel",
+            adi_lower_value="300",
+            justification="Comments: ADI (group)",
+            date_of_evaluation="2011-02-03",
+        )
+        profile = _build_profile_for_single_dossier_zip(tmp_path, "d1.i6z", e_number_raw="E150d", common_name="Sulphite ammonia caramel")
+        assert "2011" in profile["draft_en"]  # assessment year, not an intake claim
+        assert "150" in profile["draft_en"]  # part of the E-code/substance names (E150a-d)
+
+    def test_no_unconfirmed_numeric_intake_claims_in_consumer_facing_editorial_content(self):
+        """Mechanical enforcement, not just code review, of "changing
+        heading/source-kind cannot bypass the rule": for every pilot
+        identity with no `editorial_chemical_basis` override (E150d,
+        E330 -- i.e. nothing this session can vouch for as eligible), no
+        consumer-facing editorial field (`identity`, `purpose`, `effects`,
+        `population_exceptions`, `group_scope_note` -- every field
+        *except* `operator_only_notes`, which is never shown) may contain
+        a bare dose-shaped number (`<digits> mg`), in EITHER language,
+        regardless of which field/evidence_type/source_kind it's filed
+        under. A future editor who writes an unreviewed figure into any
+        of these fields fails this test immediately, no matter where they
+        put it."""
+        import re
+
+        from scripts.openfoodtox.editorial_content import EDITORIAL_CONTENT
+
+        dose_pattern = re.compile(r"\d+(\.\d+)?\s*(mg|мг)\b")
+        for e_number, entry in EDITORIAL_CONTENT.items():
+            if entry.editorial_chemical_basis is not None:
+                continue  # E951: this session *has* independently confirmed its eligible figure
+            consumer_facing_texts: list[str] = []
+            for field in (entry.identity, entry.purpose, entry.group_scope_note):
+                if field:
+                    consumer_facing_texts += [field.en, field.bg]
+            for note in entry.effects:
+                consumer_facing_texts += [note.text.en, note.text.bg]
+            for exc in entry.population_exceptions:
+                consumer_facing_texts += [exc.en, exc.bg]
+            for text in consumer_facing_texts:
+                assert not dose_pattern.search(text), (
+                    f"{e_number}: unconfirmed numeric intake claim found in consumer-facing "
+                    f"editorial content (should be in operator_only_notes instead): {text!r}"
+                )
 
     def test_date_types_kept_distinct_for_e951_superseding_opinion(self):
         from scripts.openfoodtox.editorial_content import EDITORIAL_CONTENT
