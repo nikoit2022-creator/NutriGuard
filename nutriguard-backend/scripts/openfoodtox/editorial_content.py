@@ -215,8 +215,7 @@ EDITORIAL_CONTENT: dict[str, EditorialEntry] = {
                         "additional, stricter limit of its own within that group total, due to "
                         "uncertainty about a possible immune-system effect observed in animals for one "
                         "of its constituents; E150d itself carries no separate limit beyond the group "
-                        "figure. The exact figures are not shown in this preview (see Numeric gating "
-                        "note below)."
+                        "figure. The exact figures are not yet included in this preview."
                     ),
                     bg=(
                         "Преоценката на ЕФСА от 2011 г. определя ГРУПОВА допустима дневна доза (ADI), "
@@ -226,8 +225,8 @@ EDITORIAL_CONTENT: dict[str, EditorialEntry] = {
                         "разглежданото в този профил) носи собствена допълнителна, по-строга граница в "
                         "рамките на тази обща стойност, поради несигурност относно възможен ефект върху "
                         "имунната система, наблюдаван при животни за една от съставките му; E150d не "
-                        "носи отделна граница извън груповата стойност. Точните стойности не са показани "
-                        "в този преглед (вижте бележката за числова допустимост по-долу)."
+                        "носи отделна граница извън груповата стойност. Точните стойности все още не са "
+                        "включени в този преглед."
                     ),
                     source_kind="external_primary_source",
                     source=(
