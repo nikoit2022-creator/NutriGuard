@@ -1,5 +1,43 @@
 # OpenFoodTox audit: follow-up task for Claude
 
+## Active follow-up: chemical-basis ambiguity (2026-10-01)
+
+The original tasks below were addressed at
+`f997bb7741cb858434163a935d30a1bde69c941d`. Do not repeat them wholesale.
+One further parser safety issue remains; keep the same isolated-worktree,
+scoped push, no live changes / no merge / no deploy constraints.
+
+In `chemical_basis.py::extract_chemical_basis`, the first numerically matching
+mention becomes `primary`; later matching mentions are merely put in `others`.
+Consequently, the synthetic input
+`0.1 mg sodium nitrite/kg bw and 0.1 mg potassium nitrite/kg bw`
+with stored value `0.1` is labeled resolved without evidence selecting a basis.
+This is a code-review finding, not a claim that the real E250 dossier is ambiguous.
+
+Required:
+- Collect all matching candidates before resolution. Different bases for the same
+  value must produce an explicit unresolved/ambiguous result with no selected basis.
+- Repeated mentions of the same basis may resolve after conservative whitespace/case
+  normalization. Preserve all original evidence; do not infer chemical equivalence.
+- Check numeric token boundaries so unsupported decimal-comma/scientific notation
+  cannot be partially matched as a different number. Use exact decimal comparison
+  for supported numeric syntax rather than a floating-point tolerance that can
+  conflate distinct small values. Unsupported forms should remain unresolved.
+- Do not let equal numbers in incompatible units prove a match. Pass/validate the
+  structured unit where needed; otherwise explicitly leave unsupported units unresolved.
+- Add regression tests for distinct same-value bases, duplicate same-basis mentions,
+  no match, numeric-boundary cases and unit mismatch. Retain E250's existing distinct
+  0.1 / 0.07 observations without silent conversion.
+- Rerun focused/full tests with pinned dependencies and the affected offline reports.
+  Report whether real dataset results changed; preserve earlier versioned outputs.
+- Update audit documentation and handoff; commit and push to the same branch, then
+  return full SHA and exact results. No integration into the live application yet.
+
+Reviewer validation scope: source inspection only. A local Python reproduction
+could not run because `python` was not available on PATH; no test pass is claimed.
+
+## Original review tasks (historical context)
+
 Date: 2026-10-01. Reviewed baseline: 8dd62355281c147bc84c9266341a47b60a509846.
 Status: requested; not implemented by this documentation commit.
 

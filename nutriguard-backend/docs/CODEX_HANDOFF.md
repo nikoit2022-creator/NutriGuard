@@ -1,5 +1,17 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: chemical-basis ambiguity follow-up (Codex, docs only)
+
+- Reviewed `f997bb7741cb858434163a935d30a1bde69c941d`; added the active follow-up
+  section in `docs/OPENFOODTOX_REVIEW_TASK.md` for Claude.
+- Source review found first-match selection when equal numeric mentions refer to
+  different chemical bases. Requested conservative ambiguity handling, numeric/unit
+  guards and regression tests. This does not assert a defect in the actual E250 data.
+- No code changes or live access. Python probe unavailable (`python` not on PATH);
+  tests not rerun. Documentation whitespace checked with `git diff --check`.
+- Next: Claude fetches this branch, completes the active follow-up and pushes results.
+  No merge into main, deployment or live import authorized by this handoff.
+
 ## 2026-10-01: OpenFoodTox audit review fixes implemented (Claude)
 
 - Implemented all three fixes requested in `docs/OPENFOODTOX_REVIEW_TASK.md`
