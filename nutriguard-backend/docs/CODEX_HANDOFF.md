@@ -1,5 +1,63 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: targeted final profile corrections implemented (Claude)
+
+- Implemented `docs/OPENFOODTOX_FINAL_PROFILE_REVIEW_TASK.md` (reviewed
+  baseline `b915ccdabc23729110d41e32df15876adb7863ad`) in the same isolated
+  worktree, fast-forwarded first (no drift). Committed at
+  `704d5b7e2b60a5934fa2dbf777176baf185b9b28` (code/tests/matrix) and
+  `b051e2a2242b14b635fa3ca6bae6c4b2a94b2ca8` (one-line follow-up fixing a
+  dangling cross-reference the first commit introduced). Full account in
+  `docs/OPENFOODTOX_PILOT_REPORT.md` §12; corrected complete EN/BG drafts in
+  `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` (revision 3) -- summary only
+  here.
+- **Item 1 confirmed and fixed**: the previous round's numeric-gating fix
+  only covered structured reference-value rendering -- `editorial_content.py`'s
+  E150d effects text separately stated the group ADI (300 mg/kg bw/day) and
+  E150c's sub-limit (100 mg/kg bw/day) as plain narrative, bypassing the
+  gate entirely, then the next paragraph said the figure "is not shown...
+  pending review" -- a direct self-contradiction. Both numbers moved to a
+  new `operator_only_notes` field (never rendered in either draft, exposed
+  as `editorial_operator_only_notes` in the profile JSON). A new mechanical
+  test scans every consumer-facing editorial field for a bare dose-shaped
+  number, for every identity without an independently-confirmed basis
+  override -- covers all fields/evidence_types/source_kinds uniformly, so
+  relabeling can't bypass it. Confirmed unrelated numbers (years, E-code
+  digits) are untouched by the same check. Also removed two
+  technical/debug-sounding fallback sentences from consumer text
+  ("pending review of this preview's eligibility criteria... see internal
+  review notes") -- replaced with plain language; full reasons remain in
+  `review_eligibility.reasons`.
+- **Item 2**: added explicit EN/BG display names for all four identities,
+  used only for the draft heading -- E150d's heading no longer reads "(ad
+  hoc query, not a provisioned NutriGuard ingredient: E150d)" (still present
+  verbatim as real operator metadata in `catalogue_identity.common_name`,
+  just never in the consumer-facing title). Fixed a BG grammar error
+  ("каква точно количество" -> "какво точно количество" -- количество is
+  neuter).
+- **Item 3**: found and fixed one genuinely vague citation (E330's identity
+  claim cited "standard food-chemistry references" -- no actual source
+  named); replaced with Commission Regulation (EU) No 231/2012's own E330
+  Definition text, quoted directly. Audited every other citation against
+  what it actually supports. New `docs/OPENFOODTOX_CLAIM_SOURCE_MATRIX.md`:
+  all 21 editorial claims with a stable ID, source kind, and citation,
+  generated directly from `editorial_content.py`, reviewable via Git.
+- **Test-count reconciliation**: checked directly -- no committed document
+  ever stated "858 passed"; `docs/CODEX_HANDOFF.md` and
+  `docs/OPENFOODTOX_PILOT_REPORT.md` both correctly recorded the actual
+  `pytest -q` output of 853 at `b915ccd`. "858" was this session's own
+  conversational arithmetic (853 + 5 new, double-counting since 853 already
+  included them) -- nothing to correct in either committed file. This
+  round's own count, run directly: `python -m pytest -q` -> **860 passed,
+  16 skipped** (pre-existing), 0 failed (853 + 7 new this round).
+- Per the task's own instruction, extraction code was untouched this round
+  -- `staging/v4`/`reports/v4` were **not** regenerated; only the pilot
+  previews were rerun (against the unchanged `staging/v4`) into a new
+  `pilot/v5/` (`pilot/v1`-`v4` preserved), verified repeatable.
+- No import into the live database, no API/Health Score change, no container
+  restart, no deploy, no merge. Originals and the live stack were not
+  touched.
+
 ## 2026-10-01: targeted final profile review assigned (Codex, docs only)
 
 - Added docs/OPENFOODTOX_FINAL_PROFILE_REVIEW_TASK.md against b915ccd: close

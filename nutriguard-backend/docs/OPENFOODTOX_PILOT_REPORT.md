@@ -625,15 +625,130 @@ are committed in `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` (revision 2).
 | E330 | 0 of 2 distinct findings (4 feed values excluded entirely) | unresolved |
 | E951 | 1 of 1 (after display-grouping five assessments into one) | **editorial_override**, directly verified this round |
 
+## 12. Targeted corrections (2026-10-01, fourth revision)
+
+`docs/OPENFOODTOX_FINAL_PROFILE_REVIEW_TASK.md` (reviewed baseline
+`b915ccdabc23729110d41e32df15876adb7863ad`) found a real, specific gap §11b's
+"numeric gating consistency" fix had not actually closed, plus two smaller
+corrections. Implemented at commits `704d5b7e2b60a5934fa2dbf777176baf185b9b28`
+and `b051e2a2242b14b635fa3ca6bae6c4b2a94b2ca8` (the second a one-line follow-up removing a dangling
+cross-reference the first introduced).
+
+### 12a. The gating fix only covered structured reference values, not editorial text
+
+§11b's fix made `_finding_sentence_en/bg` (Effects) and
+`_intake_sentence_en/bg` (Intake guidance) share one eligibility test for a
+reference value's own magnitude -- but `editorial_content.py`'s E150d
+`effects` notes separately stated the group ADI (300 mg/kg bw/day) and
+E150c's own sub-limit (100 mg/kg bw/day) as **plain narrative text**,
+entirely outside that gate, then the very next paragraph said the figure
+"is not shown... pending review" -- directly contradicting itself. Fixed:
+both numbers moved to a new `operator_only_notes` field on `EditorialEntry`
+(never rendered in `draft_en`/`draft_bg`, exposed instead as
+`editorial_operator_only_notes` in the profile JSON for operator review).
+The consumer-facing effects note now states the group-scope qualifier (it's
+a joint limit, not an individual E150d allowance; only E150c has its own
+separate limit) without either figure. This is a single policy, not a
+per-substance patch: a new test,
+`test_no_unconfirmed_numeric_intake_claims_in_consumer_facing_editorial_content`,
+mechanically scans *every* consumer-facing editorial field (`identity`,
+`purpose`, `effects`, `population_exceptions`, `group_scope_note`) for a
+bare dose-shaped number, for every identity without an
+`editorial_chemical_basis` override -- a future addition can't bypass this
+by choosing a different field, evidence_type, or source_kind, since the
+scan covers all of them uniformly. Two further tests confirm the fix
+end-to-end (no leaked numbers in either language) and that unrelated
+numbers (assessment years, E-code digits) are never caught by the same
+filter.
+
+Also removed two technical/debug-sounding fallback sentences from both
+language drafts ("pending review of this preview's eligibility criteria...
+see the internal review notes for exactly which criterion") -- replaced
+with plain language ("the specific figure is not included in this preview
+yet"); the actual reasons remain fully available in
+`review_eligibility.reasons` for operator review, never lost, just no
+longer phrased as internal tooling jargon in consumer text.
+
+### 12b. Localized, non-technical titles
+
+Added `evidence_bundle._display_name`, a small, explicit EN/BG map for the
+four pilot identities (Sodium nitrite/Натриев нитрит, Sulphite ammonia
+caramel/Сулфитно-амонячен карамел, Citric acid/Лимонена киселина,
+Aspartame/Аспартам), used only for the draft's own heading. E150d's
+previous heading literally read "(ad hoc query, not a provisioned
+NutriGuard ingredient: E150d) (E150d)" -- the ad hoc status is real and
+important *operator* metadata (still present verbatim in the profile's own
+`catalogue_identity.common_name`), but never appropriate as the
+consumer-facing ingredient name. No live catalogue row was invented for
+this -- `_display_name` falls back to `common_name` for any identity not
+in its small map. Also fixed a BG grammar error ("каква точно количество"
+-- feminine agreement on a neuter noun -- corrected to "какво точно
+количество"). Two new tests
+(`TestLocalizedDisplayTitles`) check both languages and confirm no
+technical placeholder leaks into either heading.
+
+### 12c. Citation audit
+
+Found one genuinely vague citation: E330's identity claim cited "Commission
+Regulation (EU) No 231/2012 ... cross-checked against standard
+food-chemistry references" -- the second clause named no actual source.
+Replaced with the Regulation's own Annex entry for E330 CITRIC ACID,
+quoting its "Definition" text directly ("obtained by fermentation of
+carbohydrate solutions ... with the mould Aspergillus niger"). Audited
+every other citation against what its named source actually supports (no
+regulation cited for an effect/intake claim it doesn't cover; every
+safety/effect conclusion traces to an OpenFoodTox dossier or a named EFSA
+opinion/press release, never to the internal seed CSV/JSON alone). New
+`docs/OPENFOODTOX_CLAIM_SOURCE_MATRIX.md`: every one of the 21 editorial
+claims with a stable ID, source kind, and citation, generated directly from
+`editorial_content.py` (not hand-transcribed), reviewable via Git. Two new
+structural tests (`TestEditorialCitationCoverage`) check every claim has a
+non-trivial, non-vague source and every `external_sources` entry has a URL
+and access date -- never asserting a claim's scientific truth.
+
+### 12d. Test-count reconciliation
+
+The task asked to reconcile "858 passed" (stated in this session's own
+end-of-round chat summary after the previous round) against
+`docs/CODEX_HANDOFF.md`'s committed "853 passed" for the same commit
+(`b915ccd`). Checked directly: **no committed document ever stated "858"**
+-- `docs/CODEX_HANDOFF.md` and this report both correctly recorded the
+actual `pytest -q` output of 853 passed at that commit. "858" was this
+session's own arithmetic in conversation (853 + the 5 tests just added,
+double-counting since 853 already included them) -- a verbal slip, not a
+documentation error, and nothing needed correcting in either file for that
+reason. This round's own actual count, run directly:
+
+```
+cd nutriguard-backend
+python3 -m pytest -q
+# 860 passed, 16 skipped, 3 warnings in 19.32s
+```
+
+853 (previous) + 7 new this round (3 numeric-gating-policy regressions, 2
+title-localization, 2 citation-coverage) = 860, matching exactly.
+
+### 12e. Delivery
+
+Per the task's own instruction, extraction code was not touched this round,
+so `staging/v4`/`reports/v4` were **not** regenerated -- only the pilot
+previews were rerun (against the unchanged `staging/v4`) into a new
+`pilot/v5/` (`pilot/v1`-`v4` preserved). Ran twice, diffed byte-for-byte
+(excluding timestamp): identical. `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md`
+updated to revision 3 (E150d section replaced with the corrected,
+number-free consumer preview; E250/E330/E951 headings updated to the
+localized names).
+
 ## Files
 
+New this revision (fourth): `docs/OPENFOODTOX_CLAIM_SOURCE_MATRIX.md`.
 New this revision (third): `scripts/openfoodtox/editorial_content.py`.
 New in the review-corrections revision: `scripts/openfoodtox/provenance.py`,
 `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md`.
-Modified this revision: `scripts/openfoodtox/evidence_bundle.py` (§11a-e),
-`tests/unit/test_openfoodtox_evidence_bundle.py` (+5 tests), this file,
-`docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` (full rewrite, revision 2),
-`docs/CODEX_HANDOFF.md`.
+Modified this revision: `scripts/openfoodtox/{evidence_bundle,editorial_content}.py`
+(§12a-c), `tests/unit/test_openfoodtox_evidence_bundle.py` (+7 tests), this
+file, `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` (revision 3, E150d section
+replaced), `docs/CODEX_HANDOFF.md`.
 Generated, not committed (bulk/derived, kept outside Git):
-`pilot/v4/` (`pilot/v1`-`v3` preserved unchanged). `staging/v4`/`reports/v4`
+`pilot/v5/` (`pilot/v1`-`v4` preserved unchanged). `staging/v4`/`reports/v4`
 unchanged this round (extraction code untouched).
