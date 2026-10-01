@@ -106,10 +106,20 @@ EDITORIAL_CONTENT: dict[str, EditorialEntry] = {
                 "покълването на спорите на Clostridium botulinum и образуването на техния токсин, и "
                 "допринася за характерния цвят и вкус на осолените месни продукти."
             ),
-            source_kind="tracked_seed_csv",
+            source_kind="external_primary_source",
             source=(
+                "EFSA ANS Panel, \"Re-evaluation of potassium nitrite (E 249) and sodium nitrite "
+                "(E 250) as food additives\", EFSA Journal 2017;15(6):4786, doi:10.2903/j.efsa.2017.4786, "
+                "Section 3.1.6 \"Technological function\"; read via the open-access full-text mirror "
+                "https://pmc.ncbi.nlm.nih.gov/articles/PMC7009987/, accessed 2026-10-01. Quote: "
+                "\"Sodium and potassium salts of nitrite (as well as nitrate salts) are commonly used "
+                "in curing mixtures to develop and fix the colour of meat, to inhibit microbial growth "
+                "or to develop characteristic flavours\"; and, on C. botulinum specifically, the opinion "
+                "discusses the in-going amount of nitrite as contributing to \"the inhibitory activity "
+                "against Clostridium botulinum.\" Content origin for the original phrasing: "
                 "app/seed/e_additives_curated_starter.csv, row E250 (functional_class/"
-                "typical_role_or_foods), curated starter, last_reviewed 2026-09-08"
+                "typical_role_or_foods) -- now also directly supported by the primary source above, "
+                "not seed-only."
             ),
         ),
         effects=[
@@ -244,7 +254,21 @@ EDITORIAL_CONTENT: dict[str, EditorialEntry] = {
             en="Used as a brown food colourant, e.g. in cola-type soft drinks, spirits, sauces and baked goods.",
             bg="Използва се като кафяв хранителен оцветител, напр. в колови безалкохолни напитки, спиртни напитки, сосове и печива.",
             source_kind="external_primary_source",
-            source="General food-colour usage, cross-checked against the 2011 EFSA opinion's background section; read 2026-10-01.",
+            source=(
+                "EFSA ANS Panel, Scientific Opinion on the re-evaluation of caramel colours "
+                "(E150a,b,c,d) as food additives, EFSA Journal 2011;9(3):2004, doi:10.2903/j.efsa.2011.2004. "
+                "Read as the genuine full-text PDF via a Wayback Machine raw snapshot of "
+                "efsa.onlinelibrary.wiley.com/doi/epdf/10.2903/j.efsa.2011.2004, accessed 2026-10-01. "
+                "Locator: main text p.19 (\"2.6 Exposure\" section lead-in) and p.21 (\"2.6.1.1 "
+                "Beverages\"). Quote: \"The main use of the caramel colours is to impart a brown colour "
+                "and associated characteristic caramel flavour to a range of foodstuffs including, in "
+                "particular, non-alcoholic (cola-type) drinks, beers and ciders, meat/fish analogues and "
+                "soups and gravies (Tennant, 2007)... Use of Class IV Sulphite Ammonia Caramel is mostly "
+                "associated with cola-flavoured drinks\"; Class IV (E150d) is further documented for "
+                "spirituous beverages (whisky/rum/brandy), confectionery, fine bakery wares and "
+                "sauces/seasonings -- directly supports cola-type drinks, spirits, sauces and baked "
+                "goods specifically, not a generic unsourced fact."
+            ),
         ),
         effects=[
             EffectNote(
@@ -274,8 +298,20 @@ EDITORIAL_CONTENT: dict[str, EditorialEntry] = {
                     source_kind="external_primary_source",
                     source=(
                         "EFSA ANS Panel, Scientific Opinion on the re-evaluation of caramel colours "
-                        "(E150a,b,c,d) as food additives, doi:10.2903/j.efsa.2011.2004, March 2011; "
-                        "independently confirmed via EFSA-sourced secondary reporting, read 2026-10-01."
+                        "(E150a,b,c,d) as food additives, EFSA Journal 2011;9(3):2004, "
+                        "doi:10.2903/j.efsa.2011.2004. Read directly as the genuine full-text PDF via a "
+                        "Wayback Machine raw snapshot of efsa.onlinelibrary.wiley.com/doi/epdf/"
+                        "10.2903/j.efsa.2011.2004 (abstract independently cross-checked via a separate "
+                        "Wayback snapshot of EFSA's own article page, efsa.europa.eu/en/efsajournal/pub/2004), "
+                        "accessed 2026-10-01 -- supersedes an earlier draft of this citation that admitted "
+                        "only secondary-source confirmation; the primary opinion itself has now been read. "
+                        "Quote: \"the Panel establishes a group ADI of 300 mg/kg bw/day for the caramel "
+                        "colours, by applying an uncertainty factor of 100 to a NOAEL of 30 g/kg bw/day... "
+                        "Within this group ADI, the Panel establishes an individual ADI of 100 mg/kg "
+                        "bw/day for Class III due to new information regarding the immunotoxicity of "
+                        "THI\" (THI = 2-acetyl-4(5)-tetrahydroxybutylimidazole, confirmed in the opinion's "
+                        "own text); Class IV (E150d, this profile) carries no separate sub-ADI beyond the "
+                        "group figure."
                     ),
                 ),
             ),
@@ -400,8 +436,25 @@ EDITORIAL_CONTENT: dict[str, EditorialEntry] = {
                 "(подкиселяване) и свързва (хелатира) йони на следови метали, а също подпомага вкуса в "
                 "много храни и напитки."
             ),
-            source_kind="tracked_seed_csv",
-            source="app/seed/e_additives_curated_starter.csv, row E330 (functional_class/typical_role_or_foods)",
+            source_kind="external_primary_source",
+            source=(
+                "JECFA Monograph \"CITRIC ACID\" (INS No. 330), 53rd JECFA meeting (1999), FNP 52 "
+                "Add 7, \"Functional uses\" field. Exact text: \"Acidulant; sequestrant; antioxidant "
+                "synergist; flavouring agent.\" Fetched directly as PDF from the official FAO archive, "
+                "https://fao.org/fileadmin/user_upload/jecfa_additives/docs/Monograph1/Additive-135.pdf, "
+                "accessed 2026-10-01 -- covers acidity-regulation (\"acidulant\"), sequestrant and "
+                "flavour-support uses directly; \"antioxidant synergist\" is an additional confirmed use "
+                "not currently stated in the claim text. Caveat: this is a JECFA/FAO-WHO reference, not "
+                "an EU-specific regulatory text -- Commission Regulation (EU) No 231/2012's own E330 "
+                "specification entry (read directly via the UK's statutory-text mirror, "
+                "legislation.gov.uk/eur/2012/231/annex/division/115) has no functional-class field at "
+                "all (EU specification regulations list identity/purity criteria, not function), so no "
+                "EU-food-specific primary text states this function in words; EFSA FEEDAP Panel opinion "
+                "doi:10.2903/j.efsa.2015.4010 (read via a Wayback snapshot of "
+                "efsa.europa.eu/en/efsajournal/pub/4010) separately calls citric acid \"an acidity "
+                "regulator\" but in a feed-additive-application context, offered only as secondary EU "
+                "corroboration, not as the primary citation for this food-use claim."
+            ),
         ),
         effects=[
             EffectNote(
@@ -467,14 +520,38 @@ EDITORIAL_CONTENT: dict[str, EditorialEntry] = {
                 "Аспартамът е синтетичен дипептиден подсладител (L-аспартил-L-фенилаланинов метилов "
                 "естер), приблизително 200 пъти по-сладък от захарозата по тегло."
             ),
-            source_kind="tracked_seed_csv",
-            source="app/seed/ingredients_seed.json, entry e951_aspartame (scientificName/description)",
+            source_kind="external_primary_source",
+            source=(
+                "EFSA ANS Panel, \"Scientific Opinion on the re-evaluation of aspartame (E 951) as a "
+                "food additive\", EFSA Journal 2013;11(12):3496, doi:10.2903/j.efsa.2013.3496. Read as "
+                "the genuine full-text PDF via a Wayback Machine raw snapshot of "
+                "efsa.onlinelibrary.wiley.com/doi/pdf/10.2903/j.efsa.2013.3496, accessed 2026-10-01. "
+                "Dipeptide structure: Section 2.1 \"Identity of the substances\" (p.15): \"Aspartame is "
+                "a dipeptide of L-phenylalanine methyl ester and L-aspartic acid...\" (chemical name "
+                "(S)-3-amino-N-[(S)-1-methoxycarbonyl-2-phenylethyl] succinamic acid, CAS 22839-47-0). "
+                "Sweetness figure: the opinion's reproduction of the Reg. (EU) 231/2012 specification "
+                "table, \"Description\" field (p.16): \"White odourless, crystalline powder having a "
+                "sweet taste. Approximately 200 times as sweet as sucrose.\" Content origin for the "
+                "original phrasing: app/seed/ingredients_seed.json, entry e951_aspartame "
+                "(scientificName/description) -- now also directly supported by the primary source "
+                "above, not seed-only."
+            ),
         ),
         purpose=SourcedText(
             en="Used as a high-intensity, non-nutritive sweetener in diet beverages, sugar-free confectionery and similar products.",
             bg="Използва се като нискокалоричен подсладител с висока сладост в диетични напитки, беззахарни сладкарски изделия и подобни продукти.",
-            source_kind="tracked_seed_csv",
-            source="app/seed/ingredients_seed.json, entry e951_aspartame (purposeInFood)",
+            source_kind="external_primary_source",
+            source=(
+                "Same EFSA 2013 opinion, doi:10.2903/j.efsa.2013.3496. Abstract: \"Aspartame is a "
+                "sweetener authorised as a food additive in the EU.\" The opinion's reproduction of the "
+                "Reg. (EC) No 1333/2008 Annex II authorised-use table lists categories including "
+                "11.4.1-11.4.3 \"Table-top Sweeteners\" and 14.1.4 \"Flavoured drinks... only "
+                "energy-reduced or with no added sugar\", and its exposure assessment separately tracks "
+                "sugar-free chewing gum and confectionery as major contributing food groups. Read via "
+                "the same Wayback-sourced full-text PDF, accessed 2026-10-01. Content origin for the "
+                "original phrasing: app/seed/ingredients_seed.json, entry e951_aspartame (purposeInFood) "
+                "-- now also directly supported by the primary source above, not seed-only."
+            ),
         ),
         effects=[
             EffectNote(

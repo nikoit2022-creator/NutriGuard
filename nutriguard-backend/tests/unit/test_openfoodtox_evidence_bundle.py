@@ -412,25 +412,36 @@ class TestEditorialCitationCoverage:
                     f"{e_number}: vague, unnamed citation: {field.source!r}"
                 )
 
-    def test_no_consumer_facing_effect_claim_relies_solely_on_tracked_seed_data(self):
-        """docs/OPENFOODTOX_DELIVERY_CONSISTENCY_TASK.md item 2: a pointer
-        to our own seed CSV/JSON is a content *origin*, never independent
-        scientific evidence on its own -- a safety/effect conclusion shown
-        to consumers (evidence_type "human" or "assessment_conclusion")
-        must trace to an OpenFoodTox-extracted quote or a named external
-        primary source. ("identity"/"purpose" functional-classification
-        claims are a separate, lower-stakes category not covered by this
-        check -- see the report's own remaining-limitations note.)"""
+    def test_no_consumer_facing_claim_relies_solely_on_tracked_seed_data(self):
+        """docs/OPENFOODTOX_DELIVERY_CONSISTENCY_TASK.md item 2, extended by
+        docs/OPENFOODTOX_SOURCE_CLOSURE_TASK.md ("extend the existing
+        seed-only provenance regression to identity/purpose fields that are
+        actually rendered, not only effects"): a pointer to our own seed
+        CSV/JSON is a content *origin*, never independent scientific
+        evidence on its own. Every consumer-facing editorial field that
+        `evidence_bundle.build_profile` actually renders when present --
+        `identity`, `purpose`, and `effects` notes with evidence_type
+        "human"/"assessment_conclusion" -- must trace to an
+        OpenFoodTox-extracted quote or a named external primary source.
+        `operator_only_notes` are exempt (never rendered to consumers by
+        construction); a claim this check would otherwise fail is expected
+        to be moved there instead of weakened in place."""
         from scripts.openfoodtox.editorial_content import EDITORIAL_CONTENT
 
         for e_number, entry in EDITORIAL_CONTENT.items():
+            checks = []
+            if entry.identity:
+                checks.append(("identity", entry.identity))
+            if entry.purpose:
+                checks.append(("purpose", entry.purpose))
             for note in entry.effects:
-                if note.evidence_type not in ("human", "assessment_conclusion"):
-                    continue
-                assert note.text.source_kind in ("openfoodtox_dossier", "external_primary_source"), (
-                    f"{e_number}: {note.evidence_type} claim relies solely on "
-                    f"{note.text.source_kind!r} (content origin, not independent "
-                    f"evidence): {note.text.en!r}"
+                if note.evidence_type in ("human", "assessment_conclusion"):
+                    checks.append((f"effects:{note.evidence_type}", note.text))
+            for field_name, text in checks:
+                assert text.source_kind in ("openfoodtox_dossier", "external_primary_source"), (
+                    f"{e_number}: {field_name} claim relies solely on "
+                    f"{text.source_kind!r} (content origin, not independent "
+                    f"evidence): {text.en!r}"
                 )
 
     def test_every_external_source_entry_has_url_and_access_date(self):
@@ -441,6 +452,35 @@ class TestEditorialCitationCoverage:
                 assert s.get("title")
                 assert s.get("url", "").startswith("http")
                 assert s.get("access_date"), f"{e_number}: external source missing access_date"
+
+    _SECONDARY_ADMISSION_MARKERS = (
+        "secondary reporting",
+        "secondary source",
+        "secondary account",
+        "confirmed via secondary",
+    )
+
+    def test_no_external_primary_source_admits_only_secondary_confirmation(self):
+        """docs/OPENFOODTOX_SOURCE_CLOSURE_TASK.md: a claim's own
+        source_kind must not say "external_primary_source" while its
+        citation text admits the primary document itself was never
+        actually read (e.g. "confirmed via secondary reporting") -- that
+        is a mislabeling bug on its own, independent of whether the
+        underlying claim turns out to be correct."""
+        from scripts.openfoodtox.editorial_content import EDITORIAL_CONTENT
+
+        for e_number, entry in EDITORIAL_CONTENT.items():
+            fields = [entry.identity, entry.purpose, entry.group_scope_note]
+            fields += [n.text for n in entry.effects]
+            fields += entry.population_exceptions
+            for field in fields:
+                if field is None or field.source_kind != "external_primary_source":
+                    continue
+                lowered = field.source.lower()
+                assert not any(marker in lowered for marker in self._SECONDARY_ADMISSION_MARKERS), (
+                    f"{e_number}: labeled external_primary_source but its own citation admits "
+                    f"only secondary confirmation: {field.source!r}"
+                )
 
 
 class TestEditorialContentCorrections:
