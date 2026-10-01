@@ -739,16 +739,171 @@ updated to revision 3 (E150d section replaced with the corrected,
 number-free consumer preview; E250/E330/E951 headings updated to the
 localized names).
 
+## 13. Delivery-consistency closure (2026-10-01, fifth revision)
+
+`docs/OPENFOODTOX_DELIVERY_CONSISTENCY_TASK.md` (reviewed baseline
+`8ceba0531082e2c63cbe62598af663c9f852ece9`) found the previous round's own
+delivery had drifted from what it claimed, and that several consumer claims
+still cited only internal seed data as if that were independent evidence.
+Implemented at commit `d573d821770dcc5f147b7c5c4b502ddd0d580320`. The owner
+authorized subagent use for this round; one general-purpose subagent did
+the source-tracing research in item 13b (reading primary documents, not
+snippets), while this session did the mechanical/integration work in 13a
+and reviewed and independently spot-checked the subagent's findings before
+using them (the EFSA-2017-nitrite PMC mirror and the EUR-Lex-blocked
+pattern were both independently reproduced here, not merely trusted).
+
+### 13a. Committed previews had drifted from actual generated output
+
+`docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` still said "revision 3,
+superseding... reproduce `pilot/v5`" while containing the pre-fix
+`каква точно количество` grammar error, English headings inside Bulgarian
+bodies, and other residue from earlier hand-copy-paste export rounds --
+the committed file had not actually been re-derived from a real pilot run
+since an early revision, despite each round's commit message claiming
+otherwise. Root cause: every previous round exported the EN/BG bodies by
+hand (reading a profile's `.md` file and retyping/reformatting it into the
+review-drafts document's blockquote structure), which is exactly the kind
+of manual step that silently drifts.
+
+Fixed structurally, not just re-synced once: new
+**`scripts/openfoodtox/export_docs.py`** mechanically generates both
+committed docs with no manual step in between:
+
+```
+python -m scripts.openfoodtox.pilot \
+  --dossiers-dir /home/vboxuser/nutriguard-data/openfoodtox/originals/2026-09-30/dossiers \
+  --staging-dir  /home/vboxuser/nutriguard-data/openfoodtox/staging/v4 \
+  --output-dir   /home/vboxuser/nutriguard-data/openfoodtox/pilot/v7 \
+  --e-numbers E250 E150d E330 E951
+
+python -m scripts.openfoodtox.export_docs review-drafts --output-dir /home/vboxuser/nutriguard-data/openfoodtox/pilot/v7
+python -m scripts.openfoodtox.export_docs claim-matrix
+
+# reproducible check -- exits non-zero and prints a line-level diff on any mismatch:
+python -m scripts.openfoodtox.export_docs review-drafts --output-dir /home/vboxuser/nutriguard-data/openfoodtox/pilot/v7 --check
+python -m scripts.openfoodtox.export_docs claim-matrix --check
+```
+
+Both `--check` runs reported `CHECK OK` immediately after `export` (tested
+in this session). The review-drafts format itself changed from
+blockquote-prefixed text (error-prone to reproduce by hand, which is
+exactly what drifted) to **fenced code blocks** (` ```text ... ``` `) around
+each of the 8 verbatim bodies (4 identities x EN+BG) plus each identity's
+`internal_evidence_en` -- a deliberate, documented wrapper change, not
+content drift. The file's own header now states this and tells a future
+editor never to hand-edit inside a fenced block, only re-run `export`.
+Internal evidence/operator-only notes remain in clearly separate sections,
+never merged into the consumer preview bodies, per the task's explicit
+instruction to keep them apart. Two new tests
+(`tests/unit/test_openfoodtox_export_docs.py`) cover rendering all four
+identities from synthetic profile JSON and confirm the renderer is
+deterministic (byte-identical across two calls).
+
+Per the task's own instruction, extraction code was not touched this round
+-- `staging/v4`/`reports/v4` were **not** regenerated; the pilot was rerun
+(against the unchanged `staging/v4`) into a new `pilot/v7/` (`pilot/v1`-`v6`
+preserved), verified repeatable (ran twice, diffed every profile JSON
+byte-for-byte, identical).
+
+### 13b. Primary-source traceability, not just seed attribution
+
+The claim/source matrix's own audit note claimed "every effects-section
+conclusion traces to an openfoodtox_dossier or external_primary_source"
+while three rows contradicted it outright
+(E250 human-evidence/nitrosation claims, E951 digestion/metabolism claim --
+all `tracked_seed_csv` only). Fixed by upgrading all three to a directly-read
+primary source (not a search snippet, not a secondary report mislabeled as
+primary):
+
+- **E250 human-evidence claim**: now cites the actual EFSA 2017 nitrite
+  re-evaluation's own text (Section 3.6.8 and its exposure discussion),
+  read via an open-access PMC mirror (efsa.europa.eu/Wiley both block
+  automated fetching in this environment, as in every prior round) --
+  quoting the Panel's own conclusion that nitrosamines from added nitrite
+  could not be clearly separated from those already in the food matrix,
+  and that its exposure estimates "do not relate only to the use of
+  nitrite as food additive."
+- **E250 nitrosation claim -- corrected, not just re-sourced**: the
+  primary text revealed the previous claim had the relationship backwards.
+  It said nitrosation "fed into the overall risk characterisation rather
+  than into the ADI figure itself"; the opinion's own Sections 3.6.1/3.7.1/3.7.2
+  show the Panel chose the benchmark-response magnitude used to derive the
+  ADI *itself* partly to keep the resulting nitrosamine margin of exposure
+  above 10,000 (calculated at ~420,000) -- nitrosation shaped the ADI
+  derivation, not only a separate downstream step. Reworded accordingly.
+- **E951 digestion/metabolism claim**: now cites the EFSA 2013 aspartame
+  opinion's own Abstract directly (near-verbatim match: "Aspartame is
+  rapidly and completely hydrolysed in the gastrointestinal tract to
+  phenylalanine, aspartic acid and methanol"), corroborated by the
+  JECFA/WHO Food Additives Series 15 monograph (via IPCS INCHEM).
+- **E330 identity claim -- re-verified per the task's explicit instruction
+  not to trust the prior round's quote, and found wrong**: the previously
+  cited "Definition" text ("obtained by fermentation of carbohydrate
+  solutions (e.g., glucose syrups) with the mould Aspergillus niger") was
+  itself an inaccurate paraphrase, not read from the actual regulation.
+  The real text (read via an archived EUR-Lex snapshot -- live eur-lex.europa.eu
+  blocks automated fetching -- and independently cross-checked against the
+  UK's official statutory-text mirror, both matching exactly): "Citric
+  acid is produced from lemon or pineapple juice, by fermentation of
+  carbohydrate solutions or other suitable media using Candida spp. or
+  non-toxicogenic strains of Aspergillus niger." The regulation allows
+  *either* direct juice extraction *or* fermentation (the prior claim
+  implied fermentation only), names Candida spp. as an alternative
+  organism the prior claim omitted, includes a "non-toxicogenic strains"
+  qualifier the prior claim dropped, and never says "glucose syrups" at
+  all (an invented illustrative example, now removed). The claim and its
+  citation were corrected to the verified text, with the correction
+  itself documented in the source string (not silently swapped).
+
+**Scope boundary, stated honestly rather than claimed complete**: the task
+flagged these three as *examples*; a full audit found several more
+`tracked_seed_csv`/`tracked_seed_json`-only claims remain --
+E250/E330/E951's `purpose` (functional-classification) fields and E951's
+`identity` field. These are lower-stakes (functional/identity description,
+not a safety or effect conclusion) and were **not** re-sourced this round:
+closing the explicitly-named gaps completely (including the E330
+correction, which required discovering the prior citation was itself
+wrong) was judged higher priority than a shallower pass across every
+remaining claim. A new regression test
+(`test_no_consumer_facing_effect_claim_relies_solely_on_tracked_seed_data`)
+enforces the boundary actually reached: every `effects` note with
+evidence_type `human` or `assessment_conclusion` must now trace to
+`openfoodtox_dossier` or `external_primary_source`; `identity`/`purpose`
+fields are explicitly outside that check's scope (documented in the test's
+own docstring, not silently narrowed).
+
+### 13c. Verification
+
+```
+cd nutriguard-backend
+python3 -m pytest tests/unit/test_openfoodtox_evidence_bundle.py \
+  tests/unit/test_openfoodtox_export_docs.py -q
+# 32 passed in 0.19s
+
+python3 -m pytest -q
+# 865 passed, 16 skipped, 3 warnings in 17.21s
+```
+
+865 = 860 (previous) + 1 new provenance regression test + 4 new
+`export_docs` tests. `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` (fenced-block
+format, regenerated from `pilot/v7`) and `docs/OPENFOODTOX_CLAIM_SOURCE_MATRIX.md`
+(regenerated from `editorial_content.py`) both pass their own `--check`
+immediately after `export`, and the pilot itself was confirmed repeatable
+(two full runs, every profile JSON byte-identical).
+
 ## Files
 
+New this revision (fifth): `scripts/openfoodtox/export_docs.py`,
+`tests/unit/test_openfoodtox_export_docs.py`.
 New this revision (fourth): `docs/OPENFOODTOX_CLAIM_SOURCE_MATRIX.md`.
 New this revision (third): `scripts/openfoodtox/editorial_content.py`.
 New in the review-corrections revision: `scripts/openfoodtox/provenance.py`,
 `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md`.
-Modified this revision: `scripts/openfoodtox/{evidence_bundle,editorial_content}.py`
-(§12a-c), `tests/unit/test_openfoodtox_evidence_bundle.py` (+7 tests), this
-file, `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` (revision 3, E150d section
-replaced), `docs/CODEX_HANDOFF.md`.
+Modified this revision: `scripts/openfoodtox/editorial_content.py` (§13b),
+`tests/unit/test_openfoodtox_evidence_bundle.py` (+1 test), this file,
+`docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` (regenerated, fenced-block format),
+`docs/OPENFOODTOX_CLAIM_SOURCE_MATRIX.md` (regenerated), `docs/CODEX_HANDOFF.md`.
 Generated, not committed (bulk/derived, kept outside Git):
-`pilot/v5/` (`pilot/v1`-`v4` preserved unchanged). `staging/v4`/`reports/v4`
+`pilot/v7/` (`pilot/v1`-`v6` preserved unchanged). `staging/v4`/`reports/v4`
 unchanged this round (extraction code untouched).

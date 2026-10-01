@@ -1,5 +1,63 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: delivery consistency gaps closed (Claude)
+
+- Implemented `docs/OPENFOODTOX_DELIVERY_CONSISTENCY_TASK.md` (reviewed
+  baseline `8ceba0531082e2c63cbe62598af663c9f852ece9`) in the same isolated
+  worktree, fast-forwarded first (no drift). Committed at
+  `d573d821770dcc5f147b7c5c4b502ddd0d580320`. Full account in
+  `docs/OPENFOODTOX_PILOT_REPORT.md` §13; regenerated, check-verified
+  complete EN/BG drafts in `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` and the
+  claim matrix in `docs/OPENFOODTOX_CLAIM_SOURCE_MATRIX.md` -- summary only
+  here. Owner authorized subagent use; one general-purpose subagent did the
+  primary-source research (reading actual documents, not snippets), which
+  this session independently spot-checked before using (reproduced the
+  EFSA-nitrite PMC mirror and the EUR-Lex-blocked pattern directly).
+- **Item 1 root cause found**: every previous round had exported the
+  committed EN/BG previews by hand (read a profile's own `.md` output,
+  retype/reformat into the review-drafts document), which is exactly what
+  let the committed file drift -- it still said "reproduces pilot/v5" while
+  containing the pre-fix `каква точно количество` grammar error and other
+  stale text. Fixed structurally: new `scripts/openfoodtox/export_docs.py`
+  mechanically generates both committed docs with no manual step, and its
+  `--check` mode exits non-zero with a line-level diff on any mismatch
+  (including whitespace) -- verified `CHECK OK` for both docs against a
+  freshly-rerun `pilot/v7/` in this session. Review-drafts format changed
+  from hand-prefixed blockquotes to fenced code blocks (more reliable for
+  verbatim reproduction), documented as a deliberate wrapper change.
+- **Item 2**: audited the claim matrix against its own "never seed-only for
+  effect conclusions" claim and found 3 contradicting rows (not just the
+  2 named examples). Upgraded all 3 to directly-read primary sources: E250's
+  human-evidence and nitrosation claims now cite the actual EFSA 2017
+  nitrite opinion (read via an open-access PMC mirror, since efsa.europa.eu/
+  Wiley both block automated fetching as in every prior round) -- and the
+  nitrosation claim was *corrected*, not just re-sourced: the primary text
+  showed nitrosation considerations actually shaped the ADI-derivation
+  benchmark-response choice itself, the reverse of what was previously
+  claimed. E951's digestion/metabolism claim now cites EFSA's 2013 aspartame
+  opinion abstract directly (near-verbatim match) plus a JECFA/WHO
+  corroboration. **E330's regulation quote, re-verified per the task's
+  explicit "don't trust the prior report" instruction, was found to be
+  wrong** -- the real Reg. (EU) 231/2012 "Definition" text (read via an
+  archived EUR-Lex snapshot, cross-checked against the UK's official
+  statutory-text mirror) allows citrus-juice extraction as an alternative to
+  fermentation, names Candida spp. as an alternative organism, and includes
+  a "non-toxicogenic strains" qualifier the prior paraphrase dropped while
+  inventing a "glucose syrups" detail not in the source at all -- corrected.
+  New regression test enforces going forward that no consumer-facing
+  effect/human claim may rely solely on seed data. **Scope boundary stated
+  honestly**: several `purpose`/`identity` fields (lower-stakes,
+  non-safety) remain seed-only -- not claimed fixed, explicitly flagged as
+  a remaining gap in the report rather than silently left.
+- Tests: 6 new/updated this pass. Full backend suite `python -m pytest -q`:
+  **865 passed, 16 skipped** (pre-existing), 0 failed.
+- Per the task's own instruction, extraction code was untouched -- only the
+  pilot previews were rerun into a new `pilot/v7/` (`pilot/v1`-`v6`
+  preserved), verified repeatable.
+- No import into the live database, no API/Health Score change, no container
+  restart, no deploy, no merge, no seed import. Originals and the live
+  stack were not touched.
+
 ## 2026-10-01: delivery consistency follow-up assigned (Codex)
 
 - Reviewed remote `8ceba0531082e2c63cbe62598af663c9f852ece9` read-only:
