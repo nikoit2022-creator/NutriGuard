@@ -1,5 +1,78 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: pilot review corrections implemented (Claude)
+
+- Implemented `docs/OPENFOODTOX_PILOT_REVIEW_TASK.md` (reviewed baseline
+  `63c4d4e66de03a18a4dcc0b41b3d82b634bc2f35`) in the same isolated worktree,
+  fast-forwarded first (no drift). Code/tests committed at
+  `0beb2717491ec8e4e8a5c89b1e63b8b433c3ce33`; full account in
+  `docs/OPENFOODTOX_PILOT_REPORT.md` (now its own revision, with a
+  correction notice at the top preserving what was wrong and why --
+  summary only here).
+- **Item 1 (source identity)**: independently re-verified Codex's finding
+  (fetched the actual EFSA/Wiley page myself rather than trusting the
+  correction) -- `10.2903/j.efsa.2020.6032` assesses E472a-f esters, not
+  E330. Removed the wrong claim. Audited all four pilot references, not
+  just the flagged one: found a genuinely newer, precisely-dated superseding
+  opinion for **E951** (`10.2903/j.efsa.2026.10259`, adopted 2026-09-10,
+  confirmed via EFSA's own plain-language summary to update E951's
+  toxicological/exposure assessment post-IARC-2023, ADI reaffirmed
+  unchanged at 40 mg/kg bw/day -- not in this dataset at all) and a partial
+  2012 exposure-only update for **E150d**
+  (`10.2903/j.efsa.2012.3030`); confirmed **E330** has no completed
+  standalone re-evaluation yet (explicitly pending/low-priority per
+  Commission Regulation (EU) No 1419/2020's own text) -- freshness
+  genuinely unresolved there, not a confirmed gap as previously claimed.
+  Full source-check table (DOI/title/actual assessed identifiers/relevance/
+  superseding-status evidence) in the report §9.
+- **Item 2 (review_eligible)**: replaced the single bool with
+  `ReviewEligibility` (`operator_inspectable` always true; strict,
+  fail-closed `consumer_guidance_eligible` now also checking
+  `evidence_complete`, identity completeness, resolved subject linkage,
+  and excluding AOEL/AAOEL unconditionally as occupational-not-consumer
+  levels). Real-data consequence: only E250 now has any
+  `consumer_guidance_eligible` reference value among all four pilot
+  substances -- a materially more conservative, more correct result. 12 new
+  tests.
+- **Item 3 (matcher truth table)**: fixed `_compare_one` -- both identifiers
+  present but *neither* agreeing was wrongly reported `conflicting` (would
+  have flagged every unrelated, fully-identified dossier in the dataset
+  against every query); now correctly reported as no hit. 2 new tests,
+  including one streaming the exact identity + a real conflict + 50
+  unrelated records through one query.
+- **Item 4 (stale data)**: regenerated the full catalogue/identity-audit
+  (`staging/v4`, `reports/v4`, 11,613/11,613 ok, 75.4s) from the clean
+  `0beb271` commit, recorded via a new shared
+  `scripts/openfoodtox/provenance.py` (git SHA + dirty-tree + diff
+  fingerprint) and a new `records.EXTRACTION_LOGIC_VERSION` marker (now 2).
+  `staging/v3`/`reports/v3` marked unsuitable-for-evidence (plain-text note,
+  outside Git) rather than deleted. Measured dataset-wide: `resolved`
+  chemical-basis count rose 42->47 (+5 genuinely new correct resolutions),
+  the corruption signature (simultaneous `value`+`lower_value`/`upper_value`)
+  dropped 576->0, with the mechanism for a 211/212-record
+  `unsupported_unit`<->`no_mention` reclassification traced and explained
+  in the report. Pilot rerun against `staging/v4` into `pilot/v2/`
+  (`pilot/v1/` preserved); repeatable (diffed twice, identical).
+- **Item 5 (bilingual drafts)**: redesigned -- EN/BG drafts are now genuine
+  readable paraphrases built only from structured fields, never the source's
+  own text presented under a BG heading (what the first revision did,
+  correctly flagged by this review). Verbatim source quotes moved to a
+  separate internal-evidence section. Omitted-field notes retained
+  internally even when the section itself is hidden from the drafts.
+  Concise samples for all four pilot identities committed in the new
+  `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` for Git-based review.
+- Tests: 17 new/updated this pass (matcher +2, evidence_bundle +13 net).
+  Full backend suite `python -m pytest -q`: **848 passed, 16 skipped**
+  (pre-existing), 0 failed.
+- No import into the live database, no API/Health Score change, no container
+  restart, no deploy, no merge. Originals and the live stack were not
+  touched. Remaining blockers unchanged in kind, updated in detail, in
+  `docs/OPENFOODTOX_PILOT_REPORT.md` §10 (catalogue CAS gap; every profile
+  still `not_reviewed`; reuse-clearance decision pending; E951's located
+  newer opinion and E330's unresolved freshness not yet incorporated; only
+  one of four substances currently has any consumer_guidance_eligible
+  value at all).
+
 ## 2026-10-01: pilot review corrections assigned (Codex, docs only)
 
 - Reviewed 4db31ecbaaae5c113398004577748ae7046080f6. Follow-up instructions are in
