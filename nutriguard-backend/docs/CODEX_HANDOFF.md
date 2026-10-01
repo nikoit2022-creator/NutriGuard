@@ -14,6 +14,70 @@
 - Next: Claude fetches the content task, pushes four complete source-linked DRAFT
   profiles and tests/report as applicable; Codex reviews before integration.
 
+## 2026-10-01: substantive EN/BG profile content implemented (Claude)
+
+- Implemented `docs/OPENFOODTOX_PROFILE_CONTENT_TASK.md` (reviewed baseline
+  `40d063444358086c2b47dbe1a2a7386b9509349d`) in the same isolated worktree,
+  fast-forwarded first (no drift). Code committed at
+  `631939a120ad7bf79f1d7f95ab9d821caf741916`. Full account in
+  `docs/OPENFOODTOX_PILOT_REPORT.md` §11; complete EN/BG drafts for all four
+  identities (not abbreviated) in `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md`
+  (revision 2) -- summary only here.
+- New `scripts/openfoodtox/editorial_content.py`: a separately versioned,
+  fixed/reviewed (never live-model-generated) content layer providing
+  source-cited "What it is"/"Purpose in food"/"Relevant effects" text per
+  substance -- now actually populated in the drafts (previously always
+  omitted). Includes one `editorial_chemical_basis` override, applied only
+  to E951 after directly reading all five of its dossiers' own text and
+  confirming aspartame has no salt/ion basis ambiguity (unlike sodium
+  nitrite) -- kept explicitly distinct from the automated field, and
+  deliberately *not* applied to E150d (basis kept unresolved, never
+  guessed, per the task's own instruction).
+- **Fixed the numeric-gating inconsistency the task flagged**: a value's
+  magnitude could previously appear in "Effects and conditions" while being
+  hidden from "Intake guidance". Both sections now use the identical
+  `consumer_guidance_eligible` test; "Intake guidance" is now actually shown
+  for eligible values (E250 automated, E951 via the editorial override)
+  rather than unconditionally omitted. Feed/worker (FEEDAP) findings are now
+  excluded from the consumer draft entirely (confirmed on E330's 4 feed
+  values), not merely caveated inline.
+- **Four content corrections applied**: E951's PKU exclusion now appears in
+  both drafts, twice, adjacent to every shown ADI/safety-conclusion claim.
+  E150d's group ADI (300 mg/kg bw/day for all four caramel colours
+  combined; E150c's own separate 100 mg/kg bw/day sub-ADI given as context;
+  E150d's own basis kept unresolved) is precisely scoped. The E962 opinion's
+  First-published (10 September 2026) and Approved (1 July 2026) dates are
+  now kept distinct (previously conflated as "adopted September 10"), and
+  its E951 work is now described as an update *within* the E962
+  re-evaluation, not a standalone E951 re-evaluation or a claim the 2013
+  opinion was wholly superseded. BG text now translates exact-equivalent
+  terms (натриев нитрит, мг/кг телесно тегло дневно, etc.) instead of
+  leaving them in English.
+- **Found and fixed two real bugs while building this**: (1) a verbosity
+  bug -- E951's five real assessments never merged for display (their
+  justification wording differs slightly each time), so a now much longer
+  per-value sentence was repeated 5x in each of two sections; fixed with a
+  display-only coarser grouping, full per-assessment detail preserved
+  internally. (2) a genuine "English placeholder in the Bulgarian body"
+  bug -- the ineligible-value fallback sentence was interpolating raw
+  English `review_eligibility.reasons` strings directly into Bulgarian
+  text; replaced with a fully-Bulgarian generic phrase.
+- Tests: 5 new (`TestEditorialContentCorrections`: PKU adjacency, E150d
+  group-scope preservation, numeric-gating consistency, E962 date-type
+  distinctness, feed-value exclusion). Full backend suite
+  `python -m pytest -q`: **853 passed, 16 skipped** (pre-existing), 0
+  failed. Per the task's own instruction, `staging/v4`/`reports/v4` were
+  **not** regenerated this round (no extraction code changed) -- only the
+  pilot was rerun (against the unchanged `staging/v4`) into a new
+  `pilot/v4/`, verified repeatable (diffed twice, identical).
+- No import into the live database, no API/Health Score change, no container
+  restart, no deploy, no merge. Originals and the live stack were not
+  touched. Remaining blockers in `docs/OPENFOODTOX_PILOT_REPORT.md` §10/§11
+  (catalogue CAS gap; every profile still `not_reviewed`; reuse-clearance
+  decision pending; E951's located newer opinion and E330's unresolved
+  freshness not yet incorporated; E150d/E330 still have no eligible numeric
+  value at all).
+
 ## 2026-10-01: pilot review corrections implemented (Claude)
 
 - Implemented `docs/OPENFOODTOX_PILOT_REVIEW_TASK.md` (reviewed baseline

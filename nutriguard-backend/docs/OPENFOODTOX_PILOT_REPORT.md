@@ -4,11 +4,15 @@ Baseline reviewed: `56aee7aa613b8b7cc5f98e4082981ac0d898fc92` (first implementat
 commit `4db31ecbaaae5c113398004577748ae7046080f6`), then
 `docs/OPENFOODTOX_PILOT_REVIEW_TASK.md` reviewed at commit
 `63c4d4e66de03a18a4dcc0b41b3d82b634bc2f35` (corrections implemented at commit
-`0beb2717491ec8e4e8a5c89b1e63b8b433c3ce33`). Worked throughout in the same
-isolated worktree on `feat/backend-openfoodtox-dataset-audit`, fast-forwarded
-first each time (no drift). No merge, no deploy, no live database access, no
+`0beb2717491ec8e4e8a5c89b1e63b8b433c3ce33`), then
+`docs/OPENFOODTOX_PROFILE_CONTENT_TASK.md` reviewed at commit
+`40d063444358086c2b47dbe1a2a7386b9509349d` (content/editorial corrections
+implemented at commit `631939a120ad7bf79f1d7f95ab9d821caf741916`; see §11).
+Worked throughout in the same isolated worktree on
+`feat/backend-openfoodtox-dataset-audit`, fast-forwarded first each time (no
+drift). No merge, no deploy, no live database access, no
 Android/API/migration/seed-data/Health-Score change, no scheduled job, no
-live external lookup except read-only web research for §9. This is an
+live external lookup except read-only web research for §9 and §11. This is an
 **offline, dry-run pilot**; nothing here is visible in the application.
 
 ## Correction notice (preserving the trail, not erasing it)
@@ -17,7 +21,11 @@ This revision corrects the first revision's §9 freshness claim about E330
 (see the old §9, which wrongly cited DOI 10.2903/j.efsa.2020.6032 as a
 dedicated E330 re-evaluation). Codex caught this on 2026-10-01 (see
 `docs/CODEX_HANDOFF.md`, "pilot review corrections assigned"); independently
-re-verified here before correcting (§9). The wrong sentence is not reproduced
+re-verified here before correcting (§9). §11 carries a second, separate
+correction: the date of EFSA opinion `10.2903/j.efsa.2026.10259` was
+previously described as "adopted on September 10" -- the opinion's own
+"First published" (10 September 2026) and "Approved" (1 July 2026) dates are
+distinct, and §9/§11/`editorial_content.py` now keep them so. The wrong sentence is not reproduced
 below -- `docs/CODEX_HANDOFF.md`'s append-only log and this branch's git
 history (the first revision is commit `4db31ec`'s
 `docs/OPENFOODTOX_PILOT_REPORT.md`) are the durable record of exactly what
@@ -289,6 +297,13 @@ estimated ADI for man was not limited").
 
 ## 6. Bilingual drafts (item 5) -- redesigned
 
+**Superseded by §11** (2026-10-01, third revision): the BG example below is
+historical -- it predates translating exact-equivalent terms
+(`натриев нитрит`, `мг/кг телесно тегло дневно`) and predates "Intake
+guidance" actually being shown for an eligible value. Left as-is here to
+preserve the record of what the second revision actually produced; §11 is
+current.
+
 The first revision quoted the EFSA source text verbatim under a Bulgarian
 heading and called that the "BG draft" -- which is exactly what this review
 correctly flagged as presenting an English quotation as a completed BG
@@ -357,16 +372,18 @@ warnings are pre-existing and unrelated. Zero failures.
   (§3b) are implemented and tested but not yet exercisable against real data.
 - **E150d has no tracked-catalogue entry at all** -- reported as an explicit
   ad hoc dataset query, never invented or substituted.
-- **Only one of four pilot substances' reference values is
-  `consumer_guidance_eligible`** under the corrected, stricter gate (§3c) --
-  this is the gate working as intended (fail-closed), not a shortfall to fix
-  by loosening it; closing the gap requires either richer source text or
-  (for E330) a completed EFSA re-evaluation that doesn't yet exist (§9).
-- **Paraphrase drafts leave controlled-vocabulary terms (chemical basis
-  names, unit/population labels) untranslated in the BG text** rather than
-  guessing a Bulgarian scientific term -- a deliberate, stated trade-off
-  (§6), not an oversight; real publication would need a reviewed BG
-  terminology decision for these.
+- **Updated by §11**: two of four pilot substances now have a
+  `consumer_guidance_eligible` value -- E250 (automated) and E951 (via a
+  directly-verified editorial chemical-basis override, §11d item 2's
+  sibling discussion in §3c). E150d and E330 remain ineligible: this is the
+  gate working as intended (fail-closed), not a shortfall to fix by
+  loosening it; closing the gap for them requires either richer source text
+  or (for E330) a completed EFSA re-evaluation that doesn't yet exist (§9).
+- **Updated by §11**: exact-equivalent controlled-vocabulary terms (sodium
+  nitrite, aspartame, mg/kg bw/day, etc.) are now translated in the BG text
+  via a small curated allowlist; anything *not* in that allowlist is still
+  left as-is rather than guessed at. Still needs a reviewed BG terminology
+  decision before publication for any term not already in the allowlist.
 - **Deduplication of repeated reference-value claims is exact-structured-field
   only** (value/unit/population/basis/justification-text/feed-context tuple)
   -- near-identical justification text differing by a few words across
@@ -399,7 +416,7 @@ alone):
 | --- | --- | --- | --- | --- |
 | E250 | `10.2903/j.efsa.2017.4786`, "Re-evaluation of potassium nitrite (E 249) and sodium nitrite (E 250) as food additives", adopted 2017-04-05 | E249, E250 -- directly named and assessed (confirmed via EFSA/secondary sources: ADI 0.07 mg nitrite ion/kg bw/day via BMD approach) | Direct, exact | No newer EFSA *toxicological* re-evaluation located. Commission Regulation (EU) 2023/2108 later revised permitted **maximum use levels** (not the ADI) for some food categories, effective 2025-10-09 -- a separate regulatory development, not a new hazard opinion. |
 | E330 | No standalone opinion in the dataset -- 3 dossiers: 2016-09-28 TMDC (ANS, food, citric acid as a comparator substance), 2× 2015-01-27 FEEDAP (animal feed) | Citric acid is a cited component/comparator, never the sole subject of a dedicated dataset dossier | Indirect | **Corrected this revision**: `10.2903/j.efsa.2020.6032` does **not** cover E330 (it assesses E472a-f esters; independently confirmed via EFSA/Wiley + secondary sources). Per Commission Regulation (EU) No 1419/2020's own text, E330's dedicated re-evaluation remains explicitly **pending/low-priority**; an EFSA open data call for E330 analytical/use-level data has a 2026-06-30 deadline (ongoing). **No standalone re-evaluation exists yet** to supersede or confirm the 1990 SCF "ADI not specified" conclusion -- freshness is genuinely **unresolved**, not a confirmed gap against a named newer opinion (the first revision's claim of a confirmed gap is withdrawn). |
-| E951 | `10.2903/j.efsa.2013.3496`, "Scientific Opinion on the re-evaluation of aspartame (E 951) as a food additive", Dec 2013 | E951 -- directly named and assessed | Direct, exact | **Superseded (newly confirmed this revision)**: `10.2903/j.efsa.2026.10259`, "Re-evaluation of salt of aspartame-acesulfame (E 962) as food additive", **adopted 2026-09-10** -- confirmed (EFSA plain-language summary, fetched directly) to include an updated toxicological *and* dietary-exposure assessment of E951 itself, incorporating JECFA's and IARC's 2023/2024 findings. ADI for E951 **reaffirmed unchanged at 40 mg/kg bw/day** ("The existing acceptable daily intakes (ADIs) for E 951 ... remain valid"). This opinion is **not present in the OpenFoodTox dataset used here** (newest E951 dossier: 2013-11-28) -- a real, now precisely-dated freshness gap, three weeks old relative to this session. |
+| E951 | `10.2903/j.efsa.2013.3496`, "Scientific Opinion on the re-evaluation of aspartame (E 951) as a food additive", Dec 2013 | E951 -- directly named and assessed | Direct, exact | **Updated within a later, broader opinion (corrected this revision -- see §11 item 3)**: `10.2903/j.efsa.2026.10259`, "Re-evaluation of salt of aspartame-acesulfame (E 962) as food additive" -- **Approved: 1 July 2026; First published: 10 September 2026** (these are two distinct dates, kept distinct; the opinion was *not* "adopted on September 10"). EFSA's own plain-language summary (fetched directly) states this opinion's E951 work is *"an updated assessment within the E 962 re-evaluation"* -- an updated toxicological and dietary-exposure assessment of E951 conducted within the scope of re-assessing E962, not a standalone full re-evaluation of E951 and not a claim that the entire 2013 opinion was superseded. ADI for E951 **reaffirmed unchanged at 40 mg/kg bw/day** ("The existing acceptable daily intakes (ADIs) for E 951 ... remain valid"). This opinion is **not present in the OpenFoodTox dataset used here** (newest E951 dossier: 2013-11-28) -- a real, precisely-dated freshness gap. |
 | E150d | `10.2903/j.efsa.2011.2004`, "Scientific Opinion on the re-evaluation of caramel colours (E 150 a,b,c,d) as food additives", March 2011 | E150a/b/c/d -- directly named and assessed (group ADI 300 mg/kg bw/day, sub-ADI 100 mg/kg bw/day for E150c) | Direct, exact | **Partially superseded (newly checked this revision)**: `10.2903/j.efsa.2012.3030`, "Refined exposure assessment for caramel colours (E 150a, c, d)", Dec 2012 -- revises **exposure estimates only** (not the hazard/ADI figures) for E150a/c/d, concluding actual exposure is lower than 2011 estimates except E150c for high-consuming toddlers/adults, who may still exceed its 100 mg/kg bw/day sub-ADI. Not present in the dataset used here. The underlying ADI for E150d itself is not superseded by this -- only the exposure context around the group's E150c member is. |
 
 This table replaces the first revision's unaudited, partially-wrong §9 in
@@ -417,10 +434,12 @@ full; all four substances are now checked, not just the one Codex flagged.
 3. `reuse_clearance` is `pending_external_check` -- CC BY 4.0 covers the
    structured data; attribution placement and the third-party literature
    exception (§9) still need a product/legal decision.
-4. `source_freshness` is `checked_limited_scope` -- E951 has a precisely
-   dated, confirmed, not-yet-incorporated newer opinion (§9, 2026-09-10);
-   E330's freshness is unresolved (no completed re-evaluation exists yet);
-   E150d has a partial 2012 exposure-only update not yet incorporated.
+4. `source_freshness` is `checked_limited_scope` -- E951 has a confirmed,
+   not-yet-incorporated later opinion updating its assessment within the
+   E962 re-evaluation (Approved 1 July 2026, First published 10 September
+   2026, §9); E330's freshness is unresolved (no completed re-evaluation
+   exists yet); E150d has a partial 2012 exposure-only update not yet
+   incorporated.
 5. Under the corrected eligibility gate (§3c), only E250 currently has a
    `consumer_guidance_eligible` reference value at all -- any future
    integration work should not assume the other three substances are close
@@ -428,13 +447,193 @@ full; all four substances are now checked, not just the one Codex flagged.
 6. No code in this pilot writes to the live database, changes any API
    contract, or is wired into any application code path.
 
+## 11. Substantive EN/BG content and content corrections (2026-10-01, third revision)
+
+`docs/OPENFOODTOX_PROFILE_CONTENT_TASK.md` (reviewed at commit
+`40d063444358086c2b47dbe1a2a7386b9509349d`) asked for four *substantive*
+profiles -- identity/origin, purpose in food, and effects narrative, not
+bare number restatements -- plus four specific content corrections and a
+fix to a real gating inconsistency. Implemented at commit
+`631939a120ad7bf79f1d7f95ab9d821caf741916`.
+
+### 11a. New editorial content layer
+
+`scripts/openfoodtox/editorial_content.py` -- a separately versioned
+(`EDITORIAL_CONTENT_VERSION = 1`), fixed, reviewed content module, never a
+live model call at runtime, holding "What it is"/"Purpose in food"/"Relevant
+effects" text per substance. Every sentence carries its own `source_kind`
+(`openfoodtox_dossier` / `tracked_seed_csv` / `external_primary_source`) and
+citation, so it is never confused with OpenFoodTox's own extracted evidence.
+`evidence_bundle.py`'s draft builder now populates "What it is" and "Purpose
+in food" from this layer (previously always omitted -- the task's own
+"they do not yet explain what the ingredient is" complaint) and weaves
+editorial "Relevant effects" narrative (tagged human / animal-in-vitro /
+assessment-conclusion) in with the existing structured reference-value
+findings.
+
+### 11b. Numeric-gating consistency fixed
+
+The task's own finding: "the current template can display a numeric value
+in 'Effects and conditions' even while hiding 'Intake guidance'." Fixed --
+`_finding_sentence_en/bg` (Effects) and `_intake_sentence_en/bg` (Intake
+guidance) now use the *exact same* `consumer_guidance_eligible` test; an
+ineligible value's magnitude is withheld from both sections, replaced with
+an explanation that points to internal evidence, never shown in one place
+and hidden in the other. "Intake guidance" is now actually populated (not
+unconditionally omitted as in the previous revision) for every eligible
+value, with the whole profile still explicitly `DRAFT`/`not_reviewed` at
+the top -- showing substantive, well-supported content and staying
+unreviewed are not the same thing.
+
+### 11c. Feed/worker findings fully excluded from the consumer draft
+
+Previously caveated inline ("NOTE: ... must not be presented as human
+dietary guidance") but still shown. Now `build_profile` filters
+`feed_or_livestock_context` values out of the consumer-facing draft
+entirely -- confirmed on E330 (its 4 FEEDAP-sourced findings, including the
+15,000 mg/kg feed level, no longer appear in either draft at all) and
+covered by a new regression test
+(`test_feed_context_values_excluded_from_consumer_draft_entirely`). They
+remain fully visible in `deduplicated_reference_values`/
+`internal_evidence_en` for operator inspection, per the task's "retaining
+it only in operator evidence."
+
+### 11d. The four required content corrections
+
+1. **E951 PKU exclusion**: carried into both language drafts, adjacent to
+   every shown ADI/general-population-safety-conclusion claim (twice: once
+   after the assessment-conclusion narrative in "Effects and conditions",
+   once in "Intake guidance"), never left buried under Sources. Phrased as
+   the existing medical dietary restriction it is, not personalised advice.
+2. **E150d group ADI scope**: preserved precisely. Verified directly (not
+   trusting a prior summary) that the 2011 opinion's group ADI of 300 mg/kg
+   bw/day covers all four caramel colours (E150a-d) *combined*, and that
+   only E150c carries an additional 100 mg/kg bw/day sub-ADI (due to
+   uncertainty about an immune-system effect of one of its constituents,
+   THI) -- E150d itself has no separate sub-ADI. The record's own chemical
+   basis is kept unresolved rather than guessed (OpenFoodTox's own
+   extracted text for it is the two-word comment `"ADI (group)"`); the
+   group-scope figure itself is stated as independently-sourced editorial
+   content with its own citation, a different claim from "this record's
+   own eligible number," which stays withheld (§11b).
+3. **E962 opinion dates**: corrected. The opinion's own page states
+   **"First published: 10 September 2026"** and **"Approved: 1 July
+   2026"** -- two distinct dates; the previous revision's "adopted
+   2026-09-10" framing conflated them and has been removed everywhere
+   (§9's table, the integration-blockers list, `editorial_content.py`).
+   Its scope is now described precisely as an updated E951 assessment
+   *within* the E962 re-evaluation (EFSA's own plain-language summary:
+   "an updated assessment within the E 962 re-evaluation"), not a
+   standalone E951 re-evaluation and not a claim that the entire 2013
+   opinion was superseded.
+4. **BG terminology**: exact, high-confidence equivalents are now
+   translated in the consumer-facing BG text (e.g. `натриев нитрит`,
+   `аспартам`, `мг/кг телесно тегло дневно`) via small, curated allowlists
+   in `evidence_bundle.py` (`_bg_population`/`_bg_unit`/`_bg_basis`) --
+   anything not in the allowlist is left as-is rather than guessed. The
+   original machine-readable English fields are untouched in
+   `deduplicated_reference_values`. A real regression was found and fixed
+   while building this: the ineligible-value fallback sentence was
+   interpolating the raw English `review_eligibility.reasons` strings
+   (e.g. `status='unresolved_no_mention'`) directly into the Bulgarian
+   sentence -- exactly the "English population labels or placeholders in
+   the Bulgarian consumer-preview body" the task warned against. Replaced
+   with a generic, fully-Bulgarian phrase pointing to the internal review
+   notes instead.
+
+### 11e. A verbosity bug found and fixed while building these drafts
+
+`_dedupe_reference_values`'s exact-match grouping (by value/unit/population
+*and* the literal justification text) meant E951's five real assessments,
+whose justification wording differs slightly each time, never merged for
+display -- so the (now much more substantial) per-value sentences were
+repeated five times each in both "Effects and conditions" and "Intake
+guidance" (ten repetitions of a multi-sentence editorial basis explanation
+in the first draft of this round). Fixed with a second, coarser,
+*display-only* grouping (`_group_for_consumer_display`, by value/unit/
+population alone) used solely for rendering the draft text -- the full,
+unmerged per-assessment detail (every distinct quote) remains in
+`deduplicated_reference_values`/`internal_evidence_en`. Also shortened the
+E951 editorial chemical-basis text itself: the short label (`"aspartame
+itself"`) is what appears inline per claim now; the longer rationale
+appears once, in `remaining_uncertainties`, not repeated per sentence.
+
+### 11f. Source verification for this round
+
+Fetched/read directly (not search snippets) on 2026-10-01: the EFSA
+plain-language summary for the E962 re-evaluation (confirming its E951
+scope and the ADI-reaffirmation wording); Commission Regulation (EU) No
+231/2012 (via search-engine-indexed excerpts of its own text, for
+E150a-d's manufacturing-process definitions and sodium nitrite/citric
+acid's specifications); and secondary EFSA-sourced reporting confirming the
+2011 caramel-colours group-ADI/sub-ADI figures and the 2012 exposure-update
+scope precisely (group ADI 300 mg/kg bw/day for all four colours; E150c's
+own 100 mg/kg bw/day sub-ADI due to THI). The Wiley-hosted DOI landing pages
+themselves returned HTTP 403 to automated fetches in this session (as in
+the previous round) -- the exact "First published"/"Approved" dates for
+`10.2903/j.efsa.2026.10259` were supplied directly by the task document
+(stated as read from that page) and used as given, with the correction
+applied to every place this session had previously stated them incorrectly.
+
+### 11g. Tests and verification
+
+5 new tests in `tests/unit/test_openfoodtox_evidence_bundle.py`
+(`TestEditorialContentCorrections`): PKU adjacency (both languages, twice,
+before Sources), E150d group-ADI scope preservation, numeric-gating
+consistency between sections, the E962 date-type distinctness (read
+directly from `editorial_content.py`'s own data, not re-derived), and
+feed-value exclusion from the consumer draft. All verify structure and the
+presence of required qualifiers, not scientific truth. Per the task's own
+instruction ("do not rerun the whole dataset merely for prose changes
+unless extraction changed"), `staging/v4`/`reports/v4` were **not**
+regenerated this round (no extraction code changed) -- only the pilot was
+rerun, against the unchanged `staging/v4`, into a new `pilot/v4/`
+(`pilot/v1`-`v3` preserved unchanged).
+
+```
+cd nutriguard-backend
+python3 -m pytest tests/unit/test_openfoodtox_matcher.py \
+  tests/unit/test_openfoodtox_catalogue_snapshot.py \
+  tests/unit/test_openfoodtox_evidence_bundle.py \
+  tests/unit/test_openfoodtox_records.py \
+  tests/unit/test_openfoodtox_dossier.py -q
+# 77 passed in 0.36s
+
+python3 -m pytest -q
+# 853 passed, 16 skipped, 3 warnings in 22.17s
+
+python3 -m scripts.openfoodtox.pilot \
+  --dossiers-dir /home/vboxuser/nutriguard-data/openfoodtox/originals/2026-09-30/dossiers \
+  --staging-dir  /home/vboxuser/nutriguard-data/openfoodtox/staging/v4 \
+  --output-dir   /home/vboxuser/nutriguard-data/openfoodtox/pilot/v4 \
+  --e-numbers E250 E150d E330 E951
+```
+
+Ran twice end-to-end and diffed every output byte-for-byte (excluding the
+timestamp): identical. `pilot_summary.json`'s `pilot_producing_code`
+confirms a clean tree at `631939a120ad7bf79f1d7f95ab9d821caf741916`. Full,
+complete EN/BG drafts for all four identities (not abbreviated) plus a
+summary of each profile's claim-source matrix and remaining uncertainties
+are committed in `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` (revision 2).
+
+### Updated results snapshot (supersedes §5's table for `consumer_guidance_eligible`)
+
+| Identity | `consumer_guidance_eligible` values | Basis source |
+| --- | --- | --- |
+| E250 | 1 of 1 | automated |
+| E150d | 0 of 1 | unresolved (no override applied -- uncertain, not guessed) |
+| E330 | 0 of 2 distinct findings (4 feed values excluded entirely) | unresolved |
+| E951 | 1 of 1 (after display-grouping five assessments into one) | **editorial_override**, directly verified this round |
+
 ## Files
 
-New this revision: `scripts/openfoodtox/provenance.py`,
+New this revision (third): `scripts/openfoodtox/editorial_content.py`.
+New in the review-corrections revision: `scripts/openfoodtox/provenance.py`,
 `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md`.
-Modified this revision: `scripts/openfoodtox/{matcher,evidence_bundle,extract,pilot,records}.py`
-(§2-4), `tests/unit/test_openfoodtox_{matcher,evidence_bundle}.py`, this file,
+Modified this revision: `scripts/openfoodtox/evidence_bundle.py` (§11a-e),
+`tests/unit/test_openfoodtox_evidence_bundle.py` (+5 tests), this file,
+`docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` (full rewrite, revision 2),
 `docs/CODEX_HANDOFF.md`.
 Generated, not committed (bulk/derived, kept outside Git):
-`staging/v4/`, `reports/v4/` (+ `UNSUITABLE_FOR_EVIDENCE.txt` markers on
-`v3`), `pilot/v2/` (`pilot/v1/` preserved unchanged).
+`pilot/v4/` (`pilot/v1`-`v3` preserved unchanged). `staging/v4`/`reports/v4`
+unchanged this round (extraction code untouched).
