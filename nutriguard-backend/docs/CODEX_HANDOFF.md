@@ -1,5 +1,65 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: owner-approved four-profile application integration implemented (Claude)
+
+- Implemented `docs/OPENFOODTOX_APP_PILOT_INTEGRATION_TASK.md` (baseline
+  `037b3ccbeb91b91e539aa24474674e6b9687dc1e`), same isolated worktree,
+  fast-forwarded first. Full field contract, fixtures and verification in
+  `docs/OPENFOODTOX_APP_PILOT_INTEGRATION_REPORT.md` -- summary only here.
+  Backend-only; no Android code touched.
+- New tracked content artifact `app/seed/openfoodtox_pilot_profiles.json`
+  (built mechanically by `scripts/openfoodtox/build_app_pilot_content.py`
+  directly from `editorial_content.py`'s structured dataclasses -- no
+  Markdown parsing, no bulk VM dataset needed at runtime), and a new,
+  separate, bounded import --
+  `app/seed/load_openfoodtox_pilot_content.py` -- explicit four-identity
+  allowlist, dry-run by default, `--apply` writes+commits one
+  transaction, rollback-on-failure and idempotent re-run both tested.
+  Deliberately NOT `load_seed.py`'s broad merge, which would have
+  overwritten unrelated scientific fields.
+- E250/E951 (existing `VERIFIED`) and E330 (existing `LIMITED_DATA`):
+  only `description`/`purposeInFood`/`healthConcerns`/`effectConditions`/
+  `dietaryGuidance`/`references` updated to the OpenFoodTox pilot
+  content. `riskLevel`, `riskAssessmentAvailable`, `verificationStatus`,
+  `efsaStatus`/`fdaStatus`, `acceptableDailyIntake`, every dietary/
+  scoring flag -- all byte-for-byte unchanged (tested directly, plus a
+  real product's Health Score computed before/after the import and
+  asserted identical). E330 is never promoted to `VERIFIED`.
+- E150d provisioned as a new, distinct ingredient (`LIMITED_DATA`,
+  `riskAssessmentAvailable=false`, `riskLevel=SAFE` placeholder --
+  excluded from Health Score scoring by construction). Its group ADI
+  figure stays withheld (`acceptableDailyIntake=""`) because the
+  pilot's own numeric-eligibility check never resolved its chemical
+  basis -- owner publication permission for the narrative content does
+  not resolve that separately; `dietaryGuidance` explains the shared
+  group limit in prose instead of asserting a number.
+- New, narrowly scoped owner-approved-publication mechanism: one
+  additive migration (`a8b9c0d1e2f3`, boolean
+  `ingredient_localizations.owner_approved_without_review`, default
+  `false`) lets a row be served while honestly `DRAFT` (never relabeled
+  `REVIEWED`/`HUMAN_CURATED`) when an owner has explicitly approved that
+  specific content. Verified reversible against a disposable,
+  isolated Postgres 16 container (destroyed after use, never the live
+  `nutriguard-backend-db-1` stack).
+- Verified consistently across direct ingredient, product, OCR-text, and
+  partial-result response paths (label-image's general mechanism was
+  already covered by existing tests); real, regeneratable response
+  fixtures for Codex in `docs/openfoodtox_app_pilot_fixtures/`
+  (`scripts/openfoodtox/generate_app_pilot_fixtures.py`).
+- `openapi.json` regenerated: the only contract-relevant change is an
+  additive `ownerApprovedWithoutReview: boolean = false` field on
+  `IngredientLocalizedTextOut`; the rest of the diff is pre-existing,
+  unrelated FastAPI/Pydantic version drift (confirmed by regenerating
+  against the unmodified tree first -- same drift, zero code changes).
+- Tests: 30 new, 1 updated (a migration-head assertion loosened to
+  accommodate the new migration on top) this pass. Full backend suite
+  `python -m pytest -q`: **895 passed, 16 skipped** (pre-existing), 0
+  failed.
+- No merge, no deploy, no live database/container access, no secrets
+  changes, no bulk extraction rerun, no bulk dataset commit, no Android
+  changes. Stopping per the task's own instruction -- ready for Codex to
+  wire/verify Android against the published fixtures.
+
 ## 2026-10-01: owner-approved four-profile application integration assigned
 
 - Owner accepts source-backed pilot content for display without an outside

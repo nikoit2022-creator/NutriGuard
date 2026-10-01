@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
@@ -46,5 +46,23 @@ class IngredientLocalization(Base):
     source_content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # docs/OPENFOODTOX_APP_PILOT_INTEGRATION_TASK.md: a narrowly scoped,
+    # explicit owner-approved-publication escape hatch -- distinct from
+    # `translation_status`, never a replacement for it. A row may be
+    # served to consumers while still honestly `DRAFT` (no human
+    # translator has reviewed it) when an owner has explicitly approved
+    # THIS content for display without that review (e.g. the bounded
+    # OpenFoodTox pilot). Defaults to `False` for every row that
+    # predates this column and every row any other writer (load_seed,
+    # a future translation-review workflow) ever creates -- only
+    # `app/seed/load_openfoodtox_pilot_content.py`'s narrow,
+    # allowlisted import sets this `True`, and only alongside the
+    # honest `DRAFT`/`MACHINE_TRANSLATED` status/source pair, never
+    # `REVIEWED`/`HUMAN_CURATED` (which would be a false human-review
+    # claim). See `app.services.ingredient_localization.build_localizations`
+    # for the exact serving rule this flag participates in.
+    owner_approved_without_review: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
 
     ingredient: Mapped["Ingredient"] = relationship(back_populates="localization_rows")  # type: ignore[name-defined]

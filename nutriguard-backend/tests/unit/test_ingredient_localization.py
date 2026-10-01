@@ -77,3 +77,62 @@ def test_localization_never_duplicates_identifiers_or_citations():
 
     for forbidden in ("eNumber", "insNumber", "casNumber", "references", "sourceUrl", "adiSource"):
         assert forbidden not in profile
+
+
+def test_owner_approved_draft_is_exposed_without_claiming_human_review():
+    """docs/OPENFOODTOX_APP_PILOT_INTEGRATION_TASK.md: a narrowly scoped
+    owner-approved-publication escape hatch for honestly-DRAFT content
+    (e.g. the bounded OpenFoodTox pilot) -- never a relabeling to
+    REVIEWED, which would falsely claim a human translator reviewed it."""
+    ingredient = _ingredient()
+    ingredient.localization_rows = [
+        _bg_row(
+            ingredient,
+            translation_status=IngredientTranslationStatus.DRAFT,
+            owner_approved_without_review=True,
+        )
+    ]
+
+    result = build_localizations(ingredient)
+
+    assert result["bg"]["translationStatus"] == "DRAFT"
+    assert result["bg"]["ownerApprovedWithoutReview"] is True
+    assert result["en"]["ownerApprovedWithoutReview"] is False
+
+
+def test_owner_approved_draft_still_requires_a_current_hash():
+    """The owner-approval flag covers the content as approved, never a
+    later, unapproved edit to the canonical English source -- the hash
+    check is not bypassed by the flag."""
+    ingredient = _ingredient()
+    ingredient.localization_rows = [
+        _bg_row(
+            ingredient,
+            translation_status=IngredientTranslationStatus.DRAFT,
+            owner_approved_without_review=True,
+            source_content_hash="0" * 64,
+        )
+    ]
+
+    assert build_localizations(ingredient).keys() == {"en"}
+
+
+def test_plain_draft_without_owner_approval_stays_hidden():
+    """The new flag must never widen the REVIEWED gate by default --
+    an ordinary DRAFT row from any other writer (unset, `False`) is
+    hidden exactly as before."""
+    ingredient = _ingredient()
+    ingredient.localization_rows = [
+        _bg_row(ingredient, translation_status=IngredientTranslationStatus.DRAFT)
+    ]
+
+    assert build_localizations(ingredient).keys() == {"en"}
+
+
+def test_ordinary_reviewed_row_reports_owner_approval_false():
+    ingredient = _ingredient()
+    ingredient.localization_rows = [_bg_row(ingredient)]
+
+    result = build_localizations(ingredient)
+
+    assert result["bg"]["ownerApprovedWithoutReview"] is False

@@ -19,7 +19,12 @@ def _scripts() -> ScriptDirectory:
 def test_the_migration_is_the_single_head_on_top_of_the_previous_one():
     scripts = _scripts()
     assert scripts.get_revision(REVISION).down_revision == "c6d7e8f9a0b1"
-    assert scripts.get_heads() == [REVISION]
+    # A later migration (a8b9c0d1e2f3) now chains on top of this one --
+    # this assertion only pins THIS migration's own position in the
+    # chain, not that it's the overall latest (see
+    # test_ingredient_language_provenance_migration.py for the same
+    # single-head-without-pinning-which-one pattern).
+    assert len(scripts.get_heads()) == 1
 
 
 def test_the_migration_only_adds_one_table_and_reverses_it():
