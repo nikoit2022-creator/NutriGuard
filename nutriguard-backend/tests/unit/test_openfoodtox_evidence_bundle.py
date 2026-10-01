@@ -8,8 +8,114 @@ from __future__ import annotations
 import zipfile
 
 from scripts.openfoodtox.catalogue_snapshot import CatalogueIdentity, normalize_e_number
-from scripts.openfoodtox.evidence_bundle import build_profile
+from scripts.openfoodtox.codebook import Codebook
+from scripts.openfoodtox.evidence_bundle import _assess_review_eligibility, build_profile
 from scripts.openfoodtox.matcher import match_catalogue_against_staging
+
+_GOOD_RV = {
+    "value_type": "ADI",
+    "evidence_complete": True,
+    "subject_linkage_basis": "single_identity_dossier",
+    "chemical_basis": {"status": "resolved", "basis": "sodium nitrite"},
+    "unit_label": "mg/kg bw/day",
+    "population_label": "consumers",
+}
+
+
+class TestAssessReviewEligibility:
+    def test_fully_valid_record_is_consumer_guidance_eligible(self):
+        e = _assess_review_eligibility(_GOOD_RV, feed_context=False, identity_evidence_complete=True)
+        assert e.operator_inspectable is True
+        assert e.consumer_guidance_eligible is True
+        assert e.reasons == []
+
+    def test_truncated_record_with_otherwise_valid_basis_and_units_is_never_eligible(self):
+        """Regression: evidence_complete was previously not checked at all
+        -- a record whose own extraction was truncated must never be
+        consumer_guidance_eligible no matter how clean its basis/unit
+        look, since the truncation could have dropped a disqualifying
+        field."""
+        rv = {**_GOOD_RV, "evidence_complete": False}
+        e = _assess_review_eligibility(rv, feed_context=False, identity_evidence_complete=True)
+        assert e.operator_inspectable is True  # still inspectable, never hidden
+        assert e.consumer_guidance_eligible is False
+        assert any("incomplete" in r for r in e.reasons)
+
+    def test_missing_evidence_complete_flag_fails_closed(self):
+        rv = {**_GOOD_RV}
+        del rv["evidence_complete"]
+        e = _assess_review_eligibility(rv, feed_context=False, identity_evidence_complete=True)
+        assert e.consumer_guidance_eligible is False
+
+    def test_incomplete_identity_extraction_is_never_eligible(self):
+        e = _assess_review_eligibility(_GOOD_RV, feed_context=False, identity_evidence_complete=False)
+        assert e.consumer_guidance_eligible is False
+        assert any("identity" in r for r in e.reasons)
+
+    def test_unresolved_subject_link_is_never_eligible(self):
+        rv = {**_GOOD_RV, "subject_linkage_basis": "multiple_distinct_linked_identities"}
+        e = _assess_review_eligibility(rv, feed_context=False, identity_evidence_complete=True)
+        assert e.consumer_guidance_eligible is False
+        assert any("subject linkage" in r for r in e.reasons)
+
+    def test_aoel_operator_exposure_level_is_never_a_consumer_value(self):
+        """AOEL/AAOEL are occupational (operator) exposure levels, never
+        a consumer daily/acute intake limit -- must be excluded
+        regardless of how complete and well-sourced the record is."""
+        rv = {**_GOOD_RV, "value_type": "AOEL", "population_label": "consumers"}
+        e = _assess_review_eligibility(rv, feed_context=False, identity_evidence_complete=True)
+        assert e.consumer_guidance_eligible is False
+        assert any("AOEL" in r for r in e.reasons)
+
+    def test_other_type_is_never_a_consumer_value(self):
+        rv = {**_GOOD_RV, "value_type": "OTHER"}
+        e = _assess_review_eligibility(rv, feed_context=False, identity_evidence_complete=True)
+        assert e.consumer_guidance_eligible is False
+
+    def test_worker_population_is_not_a_consumer_population(self):
+        rv = {**_GOOD_RV, "population_label": "workers"}
+        e = _assess_review_eligibility(rv, feed_context=False, identity_evidence_complete=True)
+        assert e.consumer_guidance_eligible is False
+        assert any("population" in r for r in e.reasons)
+
+    def test_species_specific_population_is_not_a_consumer_population(self):
+        rv = {**_GOOD_RV, "value_type": "OTHER", "population_label": "Poultry"}
+        e = _assess_review_eligibility(rv, feed_context=False, identity_evidence_complete=True)
+        assert e.consumer_guidance_eligible is False
+
+    def test_feed_context_blocks_eligibility_even_with_consumer_population_label(self):
+        rv = {**_GOOD_RV, "value_type": "OTHER", "population_label": "consumers"}
+        e = _assess_review_eligibility(rv, feed_context=True, identity_evidence_complete=True)
+        assert e.consumer_guidance_eligible is False
+        assert any("feed" in r.lower() for r in e.reasons)
+
+    def test_unresolved_chemical_basis_blocks_eligibility(self):
+        rv = {**_GOOD_RV, "chemical_basis": {"status": "unresolved_no_mention"}}
+        e = _assess_review_eligibility(rv, feed_context=False, identity_evidence_complete=True)
+        assert e.consumer_guidance_eligible is False
+
+    def test_missing_unit_blocks_eligibility(self):
+        rv = {**_GOOD_RV, "unit_label": None}
+        e = _assess_review_eligibility(rv, feed_context=False, identity_evidence_complete=True)
+        assert e.consumer_guidance_eligible is False
+
+    def test_all_reasons_reported_together_not_just_the_first(self):
+        rv = {
+            "value_type": "AOEL",
+            "evidence_complete": False,
+            "subject_linkage_basis": "no_resolvable_subject_link",
+            "chemical_basis": {"status": "unresolved_no_mention"},
+            "unit_label": None,
+            "population_label": "workers",
+        }
+        e = _assess_review_eligibility(rv, feed_context=True, identity_evidence_complete=False)
+        assert e.consumer_guidance_eligible is False
+        assert len(e.reasons) >= 6
+
+_TEST_CODEBOOK = Codebook(
+    unit={"2085": "mg/kg bw/day"},
+    value_by_xsl={"FLEXIBLE_SUMMARY-ToxRefValues.xsl": {"8521": "consumers"}},
+)
 
 MANIFEST_TMPL = """<?xml version='1.0' encoding='UTF-8'?><manifest xmlns="http://iuclid6.echa.europa.eu/namespaces/manifest/v1" xmlns:xlink="http://www.w3.org/1999/xlink">
 <general-information>
@@ -98,7 +204,7 @@ def _make_pilot_style_dossier_zip(path: str, *, cas: str, e_number_synonym: str,
                <AcceptableDailyIntake>
                  <Adi><unitCode>2085</unitCode><lowerValue>{adi_lower_value}</lowerValue></Adi>
                  <Population><value>8521</value></Population>
-                 <JustificationAndComments>The Panel derived an ADI of {adi_lower_value} mg/kg bw per day for {name}.</JustificationAndComments>
+                 <JustificationAndComments>The Panel derived an ADI of {adi_lower_value} mg {name}/kg bw per day.</JustificationAndComments>
                </AcceptableDailyIntake>
              </HumanHealthHazardCharacteristics>
            </FLEXIBLE_SUMMARY.ToxRefValues>""",
@@ -147,20 +253,31 @@ class TestBuildProfileEndToEnd:
         [result] = match_catalogue_against_staging([cat], str(cat_jsonl))
         assert result.overall_status == "exact_match"
 
-        profile = build_profile(cat, result, str(dossiers_dir), None)
+        profile = build_profile(cat, result, str(dossiers_dir), _TEST_CODEBOOK)
         assert profile["outcome"] == "ready_for_human_review"
         assert profile["statuses"]["scientific_review"] == "not_reviewed"
         assert profile["statuses"]["translation_review"] == "not_reviewed"
         assert len(profile["deduplicated_reference_values"]) == 1
         rv = profile["deduplicated_reference_values"][0]
         assert rv["lower_value"] == "0.1"
+        assert rv["unit_label"] == "mg/kg bw/day"
+        assert rv["population_label"] == "consumers"
+        assert rv["review_eligibility"]["operator_inspectable"] is True
+        assert rv["review_eligibility"]["consumer_guidance_eligible"] is True
+        assert rv["review_eligibility"]["reasons"] == []
         assert "Sodium nitrite" in profile["draft_en"]
         assert "ЧЕРНОВА" in profile["draft_bg"]
-        assert "0.1 mg sodium nitrite/kg bw per day" not in profile["draft_en"]  # never inventing text not in the source
+        # The draft is a paraphrase built from structured fields, not the
+        # source's own sentence, which instead lives in internal_evidence_en.
         assert "0.1" in profile["draft_en"]
+        assert "mg/kg bw/day" in profile["draft_en"]
+        assert "The Panel derived an ADI" not in profile["draft_en"]
+        assert "The Panel derived an ADI" in profile["internal_evidence_en"]
         # Intake guidance is never populated by this pilot (nothing has
-        # been scientifically reviewed yet).
+        # been scientifically reviewed yet), even though this value is
+        # consumer_guidance_eligible in shape.
         assert "Intake guidance" not in profile["draft_en"]
+        assert any(s["section"] == "Intake guidance" for s in profile["omitted_sections_internal_note"])
 
     def test_build_profile_rejects_non_exact_match(self, tmp_path):
         cat = CatalogueIdentity(

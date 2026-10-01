@@ -38,6 +38,28 @@ MANIFEST_NS = "http://iuclid6.echa.europa.eu/namespaces/manifest/v1"
 XLINK_NS = "http://www.w3.org/1999/xlink"
 I6_FIELDS_NS = "http://iuclid6.echa.europa.eu/namespaces/platform-fields/v1"
 
+# Bump this integer whenever a `derive_*` function's output *meaning*
+# changes (a field starts/stops being populated, what it represents
+# changes, a new quarantine condition is added) -- not for unrelated
+# code changes elsewhere in this package. It is a coarse, human-readable
+# marker for "is catalogue.jsonl X comparable to catalogue.jsonl Y",
+# never a substitute for the exact producing git SHA (and, if the
+# working tree was dirty when it ran, a content fingerprint of that
+# diff) that every caller must also record alongside it -- see
+# extract.py's cmd_catalogue and pilot.py's run_pilot.
+#
+# History (bump points, most recent first):
+#   2 -- 2026-10-01: fixed derive_reference_values capturing a sibling
+#        AssessmentBody classification code as the reference value's own
+#        numeric magnitude (see docs/OPENFOODTOX_PILOT_REPORT.md).
+#   1 -- first value assigned at the point this version marker was
+#        introduced; prior catalogue.jsonl output (this dataset's
+#        staging/v2, staging/v3) predates the concept entirely and was
+#        never tagged with a version -- it must be identified by its own
+#        recorded producing git SHA instead, not retroactively assumed
+#        to be "version 1".
+EXTRACTION_LOGIC_VERSION = 2
+
 # Coverage target: a full, unbounded leaf-count survey of every document
 # in the transferred dataset (221,377 documents) found a true maximum of
 # 1,405 informative leaves in a single document (an

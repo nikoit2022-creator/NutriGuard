@@ -35,7 +35,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.openfoodtox import safe_io  # noqa: E402
 from scripts.openfoodtox.codebook import Codebook, harvest_codebook  # noqa: E402
 from scripts.openfoodtox.dossier import build_dossier_record  # noqa: E402
-from scripts.openfoodtox.records import MAX_RAW_FIELDS_PER_DOCUMENT  # noqa: E402
+from scripts.openfoodtox.provenance import git_fingerprint  # noqa: E402
+from scripts.openfoodtox.records import EXTRACTION_LOGIC_VERSION, MAX_RAW_FIELDS_PER_DOCUMENT  # noqa: E402
 
 EXPECTED_FILE_COUNT = 11613
 EXPECTED_TOTAL_BYTES = 1_100_741_293
@@ -261,6 +262,9 @@ def cmd_catalogue(args: argparse.Namespace) -> int:
 
     conflicting_names = {n: sorted(c) for n, c in name_to_cas.items() if len(c) > 1}
     summary = {
+        "extraction_logic_version": EXTRACTION_LOGIC_VERSION,
+        "producing_code": git_fingerprint(),
+        "dossiers_dir_sha256_manifest": os.path.join(args.staging_dir, "inventory_manifest.jsonl"),
         "archives_total": len(files),
         "status_counts": dict(status_counts),
         "documents_by_type": dict(doc_type_counts),

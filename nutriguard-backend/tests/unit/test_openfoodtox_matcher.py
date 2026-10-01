@@ -203,6 +203,50 @@ class TestMultipleAssessmentsAndAmbiguity:
         assert len(result.ambiguous_dossiers) == 2
 
 
+class TestConflictTruthTable:
+    def test_neither_agreeing_is_unrelated_not_conflicting(self, tmp_path):
+        """Regression: both identifier types being explicitly present and
+        BOTH disagreeing is not a conflict about the query's own identity
+        -- it is simply a different, unrelated substance. The previous
+        implementation flagged this as "conflicting" too, which would
+        have marked every fully-identified, unrelated dossier in the
+        whole dataset as a conflict against every query."""
+        cat = _cat(e_number="E330", cas="77-92-9")
+        path = _write_jsonl(
+            tmp_path,
+            [_dossier_line("unrelated.i6z", "Some other substance", cas="999-99-9", e_number_synonyms=("E 999",))],
+        )
+        [result] = match_catalogue_against_staging([cat], path)
+        assert result.overall_status == "no_match"
+        assert result.conflicting_dossiers == []
+
+    def test_full_truth_table_in_one_stream(self, tmp_path):
+        """A single stream containing: the exact identity (both agree),
+        a real one-identifier conflict (CAS agrees, E-number disagrees),
+        and many unrelated, fully-identified records (neither agrees).
+        Only the first two should ever produce a hit; the unrelated
+        records must produce zero false conflicts."""
+        cat = _cat(e_number="E330", cas="77-92-9")
+        lines = [
+            _dossier_line("exact.i6z", "Citric acid", cas="77-92-9", e_number_synonyms=("E 330",), document_key="rs-exact"),
+            _dossier_line(
+                "real-conflict.i6z", "Citric acid (mislabeled?)", cas="77-92-9", e_number_synonyms=("E 331",), document_key="rs-conflict"
+            ),
+        ]
+        for i in range(50):
+            lines.append(
+                _dossier_line(f"unrelated-{i}.i6z", f"Unrelated substance {i}", cas=f"{1000+i}-00-0", e_number_synonyms=(f"E {400+i}",))
+            )
+        path = _write_jsonl(tmp_path, lines)
+        [result] = match_catalogue_against_staging([cat], path)
+        assert result.overall_status == "exact_match"
+        assert len(result.exact_dossiers) == 1
+        assert result.exact_dossiers[0].dossier_file == "exact.i6z"
+        assert len(result.conflicting_dossiers) == 1
+        assert result.conflicting_dossiers[0].dossier_file == "real-conflict.i6z"
+        assert result.ambiguous_dossiers == []
+
+
 class TestNonOkStatusExcluded:
     def test_dossiers_with_parse_errors_are_skipped(self, tmp_path):
         cat = _cat(e_number="E951", cas=None)

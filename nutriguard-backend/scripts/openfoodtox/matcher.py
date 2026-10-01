@@ -176,13 +176,24 @@ def _compare_one(cat: CatalogueIdentity, rs: dict) -> DossierHit | None:
     if cas_present_both and enum_present_both:
         if cas_agree and enum_agree:
             return _hit("exact", "CAS and E-number are both explicitly present on both sides and agree.", cas_d)
-        return _hit(
-            "conflicting",
-            f"CAS and E-number are both explicitly present but disagree "
-            f"(CAS: catalogue={cas_c!r} vs dataset={cas_d!r}; "
-            f"E-number: catalogue={enum_c!r} vs dataset={enum_d!r}). Unresolved even though one matched.",
-            None,
-        )
+        if cas_agree or enum_agree:
+            # Exactly one identifier type agrees and the other, also
+            # explicitly present on both sides, disagrees -- a real
+            # conflict requiring manual review, never auto-resolved by
+            # the one that happened to match.
+            return _hit(
+                "conflicting",
+                f"CAS and E-number are both explicitly present but disagree "
+                f"(CAS: catalogue={cas_c!r} vs dataset={cas_d!r}; "
+                f"E-number: catalogue={enum_c!r} vs dataset={enum_d!r}). Unresolved even though one matched.",
+                None,
+            )
+        # Neither identifier agrees, even though both types are
+        # comparable: this is simply a different, unrelated substance,
+        # not a conflict about the catalogue entry's own identity --
+        # recording it as "conflicting" would flag every unrelated,
+        # fully-identified dossier in the dataset against every query.
+        return None
     # Only one identifier *type* is comparable at all here (the other is
     # missing on at least one side). A single differing identifier with
     # nothing else to corroborate a relationship is simply a different,
