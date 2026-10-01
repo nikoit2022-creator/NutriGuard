@@ -133,38 +133,75 @@ EDITORIAL_CONTENT: dict[str, EditorialEntry] = {
                 "human",
                 SourcedText(
                     en=(
-                        "Epidemiological studies linking processed/cured meat consumption to health "
-                        "outcomes are not specific to nitrite alone and involve multiple co-exposures "
-                        "from other components of processed meat, so they cannot be read as evidence "
-                        "about sodium nitrite in isolation."
+                        "EFSA's own systematic review found it was not possible to clearly separate "
+                        "N-nitroso compounds formed from nitrite added to meat at authorised levels from "
+                        "those already present in the food matrix without added nitrite, and that the "
+                        "exposure estimates it used for its margin-of-exposure calculation were not "
+                        "specific to nitrite's use as a food additive alone. Content origin: NutriGuard's "
+                        "own curated summary (app/seed/e_additives_curated_starter.csv, row E250, "
+                        "human_evidence field) prompted checking this point directly against the primary "
+                        "opinion, whose own text is what is cited here."
                     ),
                     bg=(
-                        "Епидемиологичните проучвания, свързващи консумацията на преработено/осолено "
-                        "месо със здравни резултати, не са специфични само за нитрита и включват "
-                        "множество съпътстващи експозиции от други съставки на преработеното месо, "
-                        "поради което не могат да се тълкуват като доказателство единствено за "
-                        "натриевия нитрит."
+                        "Собственият систематичен преглед на ЕФСА установява, че не е било възможно ясно "
+                        "да се разграничат N-нитрозо съединенията, образувани от добавения към месото "
+                        "нитрит при разрешените нива, от вече присъстващите в хранителната матрица без "
+                        "добавен нитрит, и че използваните от ЕФСА оценки на експозицията не са "
+                        "специфични единствено за употребата на нитрит като хранителна добавка. "
+                        "Произход на съдържанието: собствено резюме на NutriGuard (app/seed/"
+                        "e_additives_curated_starter.csv, ред E250, поле human_evidence) подтикна за "
+                        "директна проверка на тази точка спрямо основното становище, чийто собствен "
+                        "текст е цитиран тук."
                     ),
-                    source_kind="tracked_seed_csv",
-                    source="app/seed/e_additives_curated_starter.csv, row E250 (human_evidence)",
+                    source_kind="external_primary_source",
+                    source=(
+                        "EFSA ANS Panel, \"Re-evaluation of potassium nitrite (E 249) and sodium nitrite "
+                        "(E 250) as food additives\", EFSA Journal 2017;15(6):4786, doi:10.2903/j.efsa.2017.4786, "
+                        "Section 3.6.8 \"Epidemiological studies on cancer\" and its exposure discussion; read "
+                        "via the open-access full-text mirror https://pmc.ncbi.nlm.nih.gov/articles/PMC7009987/ "
+                        "(reproduces the published EFSA Journal article verbatim), accessed 2026-10-01. Quote: "
+                        "\"the Panel concluded that it was not possible to clearly discern these NOCs produced "
+                        "from the nitrite added at the legal limits, from those produced already at the food "
+                        "matrix where nitrite has not been added\"; \"the Panel used the overall exposure "
+                        "figures to nitrosamines to estimate the margin of exposure although it does not "
+                        "relate only to the use of nitrite as food additive.\""
+                    ),
                 ),
             ),
             EffectNote(
                 "assessment_conclusion",
                 SourcedText(
                     en=(
-                        "The Panel also noted that nitrite can participate in the formation of "
-                        "endogenous N-nitroso compounds under some conditions; this consideration fed "
-                        "into the overall risk characterisation rather than into the ADI figure itself."
+                        "EFSA's hazard characterisation considered the formation of endogenous N-nitroso "
+                        "compounds (ENOCs) when choosing the magnitude of methaemoglobin change used as the "
+                        "benchmark response for deriving the ADI itself -- not only as a separate, later "
+                        "risk-characterisation step. The Panel required this choice to keep the resulting "
+                        "margin of exposure for nitrosamine formation above 10,000 (it calculated "
+                        "approximately 420,000, about 40-fold higher)."
                     ),
                     bg=(
-                        "Панелът отбелязва също, че нитритът може да участва в образуването на "
-                        "ендогенни N-нитрозо съединения при определени условия; това съображение е "
-                        "взето предвид в цялостната характеристика на риска, а не самостоятелно в "
-                        "стойността на ADI."
+                        "Характеристиката на опасността на ЕФСА отчита образуването на ендогенни "
+                        "N-нитрозо съединения (ENOCs) при избора на величината на промяната в "
+                        "метхемоглобина, използвана като референтен отговор за извеждане на самата ADI -- "
+                        "не само като отделна, последваща стъпка в характеристиката на риска. Панелът "
+                        "изисква този избор да запази резултиращия марж на експозиция за образуване на "
+                        "нитрозамини над 10 000 (изчислен е приблизително 420 000, около 40 пъти по-висок)."
                     ),
-                    source_kind="tracked_seed_csv",
-                    source="app/seed/e_additives_curated_starter.csv, row E250 (potential_effects)",
+                    source_kind="external_primary_source",
+                    source=(
+                        "Same EFSA 2017 opinion, doi:10.2903/j.efsa.2017.4786, Sections 3.6.1 (methaemoglobin "
+                        "benchmark-response derivation), 3.7.1 \"N-Nitroso compounds\" and 3.7.2 \"Endogenously "
+                        "produced N-nitroso compounds (ENOCs)\"; read via "
+                        "https://pmc.ncbi.nlm.nih.gov/articles/PMC7009987/, accessed 2026-10-01. Quote: \"the "
+                        "Panel decided that an increase of twofold of the background mean concentration of "
+                        "methaemoglobin level represented a measurable and consistent marker of exposure ... "
+                        "which resulted in a MoE larger than 10,000\"; \"The MoE was calculated to 4.2 x 10^5. "
+                        "This is roughly 40-fold higher than the value of 10,000.\" Correction note: an earlier "
+                        "draft of this claim stated nitrosation \"fed into the overall risk characterisation "
+                        "rather than into the ADI figure itself\" -- re-verified directly against the primary "
+                        "text in this round and corrected, since the opinion shows nitrosation considerations "
+                        "actually shaped the benchmark-response choice used in the ADI derivation itself."
+                    ),
                 ),
             ),
         ],
@@ -174,7 +211,13 @@ EDITORIAL_CONTENT: dict[str, EditorialEntry] = {
                 "url": "https://eur-lex.europa.eu/eli/reg/2012/231/oj",
                 "access_date": "2026-10-01",
                 "note": "Identity/specification of sodium nitrite.",
-            }
+            },
+            {
+                "title": "EFSA ANS Panel, Re-evaluation of potassium nitrite (E 249) and sodium nitrite (E 250) as food additives (full text)",
+                "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC7009987/",
+                "access_date": "2026-10-01",
+                "note": "Open-access mirror of EFSA Journal 2017;15(6):4786, doi:10.2903/j.efsa.2017.4786; used for the epidemiology and endogenous-nitrosation claims above.",
+            },
         ],
     ),
     "E150d": EditorialEntry(
@@ -316,22 +359,35 @@ EDITORIAL_CONTENT: dict[str, EditorialEntry] = {
         e_number="E330",
         identity=SourcedText(
             en=(
-                "Citric acid occurs naturally in citrus fruits. Today it is produced industrially at "
-                "large scale by fermentation of carbohydrates using moulds such as Aspergillus niger, "
-                "rather than extracted from fruit."
+                "Commission Regulation (EU) No 231/2012 defines citric acid as produced either from lemon "
+                "or pineapple juice, or by fermentation of carbohydrate solutions or other suitable media "
+                "using Candida spp. or non-toxicogenic strains of Aspergillus niger -- i.e. the "
+                "regulation's own definition allows either route, not fermentation exclusively."
             ),
             bg=(
-                "Лимонената киселина се среща естествено в цитрусовите плодове. Днес се произвежда "
-                "промишлено в голям мащаб чрез ферментация на въглехидрати с помощта на плесени като "
-                "Aspergillus niger, а не чрез извличане от плодове."
+                "Регламент (ЕС) № 231/2012 определя лимонената киселина като произведена или от лимонов, "
+                "или от ананасов сок, или чрез ферментация на въглехидратни разтвори или друга подходяща "
+                "среда с Candida spp. или нетоксигенни щамове на Aspergillus niger -- т.е. собствената "
+                "дефиниция на регламента допуска всеки от двата пътя, а не изключително ферментация."
             ),
             source_kind="external_primary_source",
             source=(
-                _REG_231_2012
-                + " Annex, E 330 CITRIC ACID entry, 'Definition': the Regulation's own definition states "
-                "citric acid 'is obtained by fermentation of carbohydrate solutions (e.g., glucose syrups) "
-                "with the mould Aspergillus niger' -- the natural-occurrence and industrial-fermentation "
-                "claim above restates this definition text directly, not a separate, uncited reference."
+                "Commission Regulation (EU) No 231/2012 of 9 March 2012, Annex, E 330 CITRIC ACID entry, "
+                "\"Definition\" field. Exact text: \"Citric acid is produced from lemon or pineapple juice, "
+                "by fermentation of carbohydrate solutions or other suitable media using Candida spp. or "
+                "non-toxicogenic strains of Aspergillus niger\". Read directly 2026-10-01 via an archived "
+                "EUR-Lex snapshot (https://web.archive.org/web/20230405233223/https://eur-lex.europa.eu/"
+                "legal-content/EN/TXT/HTML/?uri=CELEX%3A32012R0231 -- live eur-lex.europa.eu blocks "
+                "automated fetching in this environment) and independently cross-checked against the UK's "
+                "official statutory-text mirror (https://www.legislation.gov.uk/eur/2012/231/annex/"
+                "division/112); both match exactly. Correction note: an earlier draft of this claim "
+                "paraphrased the definition as 'obtained by fermentation of carbohydrate solutions (e.g., "
+                "glucose syrups) with the mould Aspergillus niger' -- re-verified directly against the "
+                "regulation's own text in this round and corrected: the regulation also lists direct "
+                "extraction from citrus juice as a valid route, names Candida spp. as an alternative "
+                "fermentation organism, specifies 'non-toxicogenic strains' of Aspergillus niger (a "
+                "qualifier the earlier paraphrase dropped), and never mentions 'glucose syrups' at all -- "
+                "that illustrative example was not in the primary source and has been removed."
             ),
         ),
         purpose=SourcedText(
@@ -434,8 +490,25 @@ EDITORIAL_CONTENT: dict[str, EditorialEntry] = {
                         "аспарагинова киселина и метанол -- които след това навлизат в нормалните "
                         "метаболитни пътища на организма."
                     ),
-                    source_kind="tracked_seed_csv",
-                    source="app/seed/e_additives_curated_starter.csv, row E951 (digestion_absorption/metabolism)",
+                    source_kind="external_primary_source",
+                    source=(
+                        "EFSA ANS Panel, \"Scientific Opinion on the re-evaluation of aspartame (E 951) as "
+                        "a food additive\", EFSA Journal 2013;11(12):3496, doi:10.2903/j.efsa.2013.3496, "
+                        "Abstract. Exact quote: \"Aspartame is rapidly and completely hydrolysed in the "
+                        "gastrointestinal tract to phenylalanine, aspartic acid and methanol.\" "
+                        "efsa.europa.eu and the Wiley-hosted DOI both block automated fetching in this "
+                        "environment; read via a Wayback Machine snapshot of EFSA's own published article "
+                        "page (reproduces EFSA's title/DOI/Abstract verbatim, not a third-party "
+                        "paraphrase), accessed 2026-10-01. Independently corroborated by the JECFA "
+                        "Toxicological Monograph on Aspartame, WHO Food Additives Series 15 (1980), via "
+                        "IPCS INCHEM (https://inchem.org/documents/jecfa/jecmono/v15je03.htm), 'Comments' "
+                        "section: \"aspartame is hydrolysed to its constituent amino acids prior to "
+                        "absorption from the GI tract, and its subsequent metabolism resembles that of "
+                        "phenylalanine, aspartic acid and methanol.\" Content origin for the original "
+                        "phrasing: app/seed/e_additives_curated_starter.csv, row E951 "
+                        "(digestion_absorption/metabolism) -- now also directly supported by both primary "
+                        "sources above, not seed-only."
+                    ),
                 ),
             ),
             EffectNote(
@@ -558,6 +631,18 @@ EDITORIAL_CONTENT: dict[str, EditorialEntry] = {
                 "title": "EFSA press release: EFSA completes full risk assessment on aspartame and concludes it is safe at current levels of exposure",
                 "url": "https://www.efsa.europa.eu/en/press/news/131210",
                 "access_date": "2026-10-01",
+            },
+            {
+                "title": "EFSA ANS Panel, Scientific Opinion on the re-evaluation of aspartame (E 951) as a food additive",
+                "url": "https://web.archive.org/web/2026*/https://www.efsa.europa.eu/en/efsajournal/pub/3496",
+                "access_date": "2026-10-01",
+                "note": "EFSA Journal 2013;11(12):3496, doi:10.2903/j.efsa.2013.3496. Abstract supports the digestion/metabolism claim above.",
+            },
+            {
+                "title": "JECFA Toxicological Monograph on Aspartame, WHO Food Additives Series 15 (1980), via IPCS INCHEM",
+                "url": "https://inchem.org/documents/jecfa/jecmono/v15je03.htm",
+                "access_date": "2026-10-01",
+                "note": "Independent corroboration of the digestion/metabolism claim above (phenylalanine/aspartic acid/methanol).",
             },
         ],
     ),

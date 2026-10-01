@@ -412,6 +412,27 @@ class TestEditorialCitationCoverage:
                     f"{e_number}: vague, unnamed citation: {field.source!r}"
                 )
 
+    def test_no_consumer_facing_effect_claim_relies_solely_on_tracked_seed_data(self):
+        """docs/OPENFOODTOX_DELIVERY_CONSISTENCY_TASK.md item 2: a pointer
+        to our own seed CSV/JSON is a content *origin*, never independent
+        scientific evidence on its own -- a safety/effect conclusion shown
+        to consumers (evidence_type "human" or "assessment_conclusion")
+        must trace to an OpenFoodTox-extracted quote or a named external
+        primary source. ("identity"/"purpose" functional-classification
+        claims are a separate, lower-stakes category not covered by this
+        check -- see the report's own remaining-limitations note.)"""
+        from scripts.openfoodtox.editorial_content import EDITORIAL_CONTENT
+
+        for e_number, entry in EDITORIAL_CONTENT.items():
+            for note in entry.effects:
+                if note.evidence_type not in ("human", "assessment_conclusion"):
+                    continue
+                assert note.text.source_kind in ("openfoodtox_dossier", "external_primary_source"), (
+                    f"{e_number}: {note.evidence_type} claim relies solely on "
+                    f"{note.text.source_kind!r} (content origin, not independent "
+                    f"evidence): {note.text.en!r}"
+                )
+
     def test_every_external_source_entry_has_url_and_access_date(self):
         from scripts.openfoodtox.editorial_content import EDITORIAL_CONTENT
 
