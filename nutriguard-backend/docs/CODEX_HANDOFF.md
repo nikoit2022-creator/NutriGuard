@@ -1,5 +1,18 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: offline matching/profile pilot assigned (Codex, docs only)
+
+- Added docs/OPENFOODTOX_PILOT_TASK.md for Claude: deterministic dry-run matching
+  against seed/supplied catalogue snapshots, exact identifiers, evidence linkage,
+  four requested pilot identities, source/reuse checks and tests. No live DB access.
+- Added docs/OPENFOODTOX_PROFILE_PRESENTATION.md: EN/BG section order, per-claim
+  provenance and display gates; draft review specification, not runtime UI/API changes.
+- Baseline af195fd2a63b35ebd9496e0081f66f30893ed5bd; docs-only verification:
+  git diff --check. No runtime tests needed for this handoff; no merge/deploy/import.
+- Next: Claude fetches the pilot task, implements offline tooling and returns committed
+  report; Codex reviews actual pilot drafts before application integration. Scientific
+  content, reuse/freshness clearance and live integration remain pending.
+
 ## 2026-10-01: chemical-basis ambiguity follow-up implemented (Claude)
 
 - Implemented the "Active follow-up: chemical-basis ambiguity" section of
