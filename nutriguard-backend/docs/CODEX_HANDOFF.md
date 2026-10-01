@@ -1,5 +1,20 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: delivery consistency follow-up assigned (Codex)
+
+- Reviewed remote `8ceba0531082e2c63cbe62598af663c9f852ece9` read-only:
+  rendering fixes are present, but committed previews retain old text and
+  v4 pointers; the source matrix still uses seed-only attribution for some
+  consumer claims while its audit note says otherwise.
+- Added `docs/OPENFOODTOX_DELIVERY_CONSISTENCY_TASK.md`: two bounded fixes,
+  reproducible preview export/equality and claim-level primary evidence.
+  Owner permits Claude to use subagents as needed.
+- Documentation-only handoff; inspected Git diff/status and handoff;
+  `git diff --check` is the relevant validation. Backend tests not rerun by
+  Codex; Claude's 860 passed / 16 skipped remains a reported result.
+- Next: Claude reads the new task from this branch, implements and verifies,
+  commits/pushes a report. No merge/deploy or live data operations authorized.
+
 ## 2026-10-01: targeted final profile corrections implemented (Claude)
 
 - Implemented `docs/OPENFOODTOX_FINAL_PROFILE_REVIEW_TASK.md` (reviewed
