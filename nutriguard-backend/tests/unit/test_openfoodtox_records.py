@@ -196,6 +196,58 @@ class TestReferenceValues:
         assert rv[0]["critical_endpoint_ref"] == "ep-1/dossier-1"
         assert doc["parse_warnings"] == []
 
+    def test_assessment_body_code_is_not_mistaken_for_the_reference_value(self):
+        """Real-dataset defect found while building the OpenFoodTox pilot
+        matcher: AssessmentBody (which body made the assessment, e.g. "HBGV
+        not from EFSA committees/panels") carries a *coded* leaf literally
+        named ``value`` -- e.g. ``AssessmentBody><value>1342</value>`` --
+        which must never be captured as the reference value's own numeric
+        magnitude just because the leaf name matches. The real magnitude
+        here is ``Adi/lowerValue`` = 40 (aspartame's real ADI); the previous,
+        unguarded "value" leaf-name match set ``entry["value"]`` to the
+        AssessmentBody *code* "1342" instead, which then (via
+        ``entry["value"] or entry["lower_value"]``) fed the wrong number
+        into chemical-basis matching too."""
+        xml = _i6d(
+            "FLEXIBLE_SUMMARY",
+            "ToxRefValues",
+            """<HumanHealthHazardCharacteristics>
+                 <AcceptableDailyIntake>
+                   <Adi><unitCode>2085</unitCode><lowerValue>40</lowerValue></Adi>
+                   <Population><value>8521</value></Population>
+                   <AssessmentBody><value>1342</value><other>no additional data, reference to previous assessment</other></AssessmentBody>
+                   <JustificationAndComments>The ADI of 40 mg/kg bw/day stands.</JustificationAndComments>
+                 </AcceptableDailyIntake>
+               </HumanHealthHazardCharacteristics>""",
+        )
+        doc = records.build_document_record("a.i6z", "e.i6d", xml, None)
+        rv = doc["derived"]["reference_values"][0]
+        assert rv["lower_value"] == "40"
+        assert rv["value"] is None  # never the AssessmentBody code "1342"
+        assert rv["chemical_basis"]["status"] != "resolved" or rv["chemical_basis"].get("basis") != "1342"
+
+    def test_other_reference_value_ref_value_wrapper_still_captured(self):
+        """OtherReferenceValues' own numeric wrapper (RefValue) must still
+        work after switching the value-leaf match to an explicit allowlist
+        -- this is the companion case to the AssessmentBody regression
+        above, pinning that the fix didn't just exclude everything."""
+        xml = _i6d(
+            "FLEXIBLE_SUMMARY",
+            "ToxRefValues",
+            """<HumanHealthHazardCharacteristics>
+                 <OtherReferenceValues>
+                   <ReferenceValueDescriptor><value>1342</value><other>MSI/FC</other></ReferenceValueDescriptor>
+                   <RefValue><unitCode>3437</unitCode><upperValue>15000</upperValue></RefValue>
+                   <Population><value>1342</value><other>Poultry</other></Population>
+                 </OtherReferenceValues>
+               </HumanHealthHazardCharacteristics>""",
+        )
+        doc = records.build_document_record("a.i6z", "e.i6d", xml, None)
+        rv = doc["derived"]["reference_values"][0]
+        assert rv["upper_value"] == "15000"
+        assert rv["value"] is None
+        assert rv["reference_value_descriptor_label"] == "MSI/FC"
+
     def test_multiple_occurrences_of_same_container_flags_warning(self):
         """If a document ever contains more than one AcceptableDailyIntake
         block (not observed in the real dataset but not schema-forbidden

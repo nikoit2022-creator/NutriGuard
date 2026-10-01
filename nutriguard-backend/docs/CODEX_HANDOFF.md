@@ -1,5 +1,66 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: offline matching/profile pilot implemented (Claude)
+
+- Implemented `docs/OPENFOODTOX_PILOT_TASK.md` (reviewed baseline
+  `56aee7aa613b8b7cc5f98e4082981ac0d898fc92`) in the same isolated worktree,
+  fast-forwarded first (no drift). Full detail, measured results, sample
+  drafts, limitations, source links and reuse/freshness findings in
+  `docs/OPENFOODTOX_PILOT_REPORT.md` -- summary only here.
+- New: `scripts/openfoodtox/catalogue_snapshot.py` (offline NutriGuard
+  catalogue snapshot from the tracked seed files -- zero database access, not
+  even disposable), `matcher.py` (streaming dry-run CAS/E-number matching +
+  document/subject-link resolution), `evidence_bundle.py` (per-identity
+  review bundle + DRAFT EN/BG text), `pilot.py` (CLI orchestrator).
+- **Found and fixed a real extraction defect** while building the first
+  profile: `records.py::derive_reference_values` was capturing
+  `AssessmentBody/value` (a sibling classification code, self-describing via
+  its own `other` leaf) as if it were the reference value's own numeric
+  magnitude whenever a leaf happened to be named `value`. For aspartame's
+  2013 ADI this produced a nonsensical `value: "1342"` alongside the correct
+  `lower_value: "40"`, and would have fed the wrong number into
+  chemical-basis matching too (`entry["value"] or entry["lower_value"]`
+  prefers the former). Fixed with an explicit allowlist of the five
+  confirmed value-holding wrapper tags (`Adi`/`Arfd`/`Aoel`/`Aaoel`/
+  `RefValue`); measured impact: 788 of 25,973 reference values dataset-wide
+  (~3.0%) had this corruption. 2 new regression tests in
+  `tests/unit/test_openfoodtox_records.py`.
+- `dossier.py` extended to carry `manifest_uuid`/`manifest_links` through to
+  reference values and endpoints (previously dropped), needed for
+  `matcher.resolve_subject_links` to correctly handle the 333/11,613 (2.9%)
+  dossiers with more than one `REFERENCE_SUBSTANCE` -- none of this pilot's
+  four substances needed that path, but the general matcher now guards
+  against it instead of assuming one identity per archive.
+- Pilot run (`E250`, `E150d`, `E330`, `E951`): all four `exact_match`.
+  E250/E951/E330 matched tracked NutriGuard catalogue entries (E-number
+  only -- **the tracked catalogue has no CAS numbers at all today**, a
+  reported limitation, not a matcher one); E150d has no catalogue entry and
+  was run as an explicit ad hoc dataset query, clearly labeled as not a
+  catalogue linkage. Concrete finding: 2 of E330's 3 matched dossiers are
+  EFSA FEEDAP (animal-feed) opinions, correctly flagged and excluded from
+  `review_eligible`; the dataset's one human-food ADI entry for citric acid
+  has no extractable numeric magnitude at all ("not limited", JECFA 1974).
+  Reuse/freshness check found OpenFoodTox is CC BY 4.0 (attribution
+  required; third-party literature full text not cleared by this) and a
+  concrete freshness gap for E330 (a 2020-03-11 EFSA re-evaluation postdates
+  everything in this dataset for that substance and is not present in it).
+- Tests: 28 new (`test_openfoodtox_{matcher,catalogue_snapshot,
+  evidence_bundle}.py` + 2 in `test_openfoodtox_records.py`), all synthetic
+  fixtures. Full backend suite `python -m pytest -q`: **833 passed, 16
+  skipped** (pre-existing), 0 failed. Ran the pilot twice end-to-end and
+  diffed every output byte-for-byte (minus the timestamp): identical --
+  deterministic, no implicit network calls.
+- Generated pilot output (`pilot_summary.json` + 4 profile JSON/MD pairs)
+  lives outside Git at `/home/vboxuser/nutriguard-data/openfoodtox/pilot/v1/`
+  -- bulk/generated, per task scope, same convention as prior rounds'
+  `staging/`/`reports/` output.
+- No import into the live database, no API/Health Score change, no container
+  restart, no deploy, no merge. Originals and the live stack were not
+  touched. Integration blockers are listed in full in
+  `docs/OPENFOODTOX_PILOT_REPORT.md` §10 (catalogue CAS gap, pending
+  scientific/translation review on every drafted claim, pending reuse-clearance
+  decision, E330's located-but-unincorporated newer opinion).
+
 ## 2026-10-01: offline matching/profile pilot assigned (Codex, docs only)
 
 - Added docs/OPENFOODTOX_PILOT_TASK.md for Claude: deterministic dry-run matching

@@ -127,6 +127,15 @@ def build_dossier_record(
                         "evidence_complete": doc["evidence_complete"],
                         "source": doc["source"],
                         "parse_warnings": doc.get("parse_warnings", []),
+                        # Carried through so a consumer can resolve which
+                        # identity this reference value actually belongs to
+                        # (see scripts/openfoodtox/matcher.py
+                        # resolve_subject_links) rather than assuming a
+                        # single identity per archive, which does not hold
+                        # for every dossier (~3% have more than one
+                        # REFERENCE_SUBSTANCE).
+                        "manifest_uuid": doc.get("manifest_uuid"),
+                        "manifest_links": doc.get("manifest_links", []),
                     })
             elif dt in ("ENDPOINT_SUMMARY", "ENDPOINT_STUDY_RECORD"):
                 bucket = result["endpoints"].get(doc["domain"], result["endpoints"]["unclassified"])
@@ -139,6 +148,8 @@ def build_dossier_record(
                         "evidence_complete": doc["evidence_complete"],
                         **doc["derived"],
                         "source": doc["source"],
+                        "manifest_uuid": doc.get("manifest_uuid"),
+                        "manifest_links": doc.get("manifest_links", []),
                     }
                 )
 

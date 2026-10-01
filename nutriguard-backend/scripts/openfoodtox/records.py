@@ -355,6 +355,14 @@ _REF_VALUE_CONTAINERS = {
 }
 _VALUE_LEAF_NAMES = {"value", "lowerValue", "upperValue"}
 
+# Sub-wrapper tags observed, across the full 11,613-dossier dataset, to be
+# the sole carriers of a reference value's actual numeric magnitude (see the
+# allowlist comment at its use site below). "RefValue" belongs to
+# OtherReferenceValues; the other four each belong to the identically-named
+# container (Adi -> AcceptableDailyIntake, Arfd -> AcuteReferenceDose, Aoel ->
+# AcceptableOperatorExposureLevel, Aaoel -> Ac(ute)AcceptableOperatorExposureLevel).
+_VALUE_HOLDING_WRAPPERS = {"Adi", "Arfd", "Aoel", "Aaoel", "RefValue"}
+
 
 def derive_reference_values(raw_fields: list[dict]) -> list[dict]:
     """Extract ADI/ARfD/AOEL/AAOEL/other reference-value blocks.
@@ -402,11 +410,25 @@ def derive_reference_values(raw_fields: list[dict]) -> list[dict]:
         }
         for tail, f in group.get(True, []):
             leaf = tail.split("/")[-1]
-            if leaf == "lowerValue":
+            # The numeric magnitude (value/lowerValue/upperValue) of a reference
+            # value is only ever carried by one of these named sub-wrappers
+            # (confirmed across the full dataset: zero occurrences of an
+            # unwrapped "<container>/value"). Several *other* sibling fields --
+            # notably "AssessmentBody/value" (a coded classification of which
+            # body made the assessment, e.g. "HBGV not from EFSA
+            # committees/panels", self-describing via its own "other" leaf) --
+            # also happen to end in a leaf literally named "value" and must
+            # never be mistaken for the reference value's own magnitude. An
+            # explicit allowlist (rather than excluding known non-value
+            # wrappers one at a time) is used so an unrecognized wrapper is
+            # quarantined (silently not captured as a value) instead of
+            # silently misattributed.
+            wrapper = tail.split("/")[0]
+            if leaf == "lowerValue" and wrapper in _VALUE_HOLDING_WRAPPERS:
                 entry["lower_value"] = f["text"]
-            elif leaf == "upperValue":
+            elif leaf == "upperValue" and wrapper in _VALUE_HOLDING_WRAPPERS:
                 entry["upper_value"] = f["text"]
-            elif leaf == "value" and tail.split("/")[0] not in ("Population", "ReferenceValueDescriptor"):
+            elif leaf == "value" and wrapper in _VALUE_HOLDING_WRAPPERS:
                 entry["value"] = f["text"]
             elif leaf == "unitCode":
                 entry["unit_code"] = f["text"]
