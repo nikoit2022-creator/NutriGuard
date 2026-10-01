@@ -1,5 +1,19 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: four-profile content completion assigned (Codex, docs only)
+
+- Reviewed 40d063444358086c2b47dbe1a2a7386b9509349d drafts and official EFSA
+  publication 10259. Added docs/OPENFOODTOX_PROFILE_CONTENT_TASK.md for Claude.
+- Required: preserve E951 PKU applicability exception and E150d group-ADI scope in
+  EN/BG consumer previews, substantive sourced identity/function/effects text,
+  readable Bulgarian and consistent numeric gating across headings.
+- Date correction to previous entries: publication 10259 was published 2026-09-10;
+  its page lists approval on 2026-07-01. Prior "adopted 2026-09-10" wording is incorrect.
+- Documentation-only task; git diff --check used. No runtime tests rerun, live
+  access, content import, merge or deployment. Previous test counts are Claude's.
+- Next: Claude fetches the content task, pushes four complete source-linked DRAFT
+  profiles and tests/report as applicable; Codex reviews before integration.
+
 ## 2026-10-01: pilot review corrections implemented (Claude)
 
 - Implemented `docs/OPENFOODTOX_PILOT_REVIEW_TASK.md` (reviewed baseline
