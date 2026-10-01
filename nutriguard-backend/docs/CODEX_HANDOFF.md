@@ -1,5 +1,46 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: bounded source closure resolved (Claude)
+
+- Implemented `docs/OPENFOODTOX_SOURCE_CLOSURE_TASK.md` (reviewed baseline
+  `5cc732a`), same isolated worktree, fast-forwarded first. Committed at
+  `40a2d174845cc2a990bfec76ea9a284311af3e3b`. Full account in
+  `docs/OPENFOODTOX_PILOT_REPORT.md` §14 -- summary only here. A subagent
+  did the primary-source research (reading actual documents, never a
+  search-result summary); this session independently reviewed every
+  quote/locator before using it.
+- All 6 named targets closed with a directly-read primary source, none
+  withdrawn to operator-only:
+  - E250 purpose -> EFSA 2017 nitrite opinion, Section 3.1.6.
+  - E330 purpose -> JECFA "CITRIC ACID" monograph (FNP 52 Add 7, 1999),
+    "Functional uses" field -- honestly flagged as a JECFA/FAO-WHO
+    reference rather than EU-specific, since Reg. (EU) 231/2012's own
+    E330 entry has no functional-class field at all.
+  - E951 identity + purpose -> both from the EFSA 2013 aspartame opinion
+    itself (genuine full-text PDF via Wayback, not a snippet).
+  - **E150d-08 (group ADI), the most important target**: was labeled
+    `external_primary_source` while its own citation admitted only
+    "secondary reporting" -- a mislabeling bug, independent of whether the
+    claim was correct (it was). Fixed by actually reading the full 2011
+    EFSA caramel-colours opinion, confirming the 300 mg/kg bw/day group
+    ADI, the 100 mg/kg bw/day Class-III-only (E150c) sub-ADI for THI
+    immunotoxicity, and that E150d itself has no separate limit.
+  - E150d-07 purpose -> replaced a vague "background section" reference
+    with an exact page locator and quote naming cola-type drinks, spirits,
+    sauces and baked goods.
+- Extended the existing seed-only provenance regression to
+  `identity`/`purpose` fields (previously effects-only), and added a new
+  test (`test_no_external_primary_source_admits_only_secondary_confirmation`)
+  to catch the E150d-08 mislabeling pattern going forward.
+- Tests: 2 new/extended this pass. Full backend suite `python -m pytest -q`:
+  **866 passed, 16 skipped** (pre-existing), 0 failed.
+- Pilot rerun (extraction untouched) into a new `pilot/v8/` (`pilot/v1`-`v7`
+  preserved), all four identities `exact_match`, clean-tree provenance,
+  repeatability re-verified. Both committed docs regenerated via
+  `export_docs` and pass `--check`.
+- No live database access, no API/Health Score change, no container
+  restart, no deploy, no merge, no seed import.
+
 ## 2026-10-01: bounded source closure assigned (Codex)
 
 - Reviewed `5cc732a`: generated EN/BG headings and export/check mechanism

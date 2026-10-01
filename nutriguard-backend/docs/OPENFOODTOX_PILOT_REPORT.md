@@ -892,18 +892,114 @@ format, regenerated from `pilot/v7`) and `docs/OPENFOODTOX_CLAIM_SOURCE_MATRIX.m
 immediately after `export`, and the pilot itself was confirmed repeatable
 (two full runs, every profile JSON byte-identical).
 
+## 14. Source closure: remaining identity/purpose claims (2026-10-01, sixth revision)
+
+`docs/OPENFOODTOX_SOURCE_CLOSURE_TASK.md` (reviewed baseline `5cc732a`)
+named the 6 remaining targets the fifth revision had explicitly deferred
+or left under-sourced: E250 purpose, E330 purpose, E951 identity and
+purpose, and two E150d claims (purpose and the group-ADI effect note, the
+latter flagged because its own citation admitted only secondary
+confirmation despite being labeled `external_primary_source`). Implemented
+at commit `40a2d174845cc2a990bfec76ea9a284311af3e3b`. A subagent did the
+primary-source research (reading actual documents, never a search-result
+summary); this session independently reviewed every quote/locator before
+using it and did not take any finding on trust.
+
+### Target-by-target resolution
+
+- **E250 purpose** (curing/preservative, C. botulinum inhibition,
+  colour/flavour): now cites the EFSA 2017 nitrite opinion's own Section
+  3.1.6 "Technological function" (doi:10.2903/j.efsa.2017.4786, read via
+  the same open-access PMC mirror used in the fifth revision). All three
+  claim elements confirmed directly in the primary text.
+- **E330 purpose** (acidity regulator/sequestrant/flavour support): cites
+  the JECFA "CITRIC ACID" monograph (INS 330, FNP 52 Add 7, 1999),
+  "Functional uses" field -- "Acidulant; sequestrant; antioxidant
+  synergist; flavouring agent" -- fetched directly from the FAO archive.
+  **Honestly flagged, not silently accepted**: this is a genuine primary
+  document but a JECFA/FAO-WHO one, not an EU-specific regulatory text;
+  Commission Regulation (EU) No 231/2012's own E330 specification entry
+  (also read directly via the UK's statutory mirror) turns out to have no
+  functional-class field at all -- EU specification regulations list
+  identity/purity criteria, not function. An EFSA FEEDAP opinion
+  (doi:10.2903/j.efsa.2015.4010) does call citric acid "an acidity
+  regulator" but in a feed-additive context, so it's cited only as
+  secondary EU corroboration, not as the primary source for this claim.
+- **E951 identity** (dipeptide structure, ~200x sweeter than sucrose) and
+  **purpose** (sweetener in diet beverages/sugar-free confectionery): both
+  now cite the EFSA 2013 aspartame opinion itself, read as a genuine
+  full-text PDF (not a JS-shell snapshot, confirmed via `file`) via a
+  Wayback Machine raw snapshot of the Wiley-hosted PDF -- Section 2.1 for
+  the dipeptide structure and CAS number, the opinion's own reproduction
+  of the Reg. 231/2012 specification table for the sweetness figure, and
+  its Abstract plus reproduced Annex II use-table for the purpose claim.
+- **E150d-08, group ADI -- the most important target**: this claim's own
+  citation previously admitted "independently confirmed via EFSA-sourced
+  secondary reporting" while being labeled `external_primary_source` -- a
+  mislabeling bug on its own, independent of whether the claim was
+  correct (it was). Fixed by actually reading the genuine 2011 EFSA
+  caramel-colours opinion in full. Confirms: group ADI of 300 mg/kg bw/day
+  across all four classes; an additional 100 mg/kg bw/day sub-ADI for
+  Class III (E150c) only, due to THI
+  (2-acetyl-4(5)-tetrahydroxybutylimidazole) immunotoxicity; E150d (Class
+  IV, this profile) carries no separate limit of its own. The claim text
+  needed no change -- only its citation was upgraded from
+  secondary-admitted to genuinely primary.
+- **E150d-07, purpose**: the previous citation ("cross-checked against the
+  2011 EFSA opinion's background section") named no specific passage.
+  Replaced with an exact locator (same 2011 opinion, p.19/p.21) and quote
+  naming cola-type drinks, spirits (whisky/rum/brandy), sauces and baked
+  goods directly -- not a generic, unsourced fact.
+
+No claim was withdrawn to operator-only this round: all 6 targets reached
+a directly-read, genuine primary source (one, E330 purpose, with an
+explicit scope caveat rather than a clean match -- the task's own
+stopping criteria accept this as resolution, not as a gap requiring
+withdrawal, since the claim is supported, just not by an EU-specific
+text).
+
+### Test and verification
+
+Extended the fifth revision's seed-only provenance regression
+(`test_no_consumer_facing_claim_relies_solely_on_tracked_seed_data`,
+renamed) to also cover `identity`/`purpose` fields, per the task's
+explicit instruction ("not only effects"). Added
+`test_no_external_primary_source_admits_only_secondary_confirmation` to
+catch the E150d-08 mislabeling pattern as a standing regression going
+forward.
+
+```
+cd nutriguard-backend
+python3 -m pytest tests/unit/test_openfoodtox_evidence_bundle.py \
+  tests/unit/test_openfoodtox_export_docs.py -q
+# 33 passed in 0.22s
+
+python3 -m pytest -q
+# 866 passed, 16 skipped, 3 warnings in 21.34s
+```
+
+866 = 865 (fifth revision) + 1 new mislabeling-regression test. Per the
+task's explicit instruction, extraction code was not touched -- the pilot
+was rerun against the unchanged `staging/v4` into a new `pilot/v8/`
+(`pilot/v1`-`v7` preserved), all four identities `exact_match`, producing
+commit clean (`git_tree_dirty: false`). Repeatability re-verified: two
+full pilot runs, every profile JSON byte-identical. Both committed docs
+regenerated via `export_docs` and pass `--check` immediately after export.
+
 ## Files
 
+New this revision (sixth): none (code/test/doc changes only, no new files).
 New this revision (fifth): `scripts/openfoodtox/export_docs.py`,
 `tests/unit/test_openfoodtox_export_docs.py`.
 New this revision (fourth): `docs/OPENFOODTOX_CLAIM_SOURCE_MATRIX.md`.
 New this revision (third): `scripts/openfoodtox/editorial_content.py`.
 New in the review-corrections revision: `scripts/openfoodtox/provenance.py`,
 `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md`.
-Modified this revision: `scripts/openfoodtox/editorial_content.py` (§13b),
-`tests/unit/test_openfoodtox_evidence_bundle.py` (+1 test), this file,
-`docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` (regenerated, fenced-block format),
-`docs/OPENFOODTOX_CLAIM_SOURCE_MATRIX.md` (regenerated), `docs/CODEX_HANDOFF.md`.
+Modified this revision: `scripts/openfoodtox/editorial_content.py` (§14),
+`tests/unit/test_openfoodtox_evidence_bundle.py` (+1 test, +1 renamed/extended),
+this file, `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` (regenerated from
+`pilot/v8`), `docs/OPENFOODTOX_CLAIM_SOURCE_MATRIX.md` (regenerated),
+`docs/CODEX_HANDOFF.md`.
 Generated, not committed (bulk/derived, kept outside Git):
-`pilot/v7/` (`pilot/v1`-`v6` preserved unchanged). `staging/v4`/`reports/v4`
+`pilot/v8/` (`pilot/v1`-`v7` preserved unchanged). `staging/v4`/`reports/v4`
 unchanged this round (extraction code untouched).
