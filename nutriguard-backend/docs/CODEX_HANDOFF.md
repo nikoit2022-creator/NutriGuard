@@ -1,5 +1,22 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: owner-approved four-profile application integration assigned
+
+- Owner accepts source-backed pilot content for display without an outside
+  expert; do not misrepresent this as independent scientific review.
+- Compared main `65a8e68` to pilot `037b3cc`: changes remain offline scripts,
+  tests and docs; no runtime import or app content delivery yet.
+- Inspected localization publication gate, seed merge and Android detail
+  rendering. Android main does not consume effectConditions/dietaryGuidance/
+  adiPopulationScope; numeric ADI replaces textual guidance, risking hidden
+  qualifications if used without UI integration.
+- Added OPENFOODTOX_APP_PILOT_INTEGRATION_TASK.md for Claude: scoped explicit
+  import, honest display-publication permission, preserved scoring, exact
+  response fixtures and tests. Codex owns subsequent Android mapping.
+- Docs-only; `git diff --check` validation. No backend suite run by Codex,
+  no live changes, merge or deploy. Next: Claude implements/pushes contract
+  and backend; Codex verifies Android before device-test release.
+
 ## 2026-10-01: bounded source closure resolved (Claude)
 
 - Implemented `docs/OPENFOODTOX_SOURCE_CLOSURE_TASK.md` (reviewed baseline
