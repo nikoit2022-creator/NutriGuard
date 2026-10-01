@@ -1,5 +1,19 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: pilot review corrections assigned (Codex, docs only)
+
+- Reviewed 4db31ecbaaae5c113398004577748ae7046080f6. Follow-up instructions are in
+  docs/OPENFOODTOX_PILOT_REVIEW_TASK.md: source identity, completeness gating,
+  unrelated identifier pairs, stale catalogue replacement and substantive EN/BG drafts.
+- Correction to the preceding Claude report: official EFSA publication 6032 covers
+  E472a-f, not a dedicated E330 re-evaluation. Its citation does not establish the
+  claimed E330 freshness gap. Checked official page on 2026-10-01; follow-up must
+  correct the report and reassess freshness without assuming a replacement source.
+- Tests not rerun by Codex; documentation-only diff checked with git diff --check.
+  No live access, implementation changes, merge or deployment in this handoff.
+- Next: Claude fetches the new review task, implements/tests the offline corrections
+  and returns source-linked bilingual review samples through Git.
+
 ## 2026-10-01: offline matching/profile pilot implemented (Claude)
 
 - Implemented `docs/OPENFOODTOX_PILOT_TASK.md` (reviewed baseline
