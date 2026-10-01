@@ -1,5 +1,19 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: bounded source closure assigned (Codex)
+
+- Reviewed `5cc732a`: generated EN/BG headings and export/check mechanism
+  address previous document drift. Four identity/purpose entries remain
+  seed-only; E150d-08 still labels secondary verification as primary.
+- Added `docs/OPENFOODTOX_SOURCE_CLOSURE_TASK.md` with exact targets and
+  support-or-withhold completion criteria; adjacent vague E150d-07 citation
+  included. Subagents permitted. No new product scope.
+- Documentation-only change; read repo instructions/latest handoff, checked
+  clean worktree and remote, fast-forwarded this isolated detached checkout.
+  Validation: `git diff --check`; backend suite not rerun by Codex.
+- Next: Claude implements this task, regenerates/checks documents, tests,
+  commits and pushes on the same branch. No merge/deploy authorized.
+
 ## 2026-10-01: delivery consistency gaps closed (Claude)
 
 - Implemented `docs/OPENFOODTOX_DELIVERY_CONSISTENCY_TASK.md` (reviewed
