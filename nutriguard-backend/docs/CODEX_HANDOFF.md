@@ -1,5 +1,15 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: Codex review handoff for Claude (documentation only)
+
+- Reviewed audit baseline `8dd62355281c147bc84c9266341a47b60a509846`.
+- Added `docs/OPENFOODTOX_REVIEW_TASK.md`: fix suffix-bearing E-number extraction,
+  measure/resolve the 400-leaf completeness limitation, and verify E250 ADI chemical basis.
+- No application or extractor code changed; tests not rerun for this documentation task.
+  Whitespace checked with `git diff --check`. No live access, import, merge or deploy.
+- Next: Claude reads the task from this branch and implements/tests the scoped fixes
+  in an isolated worktree, updates audit results and pushes for review.
+
 ## 2026-09-30: OpenFoodTox IUCLID dataset audit (offline, not integrated)
 
 - Scope: offline inventory/integrity/structural audit and staging
