@@ -1,5 +1,51 @@
 # CODEX_HANDOFF
 
+## 2026-10-01: chemical-basis ambiguity follow-up implemented (Claude)
+
+- Implemented the "Active follow-up: chemical-basis ambiguity" section of
+  `docs/OPENFOODTOX_REVIEW_TASK.md` (reviewed baseline
+  `f997bb7741cb858434163a935d30a1bde69c941d`) in the same isolated worktree,
+  fast-forwarded to the handoff commit `6f06a77` first (no drift).
+- Confirmed the reported defect in `chemical_basis.py::extract_chemical_basis`:
+  the first numerically-matching mention became `primary` (resolved) while later
+  matching mentions with a *different* basis were filed under `other_values_mentioned`
+  — i.e. ambiguity was silently resolved by picking the first candidate.
+- Fixed: all matching candidates are now collected before resolution; two or more
+  distinct normalized bases for the same stored value now produce a new
+  `ambiguous_multiple_bases` status with `basis: null` and every candidate preserved
+  in `matching_value_mentions` (never a silent pick). Repeated mentions of the same
+  basis (case/whitespace-normalized) still resolve normally.
+- Also fixed, per the task's explicit requirements: exact `decimal.Decimal` comparison
+  (not float tolerance); numeric-token-boundary guards so decimal-comma (`0,1`) and
+  scientific notation (`1e-5`) can never be partially matched as a different number
+  (found and fixed a real gap here during testing: the original lookbehind didn't
+  exclude a preceding exponent sign, so `1e-5` let the `5` alone match); and unit
+  validation — `extract_chemical_basis` now requires the stored value's *decoded* unit
+  to be in the `mg/kg bw` family before attempting any match, producing
+  `unresolved_unsupported_unit` otherwise (moved the call site in `records.py` to run
+  after unit-code decoding so this is possible).
+- Tests: 15 new cases (`TestAmbiguousMultipleBases`, `TestUnitValidation`,
+  `TestNumericTokenBoundaries`) added to `tests/unit/test_openfoodtox_chemical_basis.py`
+  (23 tests total in that file). `python -m pytest -q` (full backend suite, from
+  `nutriguard-backend/`): **805 passed, 16 skipped** (pre-existing), 0 failed.
+- Reran the full offline extraction/audit into a new versioned output folder
+  (`staging/v3/`, `reports/v3/`); `staging/`/`reports/` (2026-09-30) and
+  `staging/v2/`/`reports/v2/` (first review round) preserved unchanged.
+- **Measured real-dataset impact** (25,973 reference values across all 11,613
+  dossiers): `resolved` unchanged at 42 (same 41 unique documents, identical basis
+  and value in both versions — zero regressions); `unresolved_no_mention` dropped
+  from 25,842 to 14,431 and a new `unresolved_unsupported_unit` bucket holds 11,479
+  (records whose unit isn't mg/kg-bw-family, now correctly classified instead of
+  silently falling into "no mention"); `unresolved_no_exact_match` dropped from 89 to
+  21 for the same reason; **`ambiguous_multiple_bases`: 0** — confirms the reviewer's
+  own framing that this was a code-review finding, not an actual ambiguity in the real
+  dataset. The E250 profile (`reports/v3/e250_sodium_nitrite_profile.md`) is
+  byte-identical to `reports/v2/`'s.
+- `docs/OPENFOODTOX_DATASET_AUDIT.md` updated: new §8.4 with the full before/after
+  table and explanation, §3/§6/§7/§9 pointers updated to `v3` as current.
+- No import into the live database, no API/Health Score change, no container
+  restart, no deploy, no merge. Originals and the live stack were not touched.
+
 ## 2026-10-01: chemical-basis ambiguity follow-up (Codex, docs only)
 
 - Reviewed `f997bb7741cb858434163a935d30a1bde69c941d`; added the active follow-up

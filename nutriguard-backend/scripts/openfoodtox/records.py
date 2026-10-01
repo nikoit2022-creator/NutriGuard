@@ -423,9 +423,18 @@ def derive_reference_values(raw_fields: list[dict]) -> list[dict]:
             elif tail.startswith("ReferenceValueDescriptor") and leaf == "other":
                 entry["reference_value_descriptor_label"] = f["text"]
         if any(v is not None for k, v in entry.items() if k != "value_type"):
-            stored_value = entry["value"] or entry["lower_value"]
-            basis_result = extract_chemical_basis(stored_value, entry["justification_and_comments"])
-            entry["chemical_basis"] = basis_result.to_dict()
+            # Chemical-basis recovery needs the *decoded* unit label
+            # (e.g. "mg/kg bw/day") to validate that a text mention is
+            # even comparable to the stored value, but unit decoding
+            # only happens later (see _decode_in_place, which needs the
+            # codebook). Computed here with unit_label=None unresolved
+            # as "unsupported unit" by design; _decode_in_place
+            # recomputes it once the unit label is known.
+            entry["chemical_basis"] = extract_chemical_basis(
+                entry["value"] or entry["lower_value"],
+                entry["justification_and_comments"],
+                stored_unit_label=None,
+            ).to_dict()
             results.append(entry)
     return results
 
@@ -665,3 +674,12 @@ def _decode_in_place(derived: dict, codebook: Codebook, xsl_name: str | None) ->
                 if decoded:
                     rv["population_label"] = decoded
                     rv["population_label_source"] = "shipped_xsl_stylesheet"
+            # Recompute now that unit_label (if any) is decoded --
+            # chemical-basis matching must validate the stored value's
+            # unit, which was not yet known when derive_reference_values
+            # first ran (see the comment there).
+            rv["chemical_basis"] = extract_chemical_basis(
+                rv.get("value") or rv.get("lower_value"),
+                rv.get("justification_and_comments"),
+                stored_unit_label=rv.get("unit_label"),
+            ).to_dict()

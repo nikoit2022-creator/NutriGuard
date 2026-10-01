@@ -105,17 +105,18 @@ All commands are run from `nutriguard-backend/` and only ever read
 from `--dossiers-dir` and write to `--staging-dir`/`--reports-dir`
 (both outside git). Point `STAGING`/`REPORTS` at a **new versioned
 subfolder** for each rerun that changes extraction logic (e.g.
-`staging/v2/`, `reports/v2/`) rather than overwriting the previous
+`staging/v2/`, `staging/v3/`) rather than overwriting the previous
 output in place, so prior results stay recoverable for comparison —
-this is why `staging/v2/`/`reports/v2/` exist alongside the original
-`staging/`/`reports/` from 2026-09-30 (see §8). Run in this order:
+this is why `staging/v2/`/`reports/v2/` and `staging/v3/`/`reports/v3/`
+exist alongside the original `staging/`/`reports/` from 2026-09-30
+(see §8). **`v3` is current** as of 2026-10-01. Run in this order:
 
 ```bash
 cd nutriguard-backend
 
 DOSSIERS=/home/vboxuser/nutriguard-data/openfoodtox/originals/2026-09-30/dossiers
-STAGING=/home/vboxuser/nutriguard-data/openfoodtox/staging/v2
-REPORTS=/home/vboxuser/nutriguard-data/openfoodtox/reports/v2
+STAGING=/home/vboxuser/nutriguard-data/openfoodtox/staging/v3
+REPORTS=/home/vboxuser/nutriguard-data/openfoodtox/reports/v3
 
 # 1. Hash + integrity-check every archive
 python3 -m scripts.openfoodtox.extract inventory \
@@ -292,11 +293,14 @@ Per the audit's explicit constraints, the extractor:
 
 All figures below are from the first full run against the transferred
 set on 2026-09-30 (reproducible via the commands in §3;
-machine-readable versions are in `reports/*.json`). **§8 documents
-three fixes applied on 2026-10-01 and the corresponding rerun under
-`staging/v2/`/`reports/v2/`** — the figures below are superseded where
-§8 says so (E-number recognition counts, the "usable" qualifier on the
-human-health endpoint count, and the new completeness counters); every
+machine-readable versions are in `reports/*.json`). **§8 documents four
+fixes applied on 2026-10-01 across two review rounds and the
+corresponding reruns under `staging/v2/`/`reports/v2/` (first round)
+and `staging/v3/`/`reports/v3/` (second round, current)** — the
+figures below are superseded where §8 says so (E-number recognition
+counts, the "usable" qualifier on the human-health endpoint count, the
+new completeness counters, and the chemical-basis status breakdown);
+every
 other figure here was re-confirmed unchanged by that rerun.
 
 **Inventory & integrity** (`reports/inventory_summary.json`,
@@ -372,8 +376,10 @@ found by **exact CAS (`7632-00-0`) and EC (`231-555-9`) match** on its
 `REFERENCE_SUBSTANCE` record's `Inventory` block, cross-checked
 against that substance's own `Synonyms` entry containing the literal
 string `"E 250"` — not a name-similarity guess. Full source-linked
-profile (current version, with the §8 fixes applied):
-`reports/v2/e250_sodium_nitrite_profile.{md,json}`.
+profile (current version, with all §8 fixes applied):
+`reports/v3/e250_sodium_nitrite_profile.{md,json}` (byte-identical to
+`reports/v2/`'s — the §8.4 ambiguity hardening does not change this
+record's result; see §8.4).
 
 Summary of what the dataset actually contains for it (raw evidence,
 reproduced from the profile — see the file itself for the complete,
@@ -408,12 +414,16 @@ split):
 
 ## 8. Follow-up review and fixes (2026-10-01)
 
-A follow-up review (`docs/OPENFOODTOX_REVIEW_TASK.md`, reviewed
-baseline `8dd62355281c147bc84c9266341a47b60a509846`) found three real
-issues in the first version of this audit. All three are fixed,
-tested, and reflected in a regenerated catalogue/audit/profile under
-`staging/v2/` and `reports/v2/` (the original `staging/`/`reports/`
-from 2026-09-30 are preserved unchanged for comparison).
+Two rounds of follow-up review (`docs/OPENFOODTOX_REVIEW_TASK.md`).
+The first (reviewed baseline `8dd62355281c147bc84c9266341a47b60a509846`)
+found three real issues in the first version of this audit (§8.1-8.3),
+fixed and reflected in `staging/v2/`/`reports/v2/`. The second
+(reviewed baseline `f997bb7741cb858434163a935d30a1bde69c941d`, the
+commit that closed the first round) found one further parser-safety
+gap in the §8.3 fix itself (§8.4), fixed and reflected in
+`staging/v3/`/`reports/v3/`. The original `staging/`/`reports/` from
+2026-09-30 are preserved unchanged throughout, alongside `v2/`, for
+comparison.
 
 ### 8.1 E-number suffixes were silently dropped (confirmed defect, fixed)
 
@@ -541,6 +551,85 @@ corresponding nitrite-ion figure — readers needing more than this
 audit's scope should consult the primary opinion, not a paraphrase.
 Tests: `tests/unit/test_openfoodtox_chemical_basis.py`.
 
+### 8.4 Chemical-basis ambiguity hardening (2026-10-01, follow-up code review)
+
+A second-round code review of §8.3's `extract_chemical_basis` (source
+inspection only — a local Python reproduction could not be run in that
+review session) found a real gap: when two or more mentions in the
+justification text numerically match the stored value but name
+*different* bases, the original implementation treated the first
+match as "resolved" and filed the rest under `other_values_mentioned`
+— i.e. silently picked one basis instead of flagging the ambiguity.
+Demonstrated with a synthetic input, not a claim about the real E250
+record: `"0.1 mg sodium nitrite/kg bw and 0.1 mg potassium nitrite/kg
+bw"` with a stored value of `0.1` was reported as resolved to "sodium
+nitrite" with no indication a second, equally-matching basis existed.
+
+Fixed in `scripts/openfoodtox/chemical_basis.py`, with three changes:
+
+1. **Ambiguity is now explicit.** All matching mentions are collected
+   first; only if every one of them normalizes (case/whitespace-
+   insensitive) to the *same* basis does the result resolve. Two or
+   more distinct normalized bases produces a new
+   `ambiguous_multiple_bases` status with `basis: null` and every
+   matching candidate preserved in `matching_value_mentions` — never a
+   silent first-match pick. Repeated mentions of the *same* basis
+   (e.g. restated with different capitalization) still resolve
+   normally; this is not conflated with a genuine conflict.
+2. **Exact decimal comparison with real numeric-token boundaries.**
+   Matching now uses `decimal.Decimal` on the literal digit text
+   instead of a float-epsilon comparison, and the regex's lookbehind/
+   lookahead were extended (the original let a scientific-notation
+   exponent's digits, e.g. the `5` in `1e-5`, be read as a standalone
+   match because the lookbehind didn't exclude a preceding exponent
+   sign) so that decimal-comma numbers (`0,1`) and scientific notation
+   (`1e-5`) can never be partially matched as a different, shorter
+   number — they are correctly left as "no mention found" rather than
+   silently misread.
+3. **Units are validated, not assumed.** `extract_chemical_basis` now
+   takes the stored value's *decoded* unit label and refuses to match
+   anything unless it is in the `mg/kg bw` or `mg/kg bw/day` family
+   this module's text pattern actually understands; a missing or
+   incompatible unit (µg/kg bw/day, mg/day, mg/L, ...) now produces
+   `unresolved_unsupported_unit` rather than optimistically comparing
+   numbers across physically different quantities. Because unit
+   decoding happens later than reference-value extraction (it needs
+   the codebook — see §5.2), `derive_reference_values` now computes a
+   provisional (always-unresolved-for-unit) basis first and
+   `_decode_in_place` recomputes it once the unit label is known; when
+   no codebook is supplied at all, the result is conservatively
+   `unresolved_unsupported_unit` rather than assuming mg/kg bw.
+
+**Measured impact on the full dataset** (25,973 reference values
+across all 11,613 dossiers; full rerun in `staging/v3`/`reports/v3`,
+`staging/v2`/`reports/v2` preserved unchanged):
+
+| status | before (v2) | after (v3) |
+|---|---|---|
+| `resolved` | 42 | 42 |
+| `unresolved_no_mention` | 25,842 | 14,431 |
+| `unresolved_no_exact_match` | 89 | 21 |
+| `unresolved_unsupported_unit` | *(status didn't exist)* | 11,479 |
+| `ambiguous_multiple_bases` | *(status didn't exist)* | 0 |
+
+The exact same 41 unique documents resolve, with the exact same basis
+and value, in both versions — **zero regressions and zero newly
+discovered real ambiguity**, confirming the reviewer's own framing
+("a code-review finding, not a claim that the real E250 dossier is
+ambiguous"). The 11,479 records that moved from `unresolved_no_mention`
+to `unresolved_unsupported_unit` are records whose stored value is in
+a non-mg/kg-bw-family unit (e.g. µg/kg bw/day) — before this fix they
+were silently never matched for the right reason (their value never
+coincides with an mg-phrased mention) but for the wrong label; they
+are now correctly classified as unit-unsupported rather than
+"text happens not to mention it." The E250 profile itself
+(`reports/v3/e250_sodium_nitrite_profile.md`) is byte-identical to
+`reports/v2/`'s. Tests: 15 new cases across
+`TestAmbiguousMultipleBases`, `TestUnitValidation`, and
+`TestNumericTokenBoundaries` in
+`tests/unit/test_openfoodtox_chemical_basis.py` (23 tests total in
+that file after this round).
+
 ## 9. Coverage, limitations, and unresolved mappings
 
 - **Not every endpoint subtype has a bespoke field-level parser.**
@@ -567,15 +656,20 @@ Tests: `tests/unit/test_openfoodtox_chemical_basis.py`.
   ever violates it, `parse_warnings` flags that document's reference
   values as needing manual review instead of merging them (tested in
   `test_multiple_occurrences_of_same_container_flags_warning`).
-- **Chemical-basis recovery (§8.3) is text-pattern-based**, scoped to
-  the literal `mg ... /kg bw` shape actually observed in this dataset's
-  justification text. A differently-worded justification (no explicit
-  basis phrase, or a different unit shape) will correctly report
-  `"unresolved"` rather than guess — which means basis recovery will
-  often be unresolved for other substances' reference values, not just
-  sodium nitrite. This was verified only for the E250 case end-to-end;
-  a broader sweep of how often it resolves across all 21,572
-  `ToxRefValues` documents was not performed in this pass.
+- **Chemical-basis recovery (§8.3-8.4) is text-pattern-based**, scoped
+  to the literal `mg ... /kg bw` shape actually observed in this
+  dataset's justification text, and only attempted when the stored
+  value's decoded unit is confirmed to be in that same `mg/kg bw`
+  family (§8.4) — a differently-worded justification, a different unit
+  shape, or an undecoded unit (no codebook supplied) all correctly
+  report `"unresolved_*"` rather than guess. A full-dataset sweep
+  (§8.4) found this resolves for only 42 of 25,973 reference values —
+  the large majority are `unresolved_no_mention` (14,431, no mg/.../kg
+  bw phrase in the text at all) or `unresolved_unsupported_unit`
+  (11,479, a non-mg/kg-bw unit). This is expected given how narrowly
+  scoped the text pattern is, not a sign of a broken matcher — most
+  `ToxRefValues` justification text simply doesn't restate the value
+  with an explicit basis the way the sodium nitrite opinion does.
 - **Domain classification is schema-level** (by declared
   `documentSubType`), not a per-record re-verification of the species/
   route actually described in each study's text (see §5.3).
@@ -583,7 +677,7 @@ Tests: `tests/unit/test_openfoodtox_chemical_basis.py`.
   dataset** (§1) — resolving this needs a direct check against EFSA's
   own published OpenFoodTox terms, out of scope for this offline
   audit.
-- **`staging/v2/catalogue.jsonl` is large (~1.3 GB, larger than the
+- **`staging/v3/catalogue.jsonl` is large (~1.3 GB, larger than the
   original ~985 MB `staging/catalogue.jsonl`** because every reference
   value now also carries the `chemical_basis` structure and every
   reference substance the expanded `e_numbers` structure). A future

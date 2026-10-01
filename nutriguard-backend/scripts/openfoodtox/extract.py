@@ -590,6 +590,13 @@ def _render_e250_markdown(profile: dict) -> str:
                             f"not merged/converted: {other['value']} mg {other['basis']}/kg bw "
                             f"(\"{other['evidence']}\")"
                         )
+                elif cb.get("status") == "ambiguous_multiple_bases":
+                    lines.append(
+                        "  - Chemical basis: **ambiguous** — the stored value matches more than one distinct "
+                        "basis mentioned in this record's text; none was picked:"
+                    )
+                    for m in cb.get("matching_value_mentions", []):
+                        lines.append(f"    - candidate: {m['value']} mg {m['basis']}/kg bw (\"{m['evidence']}\")")
                 elif cb.get("status", "").startswith("unresolved"):
                     lines.append(f"  - Chemical basis: **unresolved** ({cb.get('status')}) — not suitable for consumer intake guidance without checking the cited opinion directly.")
                     for other in cb.get("other_values_mentioned", []):
