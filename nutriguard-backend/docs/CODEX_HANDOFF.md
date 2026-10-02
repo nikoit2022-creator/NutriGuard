@@ -1,5 +1,112 @@
 # CODEX_HANDOFF
 
+## 2026-10-02 (latest): PR #32 (OpenFoodTox pilot) deployed and verified (Claude Code)
+
+- Owner authorized deployment per issue #33, gated on PR #32 merged with
+  green Backend/Android CI. Verified via `gh api`: PR #32
+  (`feat/backend-openfoodtox-dataset-audit`, head `61ac7be42058ede0ebd1cc4060d124f207e50be2`)
+  `merged=true`, `merge_commit_sha=f8379c2109e377866f93ace8ff7ed0029312c540`;
+  fetched `origin/main` and confirmed that SHA was its exact tip (no
+  unreviewed later commits). Pre-deploy local `main` was
+  `65a8e689ebf7ba40ac4bdcb43ab2821b60c8916c` (PR #29).
+- Preserved the sole pre-existing working-tree change (the 332-line PR #29
+  handoff entry) across the fast-forward: both it and the incoming PR #32
+  handoff entries insert at the top of this file, so a plain merge would
+  conflict. Backed up `handoff.before.md` and `local-changes.patch` under
+  `/home/vboxuser/nutriguard-backups/pr32-deploy/`, took a path-scoped
+  `git stash push -- nutriguard-backend/docs/CODEX_HANDOFF.md` (kept, not
+  dropped; SHA in `stash-sha.txt`), fast-forwarded, then reinserted the
+  332 preserved lines verbatim immediately after the incoming PR #32
+  entries and before the next pre-existing entry. No other file had
+  working-tree changes.
+- Backup created BEFORE stopping/updating anything:
+  `/home/vboxuser/nutriguard-backups/pr32-deploy/nutriguard_pre_pr32.dump`.
+  `docker exec nutriguard-backend-db-1 pg_dump -U nutriguard -d nutriguard -Fc`
+  succeeded; archive is 147,881 bytes, created 2026-10-02 18:43:47 UTC.
+  `pg_restore --list` (run inside the `db` container, host has no client)
+  succeeded (exit 0), CUSTOM format, 88 TOC entries; listing retained as
+  `backup.toc`. No live restore performed.
+- `docker compose stop backend` completed at 18:43:57 UTC, BEFORE any
+  fast-forward or source update. PostgreSQL and Redis stayed running and
+  healthy throughout; no Compose down, volume operation, secret edit,
+  Tailscale/firewall change, or unrelated service restart.
+- Pre-migration database revision was exactly `d7e8f9a0b1c2`; the target
+  migration `a8b9c0d1e2f3_ingredient_localization_owner_approval.py` has
+  `down_revision = "d7e8f9a0b1c2"` -- an exact match, confirmed by reading
+  the migration chain at `origin/main` before building.
+- Rebuilt with `docker compose build backend` (pinned `Dockerfile`). Final
+  image ID: `sha256:4bd250febfd0c6025ba96e441f29d2e7964ace7d17b62efa5add432a728a5735`.
+  Full suite in that image, `--network none`, entrypoint bypassed
+  (`--entrypoint ""`), isolated SQLite config: `python -m pytest -q
+  -p no:cacheprovider`: **904 passed, 20 skipped, 2 warnings in 30.24s**.
+  Skips are opt-in PostgreSQL-only tests. No suite was pointed at the
+  live database.
+- `docker compose up -d --no-deps backend` at 18:46:26 UTC used the
+  documented entrypoint: DB-readiness wait, `alembic upgrade head`,
+  startup `load_seed()` (`SEED_ON_START=true`, refreshed `retrieved_at`/
+  `last_verified_at` on the 12 pre-existing curated ingredients -- existing,
+  unrelated behavior, not part of this import). `alembic current` read
+  `a8b9c0d1e2f3 (head)` immediately after start and again after the later
+  restart below; single head throughout.
+- Explicit dry-run of `python -m app.seed.load_openfoodtox_pilot_content`
+  (no `--apply`) printed its proposed-changes plan: exactly identities
+  E250 (update), E150d (create), E330 (update), E951 (update) -- no other
+  ingredient, and no `risk_level`/`risk_assessment_available`/
+  `verification_status`/dietary-flag field appeared in the plan, matching
+  the task's constraint. Re-ran with `--apply`: one transaction, `Applied
+  and committed.`
+- Verified directly in Postgres after apply: `E150d` row has
+  `risk_level=SAFE`, `risk_assessment_available=f`, `verification_status=
+  LIMITED_DATA`, `acceptable_daily_intake`/`efsa_status`/`fda_status` all
+  empty -- no invented ADI or risk badge. `E951.effect_conditions` is
+  populated (372 chars, the PKU caveat). All four identities' new/updated
+  BG localization rows: `translation_status=DRAFT`,
+  `translation_source=MACHINE_TRANSLATED`, `owner_approved_without_review=t`
+  -- never `REVIEWED`/`HUMAN_CURATED`. EN `description`/`purpose_in_food`/
+  `health_concerns`/`references` all non-empty for all four identities.
+- Row counts, immediately before vs. after the import (read-only `psql`
+  queries, no product/user content printed): `products` 93->93,
+  `ingredients` 390->391 (+1, the new E150d row), `ingredient_aliases`
+  403->405 (+2, E150d's curated aliases), `ingredient_localizations`
+  12->14 (+2, new BG rows for E150d and E330; E250/E951's existing BG
+  rows were replaced in place, not inserted), `product_sources` 111->111,
+  `scan_history` 55->55, `users`/`devices`/`user_health_profiles` 24/24/24
+  unchanged, `refresh_tokens` 57->57. Only the four-identity import added
+  rows; no product, user, or scan data was touched.
+- `http://127.0.0.1:8000/health` and `https://ubuntu.taileaa26d.ts.net/health`
+  both returned `{"status":"ok","version":"1.0.0"}` immediately after the
+  import, AND again after a controlled `docker compose restart backend`
+  (db/redis untouched) -- the restart re-ran `alembic upgrade head` and
+  `load_seed()` a second time, and the pilot content and
+  `ingredients`/`ingredient_localizations` counts were unchanged
+  afterward, confirming PR #32's own fixes for its Defects 1-3 (startup
+  reseed no longer reverts pilot content) hold on this exact deployment.
+- Post-restart backend logs: 1,267 lines in the 10 minutes covering both
+  starts, zero matches for traceback/exception/critical/error/HTTP 5xx
+  (private OCR/image/credential content was never printed). No automatic
+  monitoring was set up.
+- **Rollback instructions (not executed -- no failure, no data loss):**
+  stop `backend`; restore with `pg_restore` from
+  `/home/vboxuser/nutriguard-backups/pr32-deploy/nutriguard_pre_pr32.dump`
+  only with explicit owner approval (this would also discard the 10 live
+  rows/users/scans created since the backup, independent of this
+  deployment); for a source-only rollback, `git reset` is unnecessary --
+  checking out `65a8e689ebf7ba40ac4bdcb43ab2821b60c8916c` and rebuilding
+  returns to the pre-PR#32 image (this does not revert the DB migration
+  or the four-identity content, which would need the backup restore
+  above). No restore was needed or performed.
+- Only this handoff file was modified in Git (still uncommitted, as this
+  repo's convention has been for every prior deployment entry above). No
+  commits/pushes, secret edits, Android changes, or unrelated branch
+  changes. `.env`/`client_secret.json` contents were never read, printed,
+  or modified.
+
+**Recommended next step:** deployment complete and verified; no further
+backend action required. Per issue #33, Codex will provide Android
+Studio update/install steps next.
+
+---
+
 ## 2026-10-02: application pilot integration regressions fixed (Claude)
 
 Implemented `docs/OPENFOODTOX_APP_INTEGRATION_FIX_TASK.md` (Codex's
@@ -816,6 +923,338 @@ Android's own build reads as data).
   integration stage) — not started here; needs its own explicit
   scoping/authorization before any of this data reaches the live
   product.
+
+## 2026-09-27: PR #29 deployed and verified (Codex)
+
+- Owner authorized deployment of exactly merged PR #29:
+  `65a8e689ebf7ba40ac4bdcb43ab2821b60c8916c`. Fetched origin; target
+  matched `origin/main`, merge title and parent `32bd7efc05750470da6f48eab7c4111e45db1d26`.
+  Fast-forwarded local `main` only to that SHA. No extra commits deployed.
+- Read repository/backend AGENTS.md, this handoff, README Docker startup
+  procedure, candidate queue and review exporter documentation before deployment.
+  Live bind mounts were confirmed to use this checkout's `app` and `alembic`.
+- Preserved the sole pre-existing working-tree change (247 added handoff lines)
+  verbatim alongside all incoming handoff entries. Original document and binary
+  patch saved under `/home/vboxuser/nutriguard-backups/pr29-deploy/` as
+  `handoff.before.md` and `local-changes.patch`; retained the path-scoped stash
+  `pr29-deploy-preserved-handoff` (SHA recorded in `stash-sha.txt`).
+- Backup created BEFORE stopping/updating anything:
+  `/home/vboxuser/nutriguard-backups/pr29-deploy/nutriguard_pre_pr29.dump`.
+  `docker exec nutriguard-backend-db-1 pg_dump -U nutriguard -d nutriguard -Fc`
+  succeeded; archive is 120,992 bytes, created 2026-09-27 17:21:14 UTC.
+  `pg_restore --list` succeeded (exit 0), CUSTOM PostgreSQL 16 archive,
+  75 TOC entries; listing retained as `backup.toc`. No live restore performed.
+- `docker compose stop backend` completed at approximately 17:24:16 UTC,
+  BEFORE stash/fast-forward or any mounted-source update. PostgreSQL and Redis
+  remained running; their container start timestamps were verified unchanged.
+  No Compose down, data-volume operation or unrelated service restart.
+- Pre-migration database revision was exactly `c6d7e8f9a0b1` and the candidate
+  table was absent, matching this migration's expected parent state. Target
+  migration is the additive candidate table version; no other branch integrated.
+- Rebuilt with `docker compose build backend`. Verified all 105 tracked app
+  and Alembic files inside the final image match the target checkout. Sole
+  image head: `d7e8f9a0b1c2`. Final image ID:
+  `sha256:4692c6ce95bcef6382f37b2ee50289297178014aca1cf54c5520448fb387adbc`.
+- Full tests in that image, network disabled, entrypoint bypassed and isolated
+  SQLite configuration: `python -m pytest -q -p no:cacheprovider`:
+  **701 passed, 16 skipped, 2 warnings in 20.20s**. Skips are opt-in PostgreSQL
+  tests; the earlier disposable PostgreSQL verification is recorded below.
+  No test suite was pointed at the live database.
+- `docker compose up -d --no-deps backend` at 17:26:12 UTC used the documented
+  entrypoint: database readiness, `alembic upgrade head`, existing startup
+  seed loader, application startup. Both live `alembic heads` and
+  `alembic current` confirmed `d7e8f9a0b1c2 (head)`; no stamp or downgrade.
+- Local `http://127.0.0.1:8000/health` and Tailscale
+  `https://ubuntu.taileaa26d.ts.net/health` both returned HTTP 200 with
+  `{"status":"ok","version":"1.0.0"}`. Results saved as `health.json`.
+- Data preservation checked using pre/post full-row fingerprints and a
+  column-by-column comparison of backup COPY data with live data in memory
+  (no ingredient contents printed). Counts unchanged: products=88,
+  ingredients=296, ingredient_aliases=308, ingredient_localizations=12,
+  product_sources=104, scan_history=51, users=24, devices=24,
+  user_health_profiles=24, refresh_tokens=54. All row identities preserved.
+  All values unchanged EXCEPT existing startup-seed metadata: `retrieved_at`
+  and `last_verified_at` on 12 ingredients, `reviewed_at` on 12 localizations.
+  Scientific content, aliases and product references are unchanged. These
+  timestamp refreshes are existing seed behavior, not migration data changes.
+  Evidence: `data.before.txt`, `data.after.txt`, `data-column-audit.json`.
+- Ran `docker compose exec -T backend python -m app.seed.ingredient_review_list`
+  successfully, using its PostgreSQL READ ONLY transaction and rollback.
+  Report processed in memory; only count/flag summary saved to
+  `export-summary.json`: entryCount=0, junkObservationRowsExcluded=0,
+  tokenObservationCount=0, flags={}; candidate table rows=0. This is expected:
+  old catalog rows are not automatically backfilled. Every table fingerprint
+  was identical immediately before/after the exporter. No backfill, repair,
+  prune, synthetic scan or content mutation was performed by verification.
+- Post-start backend logs: 631 lines through 17:27:26 UTC, zero matches for
+  traceback/exception/critical/error/HTTP 5xx; startup and migration succeeded.
+  PostgreSQL and Redis remained healthy. Existing Compose obsolete-version
+  warning and test warnings were left unchanged.
+- Operational checks initially caught two issues, both resolved: the first
+  handoff combination assertion failed before editing files; all local additions
+  were then preserved verbatim at the top. A build started before that checkout
+  update completed; it was never started as a service and was superseded by a
+  second build from the verified target. The strict full-row equality check
+  flagged seed timestamp refreshes; the backup column audit above established
+  their exact scope. No recovery, restore or live-data deletion was needed.
+- Only this handoff remains modified in Git. No commits/pushes, secret edits,
+  scientific content edits, Android changes or unrelated branch changes.
+
+**Recommended next step:** deployment complete; no further deployment action
+required. Future normal scans can populate the candidate queue. A later manual
+read-only exporter run can report those observations; legacy backfill remains
+subject to a separate owner decision.
+
+---
+
+
+
+## 2026-09-17: PR #20 deployed to the live dev backend (Claude Code)
+
+**[DOCUMENTATION UPDATE — uncommitted, per task instruction]**
+
+- Deployed the merged `main` (PR #20, `feat/backend-ingredient-language-diagnostics`
+  -- the ingredient-language identity/diagnostics work documented in the
+  entries immediately below, its 3 code-review rounds, and issue #19)
+  to the live `nutriguard-backend` Docker Compose stack. Expected merge
+  commit `32bd7efc05750470da6f48eab7c4111e45db1d26` confirmed to be
+  `origin/main`'s exact HEAD before touching anything -- no unreviewed
+  drift beyond it.
+- **Working-tree conflict handled, nothing discarded**: this file itself
+  had an uncommitted local entry (the PR #18 deployment record just
+  below) at the same insertion point PR #20's own commits also touched.
+  `git merge --ff-only` correctly refused rather than risk overwriting
+  it. Resolved safely: `git stash push -u` (recoverable, not a discard)
+  on just this file, fast-forwarded `main` (`8d742eb` -> `32bd7ef`,
+  clean fast-forward, confirmed via `git merge-base --is-ancestor`),
+  then `git stash apply <sha>` (not `pop`) produced a real (expected)
+  merge conflict at the same spot; resolved by hand, keeping BOTH
+  entries in full -- nothing from either side was dropped. The stash
+  entry itself was intentionally left in place afterward as a redundant
+  safety net (harmless to leave; the PR #18 entry's content is already
+  fully present in the working tree either way).
+- **Process deviation, disclosed**: the task asked to stop the backend
+  *before* updating the mounted source. Because updating the checkout
+  (the fast-forward) is what the git-conflict resolution above was
+  itself resolving, the backend was still running (dev-mode
+  `--reload`) for the ~15 seconds between the fast-forward landing on
+  disk and this session's own `docker compose stop backend`. `WatchFiles`
+  did hot-reload the app against the still-unmigrated schema in that
+  window (`Application startup complete` logged at 13:01:46Z). Checked
+  the exact log window (13:01:46Z-13:03:25Z when `stop` completed):
+  **zero requests were served** in that interval (no access-log lines
+  at all between the reload and the stop) -- no client ever observed
+  the mismatched-schema state. Flagging the ordering miss for
+  visibility; the actual exposure was nil per the logs.
+- Backup: `pg_dump -Fc` via the running `db` container ->
+  `/home/vboxuser/nutriguard-backups/nutriguard_pre_pr20_20260917T130301Z.dump`
+  (103,058 bytes, exit code 0). `pg_restore --list` against it (via a
+  throwaway `postgres:16-alpine` container, read-only mount) succeeded:
+  exit 0, 75 TOC entries, `dbname: nutriguard`, `Format: CUSTOM`.
+  Baseline counts recorded before any change: products=55,
+  ingredients=247, ingredient_aliases=258, scan_history=39, users=21,
+  ingredient_localizations=12 (identical to the post-PR18 baseline
+  recorded in the entry below -- nothing changed between that
+  deployment and this one).
+- Maintenance window: `docker compose stop backend` (db/redis left
+  running/untouched throughout -- never `docker compose down`, no
+  volume touched, no reset/reseed, no `.env`/secret edit).
+- Rebuilt the `backend` image from the repo's own `Dockerfile`/
+  `requirements.txt` (`docker compose build backend`), then
+  `docker compose up -d --no-deps backend`. The existing entrypoint
+  ran its supported startup path unmodified: waited for Postgres,
+  `alembic upgrade head` (`b5c6d7e8f9a0 -> c6d7e8f9a0b1, ingredient
+  language provenance, identity-uncertainty flags, and additive
+  intake-guidance fields`), then `python -m app.seed.load_seed`
+  (`seed_loaded count=12`, idempotent -- no new rows), then `uvicorn`
+  started. No manual migration/seed invocation was needed.
+- Post-deploy verification: `alembic heads`/`alembic current` in the
+  running container both == `c6d7e8f9a0b1 (head)` -- exactly one head.
+  Local `GET /health` and the private Tailscale
+  `https://ubuntu.taileaa26d.ts.net/health` both returned
+  `200 {"status":"ok","version":"1.0.0"}`.
+- **Data preservation confirmed post-deploy, byte-for-byte**:
+  products=55, ingredients=247, ingredient_aliases=258, scan_history=39,
+  users=21, ingredient_localizations=12 -- every single count identical
+  to the pre-deploy baseline. Expected: this migration only adds
+  columns to existing tables (no new rows), and the seed loader is
+  idempotent against already-seeded data.
+- API field verification, reusing the EXISTING `deploy-verify-20260917`
+  device (re-authenticating an already-registered device is
+  get-or-create -- confirmed `users` count stayed at 21 across the
+  call, no new user created) -- no disposable product/user created:
+  `GET /ingredients/e951_aspartame` (curated, reviewed Bulgarian) --
+  new additive fields present and correct: `effectConditions`/
+  `dietaryGuidance` (`""`, honestly not yet authored),
+  `identityUncertain=false`/`uncertaintyReason=null`,
+  `adiPopulationScope="PER_KG_BODY_WEIGHT"`; `localizations.en` and
+  `.bg` both present, `bg.translationStatus="REVIEWED"`/
+  `translationSource="MACHINE_TRANSLATED"` -- unchanged existing
+  behavior. `GET /ingredients/e200_sorbic_acid` (curated, no reviewed
+  Bulgarian row) -- `localizations` has only `en`, confirming no
+  fabricated Bulgarian coverage. `GET /products/4006381333931`
+  (pre-existing fixture, not created by this session) -- new
+  `originalIngredientText`/`ingredientTextSourceLanguage` fields
+  present with honest defaults (`""`/`null`, since this product predates
+  the original-vs-canonical-text distinction); `rawIngredientText`
+  unchanged.
+- Logs: `docker compose logs backend` since the rebuild (834 lines)
+  grepped for `traceback|exception|MissingGreenlet|CRITICAL|error|5xx`
+  -- zero matches. All access-log lines since deploy: 7 requests, all
+  `200` (this session's own health/verification calls only -- 2x
+  `/health`, 1x `POST /auth/device`, 2x `/products/4006381333931`, 1x
+  each ingredient lookup).
+- Diagnostics: config unchanged by this deploy (`SCAN_DIAGNOSTICS_ENABLED=true`,
+  `SCAN_DIAGNOSTICS_MAX_BYTES=1048576`, `SCAN_DIAGNOSTICS_BACKUP_COUNT=1`,
+  `SCAN_DIAGNOSTICS_PATH=/var/log/nutriguard/scan-diagnostics.jsonl`,
+  storage budget untouched, no automatic/periodic monitoring added).
+  Diagnostics file: 14,426 bytes / 39 lines, well under the 1 MiB
+  rotation threshold, no rotation backup file beyond the configured
+  `.1`. Inspected only structural info (file size, line count, the
+  field NAMES of the most recent line) -- never printed raw OCR/scan
+  content in this session; the diagnostics format itself is
+  content-free by design (images/OCR text/model responses/credentials/
+  user IDs/health-profile data are structurally excluded at the
+  recording layer, unchanged by this deploy).
+- **Ingredient-language repair tool -- dry-run only, confirmed
+  non-mutating first** (`app/seed/repair_ingredient_language.py`:
+  `--apply` defaults to `False`; the write path (`_apply_ingredient_translation`)
+  is only ever called when `apply=True`, and the function ends with
+  `await db.rollback()` whenever `apply=False` -- confirmed by reading
+  the source before running). Ran without `--apply` against the live
+  database: exit code 0, `"mode": "dry_run"`, **0 entries with
+  `applied=true`**, and DB row counts re-verified identical
+  before/after the run. Summary of the 247 existing ingredient rows
+  examined (category counts only -- no raw ingredient/OCR text
+  reproduced here, per task instruction):
+  - `ALREADY_FINE` (already en/bg/unknown): 20
+  - `SKIPPED_TRUSTED_SOURCE` (curated/regulatory, never auto-repaired): 47
+  - `FLAGGED_UNRESOLVED_AMBIGUOUS` (suspected OCR concatenation, never translated): 26
+  - `TRANSLATED` (would become a proposed repair under `--apply`): 4
+  - `FLAGGED_UNRESOLVED_TRANSLATION_FAILED` (translation attempted, failed the strict reliability check): 150
+  - 10 additional PRODUCT-level flags (`Product.raw_ingredient_text` in
+    a non-EN/BG language, report-only -- this tool never rewrites
+    `Product` rows regardless of `--apply`).
+  - The 150-count `FLAGGED_UNRESOLVED_TRANSLATION_FAILED` figure is
+    reported as observed, without a confirmed root cause: Gemini
+    responses varied (not a uniform "unavailable" fallback value),
+    so this reflects the translation-reliability check's own strict
+    bar being applied to old/legacy catalog rows, not a Gemini outage
+    -- but a definitive cause would need further investigation, not
+    performed in this session (out of scope for a deployment task).
+  - **No repair was applied.** This summary is for owner review/approval
+    only -- a decision to run `--apply` (only 4 rows would actually
+    change) is explicitly deferred to a human, per task instruction.
+- Minor pre-existing operational observations (not caused by or fixed
+  in this session, mentioned for visibility only, no values printed):
+  the `backend` service's `JWT_SECRET` environment value in
+  `docker-compose.yml` appears to still be the literal placeholder
+  string from `.env.example`, not a generated secret -- worth the
+  owner's attention for a non-dev environment, but out of scope to
+  change here (`.env`/secret edits are explicitly forbidden by this
+  task and by this repo's own security rules). `GEMINI_API_KEY`
+  appears to be set to a real-looking value.
+- No push performed (none authorized/needed -- `origin/main` was
+  already the deploy target). No live/production database reset,
+  reseed, or `--apply` repair performed. `docker compose down` never
+  run; no volume touched.
+
+**Recommended next step**: none required for this deployment -- it is
+complete and verified. The repair-tool dry-run summary above (150
+flagged-unresolved rows, 4 proposed translations) is worth a human
+decision on whether/when to run `--apply`, but is not a blocker. If
+the leftover `deploy-verify-20260917` device/user row (see the PR #18
+entry below) should still be removed, that remains an available
+follow-up, unrelated to this deployment.
+
+---
+
+---
+
+## 2026-09-17: PR #18 deployed to the live dev backend (Claude Code)
+
+**[DOCUMENTATION UPDATE — uncommitted, per task instruction]**
+
+- Deployed the already-merged `main` (PR #18, `feat/app-bilingual-enrichment`)
+  to the live `nutriguard-backend` Docker Compose stack
+  (`nutriguard-backend-backend-1`/`-db-1`/`-redis-1`), which was already
+  running dev-mode (`docker-compose.yml`, bind-mounted `./app`/`./alembic`,
+  `uvicorn --reload`) before this task started.
+- Pre-deploy state: local `main` was one merge behind `origin/main`
+  (`f35322f`, PR #16). Fetched, confirmed `origin/main` had advanced to
+  exactly the expected `8d742eb773ebe015b7fcfcefd19869ab129f7644` (no
+  further unexpected drift), fast-forward merged. Working tree was clean
+  throughout; no local changes to preserve.
+- Backup: `pg_dump -Fc` via the running `db` container ->
+  `/home/vboxuser/nutriguard-backups/nutriguard_pre_pr18_20260917T071115Z.dump`
+  (93,402 bytes, 68 TOC entries). `pg_restore --list` against it (via a
+  throwaway `postgres:16-alpine` container) succeeded. Baseline counts
+  recorded before any change: products=55, ingredients=247,
+  scan_history=39, ingredient_aliases=252, users=20.
+- Maintenance window: `docker compose stop backend` (db/redis left
+  running/untouched) *before* the fast-forward, specifically because the
+  dev compose file bind-mounts source into the container with
+  `--reload` -- updating the checkout files live would otherwise have
+  hot-reloaded new code against the still-unmigrated schema.
+- Rebuilt the `backend` image from the repo's own `Dockerfile`/
+  `requirements.txt` (`docker compose build backend`), then
+  `docker compose up -d --no-deps backend`. The existing entrypoint
+  (`docker/entrypoint.sh`) ran its supported startup path unmodified:
+  waited for Postgres, `alembic upgrade head` (`a4b5c6d7e8f9 ->
+  b5c6d7e8f9a0, reviewed ingredient display localizations`), then
+  `python -m app.seed.load_seed` (`seed_loaded count=12`, "Seeded 12
+  ingredients."), then started `uvicorn`. No manual migration/seed
+  invocation was needed.
+- Post-deploy verification: `alembic current` in the running container
+  == `b5c6d7e8f9a0 (head)`. `ingredient_localizations` has 12 rows,
+  all `language='bg'`, matching the 12 curated ids in
+  `app/seed/ingredients_seed_bg.json`. Local `GET /health` and the
+  private Tailscale `https://ubuntu.taileaa26d.ts.net/health` both
+  returned `200 {"status":"ok","version":"1.0.0"}`.
+- Data preservation confirmed post-deploy: products=55, ingredients=247,
+  scan_history=39, users=20 (all unchanged); `ingredient_aliases`
+  went 252 -> 258 (+6), which is the seed loader's own expected
+  additive alias registration for this change, not data loss.
+- API field verification (via a throwaway `deploy-verify-20260917`
+  device-auth token, never printed): `GET /ingredients/e951_aspartame`
+  -- canonical English fields (`commonName="Aspartame"`, `eNumber=E951`,
+  `insNumber=951`, `adiMinMgPerKgBwPerDay=0.0`/`adiMaxMgPerKgBwPerDay=40.0`,
+  `references`/citations, `sourceUrl`) unchanged; `localizations.bg`
+  present with `translationStatus="REVIEWED"`,
+  `translationSource="MACHINE_TRANSLATED"`, full reviewed Bulgarian
+  text. Product-context check via `POST /scan/ocr-text` against the
+  pre-existing `4006381333931` ("Diagnostic Test Product DELETE ME")
+  fixture (created 2026-08-31, not created by this session) with raw
+  text containing "Aspartame (E951)": resolved via existing alias
+  matching straight to canonical `e951_aspartame`, and
+  `GET /products/4006381333931` surfaced the same unchanged English +
+  reviewed Bulgarian profile inside the product response.
+  `GET /ingredients/e200_sorbic_acid` (curated, no reviewed Bulgarian
+  row) returned normally with only `localizations.en` populated --
+  confirms non-translated ingredients still serve valid English
+  content. `GET /ingredients/synth_fd99c9498840` (OCR-only ingredient)
+  also returned normally.
+- Logs: `docker compose logs backend` since deploy start (1135 lines)
+  grepped for `traceback|exception|MissingGreenlet|CRITICAL|500|Internal
+  Server Error` -- zero matches. All request/response status lines were
+  200 except one intentional 422 from an earlier invalid-barcode probe
+  during verification (expected validation behavior, not a server error).
+- Minor, harmless side effect from verification: the throwaway
+  `deploy-verify-20260917` device + its user row remain in the `devices`
+  and `users` tables (users 20 -> 21) -- an attempt to delete them was
+  blocked by this session's own destructive-action safety guard
+  (mass-delete classifier); left in place rather than working around
+  it. No product, ingredient, or scan-history data was created or
+  altered by verification.
+- No push performed (none authorized). No test suite run against the
+  live database (explicitly out of scope; PR #18 was already verified
+  in disposable infrastructure per the entry immediately below).
+
+**Recommended next step**: none required for this deployment -- it is
+complete and verified. If the leftover `deploy-verify-20260917`
+device/user row should be removed, grant Bash permission for that
+specific delete (or run it manually) and re-run the two `DELETE`
+statements this session attempted.
 
 ## 2026-09-27: VM verification of ingredient review list
 
