@@ -1,5 +1,21 @@
 # CODEX_HANDOFF
 
+## 2026-10-02: application integration review (Codex)
+
+- Reviewed `78cbd5b`; existing targeted backend tests independently run:
+  `pytest tests/integration/test_openfoodtox_pilot_import.py
+  tests/integration/test_openfoodtox_app_pilot_response_paths.py
+  tests/unit/test_ingredient_localization.py -q`: **21 passed** (local venv).
+- Three temporary SQLite regression probes: **3 failed** as expected,
+  proving seed-on-start overwrites pilot descriptions, EN-only artifact
+  update loses BG via stale hash, and new BG names use English. Temporary
+  probe file removed after execution; no production data touched.
+- Added OPENFOODTOX_APP_INTEGRATION_FIX_TASK.md with exact reproduction,
+  permanent-test requirements, pinned OpenAPI and remaining verification.
+- Android work is in progress separately in this branch; preserve it.
+  Next: Claude fixes backend and updates fixtures; Codex finishes Android.
+  No merge/deploy; this update is not yet ready for device testing.
+
 ## 2026-10-01: owner-approved four-profile application integration implemented (Claude)
 
 - Implemented `docs/OPENFOODTOX_APP_PILOT_INTEGRATION_TASK.md` (baseline
