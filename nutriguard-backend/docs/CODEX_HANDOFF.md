@@ -1,5 +1,822 @@
 # CODEX_HANDOFF
 
+## 2026-10-02: application pilot integration regressions fixed (Claude)
+
+Implemented `docs/OPENFOODTOX_APP_INTEGRATION_FIX_TASK.md` (Codex's
+review of `78cbd5b`, baseline fast-forwarded to `68c76ee` first --
+Android's pilot mapping, preserved verbatim, no Android files touched).
+Same isolated worktree. Full SHA after this commit: see the commit this
+entry ships in (`git log -1` on this branch).
+
+**Defect 1 -- restart overwrote imported profiles.** `load_seed()`'s
+unconditional `session.merge` (base `ingredients_seed.json` loop) and
+`_load_bg_localizations`'s unconditional BG upsert both used to blindly
+revert the four pilot identities' EN/BG content back to the old
+curated-seed text on every container restart (`SEED_ON_START=true`
+re-invokes `load_seed()`). Fixed by protection, not reapplication:
+`load_seed.py` now checks each row's OWN `field_provenance_json` (the
+pilot importer's own per-field provenance -- nothing else in this
+codebase writes it) before reseeding, and carries the pilot-supplied
+value (and the provenance blob itself, so the protection survives a
+SECOND restart too) through the merge untouched; `_load_bg_localizations`
+now also skips any BG row with `owner_approved_without_review=True`, the
+same way it already skipped `HUMAN_CURATED` ones. Also gave `references`
+its own field-provenance entry in `load_openfoodtox_pilot_content.py`
+(`_apply_update`) -- it was the one updatable field the importer never
+recorded, so it alone would have kept reverting. Every OTHER ingredient
+and field reseeds exactly as before (verified directly).
+
+**Defect 2 -- EN-only update made approved BG disappear.** `_apply_bg`
+used to skip entirely on a `no_op` BG-text plan, including the hash
+refresh -- so an EN-only approved artifact update (still calls
+`_apply_bg`, since `en_changes` is non-empty) left the BG row's
+`source_content_hash` pointing at the ingredient's PREVIOUS English
+content, and `build_localizations` correctly (but unintentionally)
+started treating the still-approved, unchanged BG prose as stale. Fixed
+by only ever skipping entirely on `HUMAN_CURATED`; a true `no_op` now
+still refreshes the hash/metadata (text fields stay untouched, since
+`bg_values` is all `None` in that case). An ordinary, UNGOVERNED direct
+edit to the EN column (never going through this importer) still
+correctly invalidates BG -- verified directly, so this isn't a widened
+gate.
+
+**Defect 3 -- BG names were English.** `_apply_bg` initialized a new BG
+row's `common_name` from the canonical English name. The artifact
+(`app/seed/openfoodtox_pilot_profiles.json`, rebuilt via
+`scripts/openfoodtox/build_app_pilot_content.py`) now carries an
+explicit, owner-approved `common_name.bg` for all FOUR identities (not
+just E150d) -- E250/E951 match this repo's own already-reviewed
+`ingredients_seed_bg.json` entries exactly (no behavior change for
+those two), E330/E150d match the headings already published in
+`docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md`. `_plan_bg`/`_apply_bg` now
+carry and assert this name explicitly, for both a brand-new BG row and
+an existing one (self-healing, not just at creation).
+
+**Permanent regressions**: 9 new SQLite tests in
+`tests/integration/test_openfoodtox_pilot_import.py` (3 classes, one
+per defect) -- verified they fail against the pre-fix code (6 of 9;
+the other 3 cover already-correct behavior the fix must not regress)
+before restoring the fix. Focused suite: `python3 -m pytest -q
+tests/integration/test_openfoodtox_pilot_import.py
+tests/integration/test_openfoodtox_app_pilot_response_paths.py
+tests/unit/test_ingredient_localization.py
+tests/integration/test_load_seed.py` -- **35 passed**. Full suite:
+`python3 -m pytest -q` -- **904 passed, 20 skipped** (16 pre-existing
+opt-in Postgres + 4 new, see below), 3 warnings (pre-existing).
+
+**Close existing delivery requirements**:
+- OpenAPI regenerated inside a disposable `docker build` of this
+  branch (pinned `requirements.txt`, Python 3.12-slim, matching
+  `Dockerfile` exactly) -- confirmed the previously committed
+  `openapi.json` actually had NEWER-environment drift (`format:
+  binary` vs `contentMediaType`; `ValidationError`'s extra `input`/
+  `ctx` fields), not the pinned deployment output. Replaced with the
+  disposable image's exact output; zero other diff (no schema change
+  from this round's fixes).
+- Added `tests/postgres/test_openfoodtox_pilot_import_postgres.py`
+  (opt-in, same convention as the rest of that directory): (a)
+  `TestMigrationWithPreexistingRows` -- real `alembic` downgrade/upgrade
+  around the `a8b9c0d1e2f3` migration with a raw pre-existing
+  `ingredient_localizations` row inserted before it runs, asserting
+  `owner_approved_without_review` defaults `false` for that row (not
+  just for rows created after the column existed) -- separate,
+  explicitly-named env var (`NUTRIGUARD_TEST_POSTGRES_MIGRATION_URL`)
+  since this one mutates schema state; (b) the real import against a
+  real `asyncpg` connection, plus real `POST /api/v1/scan/barcode` and
+  `POST /api/v1/scan/label-image` response-path tests (external
+  provider/Gemini mocked, no network) serving the pilot's
+  owner-approved content -- the prior assignment only ever verified an
+  empty-Postgres migration cycle plus SQLite-backed direct/listing/
+  OCR-text/partial paths. Ran all of this against disposable,
+  destroyed-after-use containers (never `nutriguard-backend-db-1`):
+  migration test passed (pre-existing row's flag confirmed `false`
+  post-migration); import + barcode + label-image tests passed (3/3,
+  BG common names correctly localized through both real scan paths).
+- `docs/OPENFOODTOX_APP_PILOT_INTEGRATION_REPORT.md` corrected in two
+  places the task flagged: (1) withdrew the claim that this pilot
+  needs no Android integration work -- E951's `effectConditions`
+  carries the PKU exception, a safety-relevant caveat Android main
+  didn't consume before Codex's `68c76ee` wiring; the report now says
+  deployment must wait for both halves. (2) withdrew "re-running
+  `load_seed()`'s own data" as a rollback recommendation (it was the
+  very overwrite path defect 1 fixed, and was never actually able to
+  restore pre-pilot values); replaced with a precise targeted-rollback
+  description (delete the one isolated E150d row; for the three
+  updates, an explicit backup-restore or a new reviewed corrective
+  import -- no automated undo exists for those three).
+- Regenerated `docs/openfoodtox_app_pilot_fixtures/*.json` (real bytes,
+  `scripts/openfoodtox/generate_app_pilot_fixtures.py`) -- the only
+  real diff per file is the corrected BG `commonName` (defect 3) plus
+  this run's fresh timestamps. Re-ran Android's full unit suite against
+  the regenerated fixtures (`android-app`'s own `build.gradle.kts`
+  sources them directly as test resources): **123 passed, 0
+  failures/errors/skips** -- unchanged from Codex's count, confirming
+  the regeneration didn't disturb the Android mapping.
+
+No merge, no deploy, no live database/container access (disposable
+Postgres 16 + a disposable pinned-deps image this round, both destroyed
+after use; `docker ps` confirmed only the pre-existing
+`nutriguard-backend-*`/`ng-stage3-pg-dev` containers were ever running),
+no secrets changes, no Android code changes (fixtures only, which
+Android's own build reads as data).
+
+## 2026-10-02: Android pilot mapping completed (Codex)
+
+- Android DTO/entity/localization and Room v4->v5 migration now retain the
+  pilot conditions, guidance and publication metadata; details keep caveats
+  next to numeric intake rather than replacing narrative with bare numbers.
+- Fixture-based Android suite: 123 tests, 0 failures/errors/skips; debug APK
+  assembled. See android-app/OPENFOODTOX_PILOT_HANDOFF.md for scope and
+  manual acceptance checklist. No physical-device test yet.
+- Independently ran 35 focused existing backend tests (21 response/import/
+  localization plus 14 artifact/migration tests): all passed. Three separate
+  temporary review probes reproduced the regressions assigned below.
+- Next: Claude fixes OPENFOODTOX_APP_INTEGRATION_FIX_TASK.md and regenerates
+  fixtures; rerun Android suite before combined release. No merge/deploy.
+
+## 2026-10-02: application integration review (Codex)
+
+- Reviewed `78cbd5b`; existing targeted backend tests independently run:
+  `pytest tests/integration/test_openfoodtox_pilot_import.py
+  tests/integration/test_openfoodtox_app_pilot_response_paths.py
+  tests/unit/test_ingredient_localization.py -q`: **21 passed** (local venv).
+- Three temporary SQLite regression probes: **3 failed** as expected,
+  proving seed-on-start overwrites pilot descriptions, EN-only artifact
+  update loses BG via stale hash, and new BG names use English. Temporary
+  probe file removed after execution; no production data touched.
+- Added OPENFOODTOX_APP_INTEGRATION_FIX_TASK.md with exact reproduction,
+  permanent-test requirements, pinned OpenAPI and remaining verification.
+- Android work is in progress separately in this branch; preserve it.
+  Next: Claude fixes backend and updates fixtures; Codex finishes Android.
+  No merge/deploy; this update is not yet ready for device testing.
+
+## 2026-10-01: owner-approved four-profile application integration implemented (Claude)
+
+- Implemented `docs/OPENFOODTOX_APP_PILOT_INTEGRATION_TASK.md` (baseline
+  `037b3ccbeb91b91e539aa24474674e6b9687dc1e`), same isolated worktree,
+  fast-forwarded first. Full field contract, fixtures and verification in
+  `docs/OPENFOODTOX_APP_PILOT_INTEGRATION_REPORT.md` -- summary only here.
+  Backend-only; no Android code touched.
+- New tracked content artifact `app/seed/openfoodtox_pilot_profiles.json`
+  (built mechanically by `scripts/openfoodtox/build_app_pilot_content.py`
+  directly from `editorial_content.py`'s structured dataclasses -- no
+  Markdown parsing, no bulk VM dataset needed at runtime), and a new,
+  separate, bounded import --
+  `app/seed/load_openfoodtox_pilot_content.py` -- explicit four-identity
+  allowlist, dry-run by default, `--apply` writes+commits one
+  transaction, rollback-on-failure and idempotent re-run both tested.
+  Deliberately NOT `load_seed.py`'s broad merge, which would have
+  overwritten unrelated scientific fields.
+- E250/E951 (existing `VERIFIED`) and E330 (existing `LIMITED_DATA`):
+  only `description`/`purposeInFood`/`healthConcerns`/`effectConditions`/
+  `dietaryGuidance`/`references` updated to the OpenFoodTox pilot
+  content. `riskLevel`, `riskAssessmentAvailable`, `verificationStatus`,
+  `efsaStatus`/`fdaStatus`, `acceptableDailyIntake`, every dietary/
+  scoring flag -- all byte-for-byte unchanged (tested directly, plus a
+  real product's Health Score computed before/after the import and
+  asserted identical). E330 is never promoted to `VERIFIED`.
+- E150d provisioned as a new, distinct ingredient (`LIMITED_DATA`,
+  `riskAssessmentAvailable=false`, `riskLevel=SAFE` placeholder --
+  excluded from Health Score scoring by construction). Its group ADI
+  figure stays withheld (`acceptableDailyIntake=""`) because the
+  pilot's own numeric-eligibility check never resolved its chemical
+  basis -- owner publication permission for the narrative content does
+  not resolve that separately; `dietaryGuidance` explains the shared
+  group limit in prose instead of asserting a number.
+- New, narrowly scoped owner-approved-publication mechanism: one
+  additive migration (`a8b9c0d1e2f3`, boolean
+  `ingredient_localizations.owner_approved_without_review`, default
+  `false`) lets a row be served while honestly `DRAFT` (never relabeled
+  `REVIEWED`/`HUMAN_CURATED`) when an owner has explicitly approved that
+  specific content. Verified reversible against a disposable,
+  isolated Postgres 16 container (destroyed after use, never the live
+  `nutriguard-backend-db-1` stack).
+- Verified consistently across direct ingredient, product, OCR-text, and
+  partial-result response paths (label-image's general mechanism was
+  already covered by existing tests); real, regeneratable response
+  fixtures for Codex in `docs/openfoodtox_app_pilot_fixtures/`
+  (`scripts/openfoodtox/generate_app_pilot_fixtures.py`).
+- `openapi.json` regenerated: the only contract-relevant change is an
+  additive `ownerApprovedWithoutReview: boolean = false` field on
+  `IngredientLocalizedTextOut`; the rest of the diff is pre-existing,
+  unrelated FastAPI/Pydantic version drift (confirmed by regenerating
+  against the unmodified tree first -- same drift, zero code changes).
+- Tests: 30 new, 1 updated (a migration-head assertion loosened to
+  accommodate the new migration on top) this pass. Full backend suite
+  `python -m pytest -q`: **895 passed, 16 skipped** (pre-existing), 0
+  failed.
+- No merge, no deploy, no live database/container access, no secrets
+  changes, no bulk extraction rerun, no bulk dataset commit, no Android
+  changes. Stopping per the task's own instruction -- ready for Codex to
+  wire/verify Android against the published fixtures.
+
+## 2026-10-01: owner-approved four-profile application integration assigned
+
+- Owner accepts source-backed pilot content for display without an outside
+  expert; do not misrepresent this as independent scientific review.
+- Compared main `65a8e68` to pilot `037b3cc`: changes remain offline scripts,
+  tests and docs; no runtime import or app content delivery yet.
+- Inspected localization publication gate, seed merge and Android detail
+  rendering. Android main does not consume effectConditions/dietaryGuidance/
+  adiPopulationScope; numeric ADI replaces textual guidance, risking hidden
+  qualifications if used without UI integration.
+- Added OPENFOODTOX_APP_PILOT_INTEGRATION_TASK.md for Claude: scoped explicit
+  import, honest display-publication permission, preserved scoring, exact
+  response fixtures and tests. Codex owns subsequent Android mapping.
+- Docs-only; `git diff --check` validation. No backend suite run by Codex,
+  no live changes, merge or deploy. Next: Claude implements/pushes contract
+  and backend; Codex verifies Android before device-test release.
+
+## 2026-10-01: bounded source closure resolved (Claude)
+
+- Implemented `docs/OPENFOODTOX_SOURCE_CLOSURE_TASK.md` (reviewed baseline
+  `5cc732a`), same isolated worktree, fast-forwarded first. Committed at
+  `40a2d174845cc2a990bfec76ea9a284311af3e3b`. Full account in
+  `docs/OPENFOODTOX_PILOT_REPORT.md` §14 -- summary only here. A subagent
+  did the primary-source research (reading actual documents, never a
+  search-result summary); this session independently reviewed every
+  quote/locator before using it.
+- All 6 named targets closed with a directly-read primary source, none
+  withdrawn to operator-only:
+  - E250 purpose -> EFSA 2017 nitrite opinion, Section 3.1.6.
+  - E330 purpose -> JECFA "CITRIC ACID" monograph (FNP 52 Add 7, 1999),
+    "Functional uses" field -- honestly flagged as a JECFA/FAO-WHO
+    reference rather than EU-specific, since Reg. (EU) 231/2012's own
+    E330 entry has no functional-class field at all.
+  - E951 identity + purpose -> both from the EFSA 2013 aspartame opinion
+    itself (genuine full-text PDF via Wayback, not a snippet).
+  - **E150d-08 (group ADI), the most important target**: was labeled
+    `external_primary_source` while its own citation admitted only
+    "secondary reporting" -- a mislabeling bug, independent of whether the
+    claim was correct (it was). Fixed by actually reading the full 2011
+    EFSA caramel-colours opinion, confirming the 300 mg/kg bw/day group
+    ADI, the 100 mg/kg bw/day Class-III-only (E150c) sub-ADI for THI
+    immunotoxicity, and that E150d itself has no separate limit.
+  - E150d-07 purpose -> replaced a vague "background section" reference
+    with an exact page locator and quote naming cola-type drinks, spirits,
+    sauces and baked goods.
+- Extended the existing seed-only provenance regression to
+  `identity`/`purpose` fields (previously effects-only), and added a new
+  test (`test_no_external_primary_source_admits_only_secondary_confirmation`)
+  to catch the E150d-08 mislabeling pattern going forward.
+- Tests: 2 new/extended this pass. Full backend suite `python -m pytest -q`:
+  **866 passed, 16 skipped** (pre-existing), 0 failed.
+- Pilot rerun (extraction untouched) into a new `pilot/v8/` (`pilot/v1`-`v7`
+  preserved), all four identities `exact_match`, clean-tree provenance,
+  repeatability re-verified. Both committed docs regenerated via
+  `export_docs` and pass `--check`.
+- No live database access, no API/Health Score change, no container
+  restart, no deploy, no merge, no seed import.
+
+## 2026-10-01: bounded source closure assigned (Codex)
+
+- Reviewed `5cc732a`: generated EN/BG headings and export/check mechanism
+  address previous document drift. Four identity/purpose entries remain
+  seed-only; E150d-08 still labels secondary verification as primary.
+- Added `docs/OPENFOODTOX_SOURCE_CLOSURE_TASK.md` with exact targets and
+  support-or-withhold completion criteria; adjacent vague E150d-07 citation
+  included. Subagents permitted. No new product scope.
+- Documentation-only change; read repo instructions/latest handoff, checked
+  clean worktree and remote, fast-forwarded this isolated detached checkout.
+  Validation: `git diff --check`; backend suite not rerun by Codex.
+- Next: Claude implements this task, regenerates/checks documents, tests,
+  commits and pushes on the same branch. No merge/deploy authorized.
+
+## 2026-10-01: delivery consistency gaps closed (Claude)
+
+- Implemented `docs/OPENFOODTOX_DELIVERY_CONSISTENCY_TASK.md` (reviewed
+  baseline `8ceba0531082e2c63cbe62598af663c9f852ece9`) in the same isolated
+  worktree, fast-forwarded first (no drift). Committed at
+  `d573d821770dcc5f147b7c5c4b502ddd0d580320`. Full account in
+  `docs/OPENFOODTOX_PILOT_REPORT.md` §13; regenerated, check-verified
+  complete EN/BG drafts in `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` and the
+  claim matrix in `docs/OPENFOODTOX_CLAIM_SOURCE_MATRIX.md` -- summary only
+  here. Owner authorized subagent use; one general-purpose subagent did the
+  primary-source research (reading actual documents, not snippets), which
+  this session independently spot-checked before using (reproduced the
+  EFSA-nitrite PMC mirror and the EUR-Lex-blocked pattern directly).
+- **Item 1 root cause found**: every previous round had exported the
+  committed EN/BG previews by hand (read a profile's own `.md` output,
+  retype/reformat into the review-drafts document), which is exactly what
+  let the committed file drift -- it still said "reproduces pilot/v5" while
+  containing the pre-fix `каква точно количество` grammar error and other
+  stale text. Fixed structurally: new `scripts/openfoodtox/export_docs.py`
+  mechanically generates both committed docs with no manual step, and its
+  `--check` mode exits non-zero with a line-level diff on any mismatch
+  (including whitespace) -- verified `CHECK OK` for both docs against a
+  freshly-rerun `pilot/v7/` in this session. Review-drafts format changed
+  from hand-prefixed blockquotes to fenced code blocks (more reliable for
+  verbatim reproduction), documented as a deliberate wrapper change.
+- **Item 2**: audited the claim matrix against its own "never seed-only for
+  effect conclusions" claim and found 3 contradicting rows (not just the
+  2 named examples). Upgraded all 3 to directly-read primary sources: E250's
+  human-evidence and nitrosation claims now cite the actual EFSA 2017
+  nitrite opinion (read via an open-access PMC mirror, since efsa.europa.eu/
+  Wiley both block automated fetching as in every prior round) -- and the
+  nitrosation claim was *corrected*, not just re-sourced: the primary text
+  showed nitrosation considerations actually shaped the ADI-derivation
+  benchmark-response choice itself, the reverse of what was previously
+  claimed. E951's digestion/metabolism claim now cites EFSA's 2013 aspartame
+  opinion abstract directly (near-verbatim match) plus a JECFA/WHO
+  corroboration. **E330's regulation quote, re-verified per the task's
+  explicit "don't trust the prior report" instruction, was found to be
+  wrong** -- the real Reg. (EU) 231/2012 "Definition" text (read via an
+  archived EUR-Lex snapshot, cross-checked against the UK's official
+  statutory-text mirror) allows citrus-juice extraction as an alternative to
+  fermentation, names Candida spp. as an alternative organism, and includes
+  a "non-toxicogenic strains" qualifier the prior paraphrase dropped while
+  inventing a "glucose syrups" detail not in the source at all -- corrected.
+  New regression test enforces going forward that no consumer-facing
+  effect/human claim may rely solely on seed data. **Scope boundary stated
+  honestly**: several `purpose`/`identity` fields (lower-stakes,
+  non-safety) remain seed-only -- not claimed fixed, explicitly flagged as
+  a remaining gap in the report rather than silently left.
+- Tests: 6 new/updated this pass. Full backend suite `python -m pytest -q`:
+  **865 passed, 16 skipped** (pre-existing), 0 failed.
+- Per the task's own instruction, extraction code was untouched -- only the
+  pilot previews were rerun into a new `pilot/v7/` (`pilot/v1`-`v6`
+  preserved), verified repeatable.
+- No import into the live database, no API/Health Score change, no container
+  restart, no deploy, no merge, no seed import. Originals and the live
+  stack were not touched.
+
+## 2026-10-01: delivery consistency follow-up assigned (Codex)
+
+- Reviewed remote `8ceba0531082e2c63cbe62598af663c9f852ece9` read-only:
+  rendering fixes are present, but committed previews retain old text and
+  v4 pointers; the source matrix still uses seed-only attribution for some
+  consumer claims while its audit note says otherwise.
+- Added `docs/OPENFOODTOX_DELIVERY_CONSISTENCY_TASK.md`: two bounded fixes,
+  reproducible preview export/equality and claim-level primary evidence.
+  Owner permits Claude to use subagents as needed.
+- Documentation-only handoff; inspected Git diff/status and handoff;
+  `git diff --check` is the relevant validation. Backend tests not rerun by
+  Codex; Claude's 860 passed / 16 skipped remains a reported result.
+- Next: Claude reads the new task from this branch, implements and verifies,
+  commits/pushes a report. No merge/deploy or live data operations authorized.
+
+## 2026-10-01: targeted final profile corrections implemented (Claude)
+
+- Implemented `docs/OPENFOODTOX_FINAL_PROFILE_REVIEW_TASK.md` (reviewed
+  baseline `b915ccdabc23729110d41e32df15876adb7863ad`) in the same isolated
+  worktree, fast-forwarded first (no drift). Committed at
+  `704d5b7e2b60a5934fa2dbf777176baf185b9b28` (code/tests/matrix) and
+  `b051e2a2242b14b635fa3ca6bae6c4b2a94b2ca8` (one-line follow-up fixing a
+  dangling cross-reference the first commit introduced). Full account in
+  `docs/OPENFOODTOX_PILOT_REPORT.md` §12; corrected complete EN/BG drafts in
+  `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` (revision 3) -- summary only
+  here.
+- **Item 1 confirmed and fixed**: the previous round's numeric-gating fix
+  only covered structured reference-value rendering -- `editorial_content.py`'s
+  E150d effects text separately stated the group ADI (300 mg/kg bw/day) and
+  E150c's sub-limit (100 mg/kg bw/day) as plain narrative, bypassing the
+  gate entirely, then the next paragraph said the figure "is not shown...
+  pending review" -- a direct self-contradiction. Both numbers moved to a
+  new `operator_only_notes` field (never rendered in either draft, exposed
+  as `editorial_operator_only_notes` in the profile JSON). A new mechanical
+  test scans every consumer-facing editorial field for a bare dose-shaped
+  number, for every identity without an independently-confirmed basis
+  override -- covers all fields/evidence_types/source_kinds uniformly, so
+  relabeling can't bypass it. Confirmed unrelated numbers (years, E-code
+  digits) are untouched by the same check. Also removed two
+  technical/debug-sounding fallback sentences from consumer text
+  ("pending review of this preview's eligibility criteria... see internal
+  review notes") -- replaced with plain language; full reasons remain in
+  `review_eligibility.reasons`.
+- **Item 2**: added explicit EN/BG display names for all four identities,
+  used only for the draft heading -- E150d's heading no longer reads "(ad
+  hoc query, not a provisioned NutriGuard ingredient: E150d)" (still present
+  verbatim as real operator metadata in `catalogue_identity.common_name`,
+  just never in the consumer-facing title). Fixed a BG grammar error
+  ("каква точно количество" -> "какво точно количество" -- количество is
+  neuter).
+- **Item 3**: found and fixed one genuinely vague citation (E330's identity
+  claim cited "standard food-chemistry references" -- no actual source
+  named); replaced with Commission Regulation (EU) No 231/2012's own E330
+  Definition text, quoted directly. Audited every other citation against
+  what it actually supports. New `docs/OPENFOODTOX_CLAIM_SOURCE_MATRIX.md`:
+  all 21 editorial claims with a stable ID, source kind, and citation,
+  generated directly from `editorial_content.py`, reviewable via Git.
+- **Test-count reconciliation**: checked directly -- no committed document
+  ever stated "858 passed"; `docs/CODEX_HANDOFF.md` and
+  `docs/OPENFOODTOX_PILOT_REPORT.md` both correctly recorded the actual
+  `pytest -q` output of 853 at `b915ccd`. "858" was this session's own
+  conversational arithmetic (853 + 5 new, double-counting since 853 already
+  included them) -- nothing to correct in either committed file. This
+  round's own count, run directly: `python -m pytest -q` -> **860 passed,
+  16 skipped** (pre-existing), 0 failed (853 + 7 new this round).
+- Per the task's own instruction, extraction code was untouched this round
+  -- `staging/v4`/`reports/v4` were **not** regenerated; only the pilot
+  previews were rerun (against the unchanged `staging/v4`) into a new
+  `pilot/v5/` (`pilot/v1`-`v4` preserved), verified repeatable.
+- No import into the live database, no API/Health Score change, no container
+  restart, no deploy, no merge. Originals and the live stack were not
+  touched.
+
+## 2026-10-01: targeted final profile review assigned (Codex, docs only)
+
+- Added docs/OPENFOODTOX_FINAL_PROFILE_REVIEW_TASK.md against b915ccd: close
+  editorial numeric-gating bypass, localize headings, and commit precise primary
+  source mappings instead of relying on seed files/vague references as evidence.
+- Requested reconciliation of summary test count (858) versus committed handoff
+  (853); neither was independently rerun by Codex. Docs-only git diff --check.
+- No implementation/live changes, main merge or deployment. Next: Claude fetches
+  this task, applies only scoped corrections and returns regenerated drafts/tests.
+
+## 2026-10-01: four-profile content completion assigned (Codex, docs only)
+
+- Reviewed 40d063444358086c2b47dbe1a2a7386b9509349d drafts and official EFSA
+  publication 10259. Added docs/OPENFOODTOX_PROFILE_CONTENT_TASK.md for Claude.
+- Required: preserve E951 PKU applicability exception and E150d group-ADI scope in
+  EN/BG consumer previews, substantive sourced identity/function/effects text,
+  readable Bulgarian and consistent numeric gating across headings.
+- Date correction to previous entries: publication 10259 was published 2026-09-10;
+  its page lists approval on 2026-07-01. Prior "adopted 2026-09-10" wording is incorrect.
+- Documentation-only task; git diff --check used. No runtime tests rerun, live
+  access, content import, merge or deployment. Previous test counts are Claude's.
+- Next: Claude fetches the content task, pushes four complete source-linked DRAFT
+  profiles and tests/report as applicable; Codex reviews before integration.
+
+## 2026-10-01: substantive EN/BG profile content implemented (Claude)
+
+- Implemented `docs/OPENFOODTOX_PROFILE_CONTENT_TASK.md` (reviewed baseline
+  `40d063444358086c2b47dbe1a2a7386b9509349d`) in the same isolated worktree,
+  fast-forwarded first (no drift). Code committed at
+  `631939a120ad7bf79f1d7f95ab9d821caf741916`. Full account in
+  `docs/OPENFOODTOX_PILOT_REPORT.md` §11; complete EN/BG drafts for all four
+  identities (not abbreviated) in `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md`
+  (revision 2) -- summary only here.
+- New `scripts/openfoodtox/editorial_content.py`: a separately versioned,
+  fixed/reviewed (never live-model-generated) content layer providing
+  source-cited "What it is"/"Purpose in food"/"Relevant effects" text per
+  substance -- now actually populated in the drafts (previously always
+  omitted). Includes one `editorial_chemical_basis` override, applied only
+  to E951 after directly reading all five of its dossiers' own text and
+  confirming aspartame has no salt/ion basis ambiguity (unlike sodium
+  nitrite) -- kept explicitly distinct from the automated field, and
+  deliberately *not* applied to E150d (basis kept unresolved, never
+  guessed, per the task's own instruction).
+- **Fixed the numeric-gating inconsistency the task flagged**: a value's
+  magnitude could previously appear in "Effects and conditions" while being
+  hidden from "Intake guidance". Both sections now use the identical
+  `consumer_guidance_eligible` test; "Intake guidance" is now actually shown
+  for eligible values (E250 automated, E951 via the editorial override)
+  rather than unconditionally omitted. Feed/worker (FEEDAP) findings are now
+  excluded from the consumer draft entirely (confirmed on E330's 4 feed
+  values), not merely caveated inline.
+- **Four content corrections applied**: E951's PKU exclusion now appears in
+  both drafts, twice, adjacent to every shown ADI/safety-conclusion claim.
+  E150d's group ADI (300 mg/kg bw/day for all four caramel colours
+  combined; E150c's own separate 100 mg/kg bw/day sub-ADI given as context;
+  E150d's own basis kept unresolved) is precisely scoped. The E962 opinion's
+  First-published (10 September 2026) and Approved (1 July 2026) dates are
+  now kept distinct (previously conflated as "adopted September 10"), and
+  its E951 work is now described as an update *within* the E962
+  re-evaluation, not a standalone E951 re-evaluation or a claim the 2013
+  opinion was wholly superseded. BG text now translates exact-equivalent
+  terms (натриев нитрит, мг/кг телесно тегло дневно, etc.) instead of
+  leaving them in English.
+- **Found and fixed two real bugs while building this**: (1) a verbosity
+  bug -- E951's five real assessments never merged for display (their
+  justification wording differs slightly each time), so a now much longer
+  per-value sentence was repeated 5x in each of two sections; fixed with a
+  display-only coarser grouping, full per-assessment detail preserved
+  internally. (2) a genuine "English placeholder in the Bulgarian body"
+  bug -- the ineligible-value fallback sentence was interpolating raw
+  English `review_eligibility.reasons` strings directly into Bulgarian
+  text; replaced with a fully-Bulgarian generic phrase.
+- Tests: 5 new (`TestEditorialContentCorrections`: PKU adjacency, E150d
+  group-scope preservation, numeric-gating consistency, E962 date-type
+  distinctness, feed-value exclusion). Full backend suite
+  `python -m pytest -q`: **853 passed, 16 skipped** (pre-existing), 0
+  failed. Per the task's own instruction, `staging/v4`/`reports/v4` were
+  **not** regenerated this round (no extraction code changed) -- only the
+  pilot was rerun (against the unchanged `staging/v4`) into a new
+  `pilot/v4/`, verified repeatable (diffed twice, identical).
+- No import into the live database, no API/Health Score change, no container
+  restart, no deploy, no merge. Originals and the live stack were not
+  touched. Remaining blockers in `docs/OPENFOODTOX_PILOT_REPORT.md` §10/§11
+  (catalogue CAS gap; every profile still `not_reviewed`; reuse-clearance
+  decision pending; E951's located newer opinion and E330's unresolved
+  freshness not yet incorporated; E150d/E330 still have no eligible numeric
+  value at all).
+
+## 2026-10-01: pilot review corrections implemented (Claude)
+
+- Implemented `docs/OPENFOODTOX_PILOT_REVIEW_TASK.md` (reviewed baseline
+  `63c4d4e66de03a18a4dcc0b41b3d82b634bc2f35`) in the same isolated worktree,
+  fast-forwarded first (no drift). Code/tests committed at
+  `0beb2717491ec8e4e8a5c89b1e63b8b433c3ce33`; full account in
+  `docs/OPENFOODTOX_PILOT_REPORT.md` (now its own revision, with a
+  correction notice at the top preserving what was wrong and why --
+  summary only here).
+- **Item 1 (source identity)**: independently re-verified Codex's finding
+  (fetched the actual EFSA/Wiley page myself rather than trusting the
+  correction) -- `10.2903/j.efsa.2020.6032` assesses E472a-f esters, not
+  E330. Removed the wrong claim. Audited all four pilot references, not
+  just the flagged one: found a genuinely newer, precisely-dated superseding
+  opinion for **E951** (`10.2903/j.efsa.2026.10259`, adopted 2026-09-10,
+  confirmed via EFSA's own plain-language summary to update E951's
+  toxicological/exposure assessment post-IARC-2023, ADI reaffirmed
+  unchanged at 40 mg/kg bw/day -- not in this dataset at all) and a partial
+  2012 exposure-only update for **E150d**
+  (`10.2903/j.efsa.2012.3030`); confirmed **E330** has no completed
+  standalone re-evaluation yet (explicitly pending/low-priority per
+  Commission Regulation (EU) No 1419/2020's own text) -- freshness
+  genuinely unresolved there, not a confirmed gap as previously claimed.
+  Full source-check table (DOI/title/actual assessed identifiers/relevance/
+  superseding-status evidence) in the report §9.
+- **Item 2 (review_eligible)**: replaced the single bool with
+  `ReviewEligibility` (`operator_inspectable` always true; strict,
+  fail-closed `consumer_guidance_eligible` now also checking
+  `evidence_complete`, identity completeness, resolved subject linkage,
+  and excluding AOEL/AAOEL unconditionally as occupational-not-consumer
+  levels). Real-data consequence: only E250 now has any
+  `consumer_guidance_eligible` reference value among all four pilot
+  substances -- a materially more conservative, more correct result. 12 new
+  tests.
+- **Item 3 (matcher truth table)**: fixed `_compare_one` -- both identifiers
+  present but *neither* agreeing was wrongly reported `conflicting` (would
+  have flagged every unrelated, fully-identified dossier in the dataset
+  against every query); now correctly reported as no hit. 2 new tests,
+  including one streaming the exact identity + a real conflict + 50
+  unrelated records through one query.
+- **Item 4 (stale data)**: regenerated the full catalogue/identity-audit
+  (`staging/v4`, `reports/v4`, 11,613/11,613 ok, 75.4s) from the clean
+  `0beb271` commit, recorded via a new shared
+  `scripts/openfoodtox/provenance.py` (git SHA + dirty-tree + diff
+  fingerprint) and a new `records.EXTRACTION_LOGIC_VERSION` marker (now 2).
+  `staging/v3`/`reports/v3` marked unsuitable-for-evidence (plain-text note,
+  outside Git) rather than deleted. Measured dataset-wide: `resolved`
+  chemical-basis count rose 42->47 (+5 genuinely new correct resolutions),
+  the corruption signature (simultaneous `value`+`lower_value`/`upper_value`)
+  dropped 576->0, with the mechanism for a 211/212-record
+  `unsupported_unit`<->`no_mention` reclassification traced and explained
+  in the report. Pilot rerun against `staging/v4` into `pilot/v2/`
+  (`pilot/v1/` preserved); repeatable (diffed twice, identical).
+- **Item 5 (bilingual drafts)**: redesigned -- EN/BG drafts are now genuine
+  readable paraphrases built only from structured fields, never the source's
+  own text presented under a BG heading (what the first revision did,
+  correctly flagged by this review). Verbatim source quotes moved to a
+  separate internal-evidence section. Omitted-field notes retained
+  internally even when the section itself is hidden from the drafts.
+  Concise samples for all four pilot identities committed in the new
+  `docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md` for Git-based review.
+- Tests: 17 new/updated this pass (matcher +2, evidence_bundle +13 net).
+  Full backend suite `python -m pytest -q`: **848 passed, 16 skipped**
+  (pre-existing), 0 failed.
+- No import into the live database, no API/Health Score change, no container
+  restart, no deploy, no merge. Originals and the live stack were not
+  touched. Remaining blockers unchanged in kind, updated in detail, in
+  `docs/OPENFOODTOX_PILOT_REPORT.md` §10 (catalogue CAS gap; every profile
+  still `not_reviewed`; reuse-clearance decision pending; E951's located
+  newer opinion and E330's unresolved freshness not yet incorporated; only
+  one of four substances currently has any consumer_guidance_eligible
+  value at all).
+
+## 2026-10-01: pilot review corrections assigned (Codex, docs only)
+
+- Reviewed 4db31ecbaaae5c113398004577748ae7046080f6. Follow-up instructions are in
+  docs/OPENFOODTOX_PILOT_REVIEW_TASK.md: source identity, completeness gating,
+  unrelated identifier pairs, stale catalogue replacement and substantive EN/BG drafts.
+- Correction to the preceding Claude report: official EFSA publication 6032 covers
+  E472a-f, not a dedicated E330 re-evaluation. Its citation does not establish the
+  claimed E330 freshness gap. Checked official page on 2026-10-01; follow-up must
+  correct the report and reassess freshness without assuming a replacement source.
+- Tests not rerun by Codex; documentation-only diff checked with git diff --check.
+  No live access, implementation changes, merge or deployment in this handoff.
+- Next: Claude fetches the new review task, implements/tests the offline corrections
+  and returns source-linked bilingual review samples through Git.
+
+## 2026-10-01: offline matching/profile pilot implemented (Claude)
+
+- Implemented `docs/OPENFOODTOX_PILOT_TASK.md` (reviewed baseline
+  `56aee7aa613b8b7cc5f98e4082981ac0d898fc92`) in the same isolated worktree,
+  fast-forwarded first (no drift). Full detail, measured results, sample
+  drafts, limitations, source links and reuse/freshness findings in
+  `docs/OPENFOODTOX_PILOT_REPORT.md` -- summary only here.
+- New: `scripts/openfoodtox/catalogue_snapshot.py` (offline NutriGuard
+  catalogue snapshot from the tracked seed files -- zero database access, not
+  even disposable), `matcher.py` (streaming dry-run CAS/E-number matching +
+  document/subject-link resolution), `evidence_bundle.py` (per-identity
+  review bundle + DRAFT EN/BG text), `pilot.py` (CLI orchestrator).
+- **Found and fixed a real extraction defect** while building the first
+  profile: `records.py::derive_reference_values` was capturing
+  `AssessmentBody/value` (a sibling classification code, self-describing via
+  its own `other` leaf) as if it were the reference value's own numeric
+  magnitude whenever a leaf happened to be named `value`. For aspartame's
+  2013 ADI this produced a nonsensical `value: "1342"` alongside the correct
+  `lower_value: "40"`, and would have fed the wrong number into
+  chemical-basis matching too (`entry["value"] or entry["lower_value"]`
+  prefers the former). Fixed with an explicit allowlist of the five
+  confirmed value-holding wrapper tags (`Adi`/`Arfd`/`Aoel`/`Aaoel`/
+  `RefValue`); measured impact: 788 of 25,973 reference values dataset-wide
+  (~3.0%) had this corruption. 2 new regression tests in
+  `tests/unit/test_openfoodtox_records.py`.
+- `dossier.py` extended to carry `manifest_uuid`/`manifest_links` through to
+  reference values and endpoints (previously dropped), needed for
+  `matcher.resolve_subject_links` to correctly handle the 333/11,613 (2.9%)
+  dossiers with more than one `REFERENCE_SUBSTANCE` -- none of this pilot's
+  four substances needed that path, but the general matcher now guards
+  against it instead of assuming one identity per archive.
+- Pilot run (`E250`, `E150d`, `E330`, `E951`): all four `exact_match`.
+  E250/E951/E330 matched tracked NutriGuard catalogue entries (E-number
+  only -- **the tracked catalogue has no CAS numbers at all today**, a
+  reported limitation, not a matcher one); E150d has no catalogue entry and
+  was run as an explicit ad hoc dataset query, clearly labeled as not a
+  catalogue linkage. Concrete finding: 2 of E330's 3 matched dossiers are
+  EFSA FEEDAP (animal-feed) opinions, correctly flagged and excluded from
+  `review_eligible`; the dataset's one human-food ADI entry for citric acid
+  has no extractable numeric magnitude at all ("not limited", JECFA 1974).
+  Reuse/freshness check found OpenFoodTox is CC BY 4.0 (attribution
+  required; third-party literature full text not cleared by this) and a
+  concrete freshness gap for E330 (a 2020-03-11 EFSA re-evaluation postdates
+  everything in this dataset for that substance and is not present in it).
+- Tests: 28 new (`test_openfoodtox_{matcher,catalogue_snapshot,
+  evidence_bundle}.py` + 2 in `test_openfoodtox_records.py`), all synthetic
+  fixtures. Full backend suite `python -m pytest -q`: **833 passed, 16
+  skipped** (pre-existing), 0 failed. Ran the pilot twice end-to-end and
+  diffed every output byte-for-byte (minus the timestamp): identical --
+  deterministic, no implicit network calls.
+- Generated pilot output (`pilot_summary.json` + 4 profile JSON/MD pairs)
+  lives outside Git at `/home/vboxuser/nutriguard-data/openfoodtox/pilot/v1/`
+  -- bulk/generated, per task scope, same convention as prior rounds'
+  `staging/`/`reports/` output.
+- No import into the live database, no API/Health Score change, no container
+  restart, no deploy, no merge. Originals and the live stack were not
+  touched. Integration blockers are listed in full in
+  `docs/OPENFOODTOX_PILOT_REPORT.md` §10 (catalogue CAS gap, pending
+  scientific/translation review on every drafted claim, pending reuse-clearance
+  decision, E330's located-but-unincorporated newer opinion).
+
+## 2026-10-01: offline matching/profile pilot assigned (Codex, docs only)
+
+- Added docs/OPENFOODTOX_PILOT_TASK.md for Claude: deterministic dry-run matching
+  against seed/supplied catalogue snapshots, exact identifiers, evidence linkage,
+  four requested pilot identities, source/reuse checks and tests. No live DB access.
+- Added docs/OPENFOODTOX_PROFILE_PRESENTATION.md: EN/BG section order, per-claim
+  provenance and display gates; draft review specification, not runtime UI/API changes.
+- Baseline af195fd2a63b35ebd9496e0081f66f30893ed5bd; docs-only verification:
+  git diff --check. No runtime tests needed for this handoff; no merge/deploy/import.
+- Next: Claude fetches the pilot task, implements offline tooling and returns committed
+  report; Codex reviews actual pilot drafts before application integration. Scientific
+  content, reuse/freshness clearance and live integration remain pending.
+
+## 2026-10-01: chemical-basis ambiguity follow-up implemented (Claude)
+
+- Implemented the "Active follow-up: chemical-basis ambiguity" section of
+  `docs/OPENFOODTOX_REVIEW_TASK.md` (reviewed baseline
+  `f997bb7741cb858434163a935d30a1bde69c941d`) in the same isolated worktree,
+  fast-forwarded to the handoff commit `6f06a77` first (no drift).
+- Confirmed the reported defect in `chemical_basis.py::extract_chemical_basis`:
+  the first numerically-matching mention became `primary` (resolved) while later
+  matching mentions with a *different* basis were filed under `other_values_mentioned`
+  — i.e. ambiguity was silently resolved by picking the first candidate.
+- Fixed: all matching candidates are now collected before resolution; two or more
+  distinct normalized bases for the same stored value now produce a new
+  `ambiguous_multiple_bases` status with `basis: null` and every candidate preserved
+  in `matching_value_mentions` (never a silent pick). Repeated mentions of the same
+  basis (case/whitespace-normalized) still resolve normally.
+- Also fixed, per the task's explicit requirements: exact `decimal.Decimal` comparison
+  (not float tolerance); numeric-token-boundary guards so decimal-comma (`0,1`) and
+  scientific notation (`1e-5`) can never be partially matched as a different number
+  (found and fixed a real gap here during testing: the original lookbehind didn't
+  exclude a preceding exponent sign, so `1e-5` let the `5` alone match); and unit
+  validation — `extract_chemical_basis` now requires the stored value's *decoded* unit
+  to be in the `mg/kg bw` family before attempting any match, producing
+  `unresolved_unsupported_unit` otherwise (moved the call site in `records.py` to run
+  after unit-code decoding so this is possible).
+- Tests: 15 new cases (`TestAmbiguousMultipleBases`, `TestUnitValidation`,
+  `TestNumericTokenBoundaries`) added to `tests/unit/test_openfoodtox_chemical_basis.py`
+  (23 tests total in that file). `python -m pytest -q` (full backend suite, from
+  `nutriguard-backend/`): **805 passed, 16 skipped** (pre-existing), 0 failed.
+- Reran the full offline extraction/audit into a new versioned output folder
+  (`staging/v3/`, `reports/v3/`); `staging/`/`reports/` (2026-09-30) and
+  `staging/v2/`/`reports/v2/` (first review round) preserved unchanged.
+- **Measured real-dataset impact** (25,973 reference values across all 11,613
+  dossiers): `resolved` unchanged at 42 (same 41 unique documents, identical basis
+  and value in both versions — zero regressions); `unresolved_no_mention` dropped
+  from 25,842 to 14,431 and a new `unresolved_unsupported_unit` bucket holds 11,479
+  (records whose unit isn't mg/kg-bw-family, now correctly classified instead of
+  silently falling into "no mention"); `unresolved_no_exact_match` dropped from 89 to
+  21 for the same reason; **`ambiguous_multiple_bases`: 0** — confirms the reviewer's
+  own framing that this was a code-review finding, not an actual ambiguity in the real
+  dataset. The E250 profile (`reports/v3/e250_sodium_nitrite_profile.md`) is
+  byte-identical to `reports/v2/`'s.
+- `docs/OPENFOODTOX_DATASET_AUDIT.md` updated: new §8.4 with the full before/after
+  table and explanation, §3/§6/§7/§9 pointers updated to `v3` as current.
+- No import into the live database, no API/Health Score change, no container
+  restart, no deploy, no merge. Originals and the live stack were not touched.
+
+## 2026-10-01: chemical-basis ambiguity follow-up (Codex, docs only)
+
+- Reviewed `f997bb7741cb858434163a935d30a1bde69c941d`; added the active follow-up
+  section in `docs/OPENFOODTOX_REVIEW_TASK.md` for Claude.
+- Source review found first-match selection when equal numeric mentions refer to
+  different chemical bases. Requested conservative ambiguity handling, numeric/unit
+  guards and regression tests. This does not assert a defect in the actual E250 data.
+- No code changes or live access. Python probe unavailable (`python` not on PATH);
+  tests not rerun. Documentation whitespace checked with `git diff --check`.
+- Next: Claude fetches this branch, completes the active follow-up and pushes results.
+  No merge into main, deployment or live import authorized by this handoff.
+
+## 2026-10-01: OpenFoodTox audit review fixes implemented (Claude)
+
+- Implemented all three fixes requested in `docs/OPENFOODTOX_REVIEW_TASK.md`
+  (reviewed baseline `8dd62355281c147bc84c9266341a47b60a509846`) in an isolated
+  worktree on `feat/backend-openfoodtox-dataset-audit`, fast-forwarded to the
+  handoff commit `48981ae` first (no drift/conflicts).
+- **E-number suffixes**: added `scripts/openfoodtox/e_numbers.py` — conservative,
+  survey-driven recognition (plain, letter-suffixed, roman-numeral-qualified,
+  trailing-qualifier, and range forms; rejects E/Z stereodescriptor look-alikes).
+  Never collapses E150a/b/c/d; flags (does not silently resolve) multi-candidate
+  conflicts. Measured impact: 495 -> 619 recognized records (124 previously missed),
+  0 conflicts, across all 15,705 REFERENCE_SUBSTANCE records.
+- **Bounded extraction vs. completeness**: measured the true per-document leaf
+  count across all 221,377 documents (max 1,405; 467 docs/0.2% exceeded the old
+  400-leaf cap, all environmental/physicochemical, none human-health/identity/
+  reference-value). Fixed the truncation flag (was a false-positive-prone
+  "counter hit zero" check; now compares the true complete count against the
+  cap). Raised the cap to 4,000 (~2.8x margin) and added an independent 50,000-leaf
+  hard safety ceiling. Added an `evidence_complete` quarantine flag propagated from
+  document -> dossier -> catalogue/identity-audit/E250 profile, excluding any
+  truncated record from "usable evidence" counts rather than silently including it.
+  Measured result after the fix: 0 documents truncated in the full dataset.
+- **E250 chemical basis**: added `scripts/openfoodtox/chemical_basis.py` — recovers
+  the ADI's chemical basis from the record's own justification text (ties the
+  stored 0.1 value to "sodium nitrite", keeps the 0.07 mg nitrite ion/kg bw figure
+  as a separate, non-merged mention). Externally verified (separately from raw
+  IUCLID extraction) against the actual cited EFSA opinion via
+  efsa.europa.eu/en/efsajournal/pub/4786 and pmc.ncbi.nlm.nih.gov/articles/PMC7009987
+  (fetched 2026-10-01): the IUCLID text is a near-verbatim match of the opinion's
+  own sentence, and the Panel itself states both figures as two bases of one ADI —
+  not a discrepancy to resolve.
+- Also fixed an arithmetic error in the prior version of `docs/OPENFOODTOX_DATASET_AUDIT.md`
+  (documents-by-type summed to 232,377; correct total is 221,377).
+- Tests: added `test_openfoodtox_e_numbers.py` (24 tests), `test_openfoodtox_chemical_basis.py`
+  (8 tests), plus new truncation-boundary and quarantine-propagation cases in the
+  existing records/dossier test files. `python -m pytest -q` (full backend suite,
+  from `nutriguard-backend/`): **790 passed, 16 skipped** (pre-existing skips), 0 failed.
+- Reran the full offline extraction/audit into a **new versioned output folder**
+  (`staging/v2/`, `reports/v2/`) rather than overwriting the 2026-09-30 outputs,
+  which remain unchanged at their original location for comparison.
+- `docs/OPENFOODTOX_DATASET_AUDIT.md` updated with a new §8 (the three fixes,
+  measured impact, external-verification sources/dates) and corrected §6/§7/§9.
+- No import into the live database, no API/Health Score change, no container
+  restart, no deploy, no merge. Originals and the live stack were not touched.
+
+## 2026-10-01: Codex review handoff for Claude (documentation only)
+
+- Reviewed audit baseline `8dd62355281c147bc84c9266341a47b60a509846`.
+- Added `docs/OPENFOODTOX_REVIEW_TASK.md`: fix suffix-bearing E-number extraction,
+  measure/resolve the 400-leaf completeness limitation, and verify E250 ADI chemical basis.
+- No application or extractor code changed; tests not rerun for this documentation task.
+  Whitespace checked with `git diff --check`. No live access, import, merge or deploy.
+- Next: Claude reads the task from this branch and implements/tests the scoped fixes
+  in an isolated worktree, updates audit results and pushes for review.
+
+## 2026-09-30: OpenFoodTox IUCLID dataset audit (offline, not integrated)
+
+- Scope: offline inventory/integrity/structural audit and staging
+  catalogue extraction of the transferred OpenFoodTox IUCLID dossier
+  archives (`/home/vboxuser/nutriguard-data/openfoodtox/originals/2026-09-30/dossiers/`,
+  11,613 files), in an isolated worktree on branch
+  `feat/backend-openfoodtox-dataset-audit`. No import into the live
+  database, no API/Health Score change, no container restart, no
+  deploy, no merge. Originals and the live stack were not touched.
+- Added `nutriguard-backend/scripts/openfoodtox/` (safe bounded
+  zip/XML handling with no external entities/no path traversal/no
+  stylesheet execution; manifest and `.i6d` parsing; a code->label
+  registry harvested from the dossiers' own shipped `.xsl` stylesheets;
+  domain classification; a repeatable `extract` CLI with
+  `inventory`/`codebook`/`catalogue`/`identity-audit`/`e250`
+  subcommands) and 52 new unit tests in
+  `tests/unit/test_openfoodtox_*.py` (all synthetic fixtures, no
+  dependency on the real dataset).
+- Full run against the transferred set: file count and total bytes
+  matched the expected 11,613 files / 1,100,741,293 bytes exactly;
+  11,613/11,613 archives valid (zero corrupt/unsafe/duplicate); 11,613
+  dossiers cataloged with zero parse failures; identity audit found
+  zero name/CAS conflicts needing manual review. Sodium nitrite/E250
+  matched exactly one dossier by CAS `7632-00-0`/EC `231-555-9`; full
+  profile in `reports/e250_sodium_nitrite_profile.md`.
+- Full detail, output schemas, and known limitations (generic vs.
+  per-subtype endpoint parsing, value-code decoding scoped per
+  stylesheet, no license/reuse-terms metadata transferred with the
+  dataset, ~985 MB catalogue size) in
+  `docs/OPENFOODTOX_DATASET_AUDIT.md`.
+- Tests: `python -m pytest -q` (full backend suite) → **753 passed, 16
+  skipped** (skips pre-exist this change), 0 failed — no regression in
+  existing app/backend behavior; nothing under `app/` was touched.
+- Generated staging/reports data lives outside git under
+  `/home/vboxuser/nutriguard-data/openfoodtox/{staging,reports}/` —
+  not committed (per task scope: no dataset, no bulk generated output,
+  no secrets in the commit).
+- Next: see `docs/OPENFOODTOX_DATASET_AUDIT.md` §9 (recommended next
+  integration stage) — not started here; needs its own explicit
+  scoping/authorization before any of this data reaches the live
+  product.
+
 ## 2026-09-27: VM verification of ingredient review list
 
 - Verified fetched `c3f2f4eefa8c7ef839c95945496471ee2871fbe9` in isolated

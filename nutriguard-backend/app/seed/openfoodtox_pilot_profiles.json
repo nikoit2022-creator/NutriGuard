@@ -1,0 +1,139 @@
+{
+  "allowlisted_e_numbers": [
+    "E250",
+    "E150d",
+    "E330",
+    "E951"
+  ],
+  "artifact_format_version": 1,
+  "content_version": "openfoodtox-app-pilot-v1",
+  "editorial_content_version": 1,
+  "owner_publication_permission": true,
+  "profiles": {
+    "E150d": {
+      "common_name": {
+        "bg": "Сулфитно-амонячен карамел",
+        "en": "Sulphite ammonia caramel"
+      },
+      "description": {
+        "bg": "Сулфитно-амонячният карамел (карамелен цвят клас IV) е един от четирите дефинирани от ЕС класа карамелени оцветители (E150a-d), получавани чрез контролирано нагряване на въглехидрати. E150d се произвежда специално в присъствието както на сулфитни, така и на амониеви съединения, което го отличава от E150a (без тях), E150b (само сулфитни съединения) и E150c (само амониеви съединения).",
+        "en": "Sulphite ammonia caramel (caramel colour IV) is one of four EU-defined caramel colour classes (E150a-d), made by controlled heating of carbohydrates. E150d is specifically produced in the presence of both sulphite and ammonium compounds, distinguishing it from E150a (neither), E150b (sulphite compounds only) and E150c (ammonium compounds only)."
+      },
+      "dietary_guidance": {
+        "bg": "В този преглед не е посочена индивидуална числена граница на прием за този конкретен клас оцветител. Преоценката на ЕФСА определя обща граница, споделена от всичките четири класа карамелени оцветители заедно (вж. Здравни съображения), а не отделна стойност само за този клас, затова тук не е показана самостоятелна числена стойност.",
+        "en": "No individual numeric intake limit is set for this specific colour class in this preview. EFSA's re-evaluation sets one limit shared across all four caramel colour classes together (see Health considerations) rather than a number for this class alone, so no single-substance figure is shown here."
+      },
+      "e_number": "E150d",
+      "effect_conditions": {
+        "bg": "",
+        "en": ""
+      },
+      "health_concerns": {
+        "bg": "Преоценката на ЕФСА от 2011 г. определя ГРУПОВА допустима дневна доза (ADI), която се прилага за КОМБИНИРАНАТА експозиция на всичките четири карамелени оцветителя (E150a, b, c и d) заедно -- това не е индивидуално допустимо количество само за E150d. Само E150c (амонячен карамел, различно вещество от разглежданото в този профил) носи собствена допълнителна, по-строга граница в рамките на тази обща стойност, поради несигурност относно възможен ефект върху имунната система, наблюдаван при животни за една от съставките му; E150d не носи отделна граница извън груповата стойност. Точните стойности все още не са включени в този преглед.\n\nПоследващо проучване на ЕФСА от 2012 г. прецизира оценката на експозицията чрез актуализирани данни за нивата на употреба: установено е, че действителната експозиция на потребителите на E150a, c и d поотделно е значително по-ниска от първоначално оценената през 2011 г. Тази актуализация засяга само оценката на експозицията -- не променя самите стойности на ADI.",
+        "en": "EFSA's 2011 re-evaluation set a GROUP Acceptable Daily Intake that applies to the COMBINED exposure to all four caramel colours (E150a, b, c and d) together -- it is not an individual allowance for E150d alone. Only E150c (ammonia caramel, a different substance from the one in this profile) carries an additional, stricter limit of its own within that group total, due to uncertainty about a possible immune-system effect observed in animals for one of its constituents; E150d itself carries no separate limit beyond the group figure. The exact figures are not yet included in this preview.\n\nA 2012 EFSA follow-up refined the exposure estimate using updated use-level data: actual consumer exposure to E150a, c and d individually was found to be considerably lower than first estimated in 2011. This update concerns exposure estimation only -- it did not change the ADI figures themselves."
+      },
+      "new_ingredient_display": {
+        "category": {
+          "bg": "Хранителен оцветител (карамел, клас IV)",
+          "en": "Food colour (caramel, Class IV)"
+        },
+        "common_name": {
+          "bg": "Сулфитно-амонячен карамел",
+          "en": "Sulphite ammonia caramel"
+        },
+        "id": "e150d_sulphite_ammonia_caramel"
+      },
+      "purpose_in_food": {
+        "bg": "Използва се като кафяв хранителен оцветител, напр. в колови безалкохолни напитки, спиртни напитки, сосове и печива.",
+        "en": "Used as a brown food colourant, e.g. in cola-type soft drinks, spirits, sauces and baked goods."
+      },
+      "references": "Commission Regulation (EU) No 231/2012 (caramel colour specifications) (https://eur-lex.europa.eu/eli/reg/2012/231/oj); accessed 2026-10-01\nEFSA ANS Panel, re-evaluation of caramel colours (E150a,b,c,d) as food additives (https://doi.org/10.2903/j.efsa.2011.2004); accessed 2026-10-01\nEFSA, Refined exposure assessment for caramel colours (E150a, c, d) (https://doi.org/10.2903/j.efsa.2012.3030); accessed 2026-10-01"
+    },
+    "E250": {
+      "common_name": {
+        "bg": "Натриев нитрит",
+        "en": "Sodium Nitrite"
+      },
+      "description": {
+        "bg": "Натриевият нитрит е неорганична сол на азотистата киселина (NaNO2), произвеждана по промишлен начин; обикновено не се среща естествено в храните в значими количества.",
+        "en": "Sodium nitrite is an inorganic salt of nitrous acid (NaNO2), produced industrially; it is not typically present in foods naturally at significant levels."
+      },
+      "dietary_guidance": {
+        "bg": "",
+        "en": ""
+      },
+      "e_number": "E250",
+      "effect_conditions": {
+        "bg": "",
+        "en": ""
+      },
+      "health_concerns": {
+        "bg": "Преоценката на ЕФСА от 2017 г. определя повишаването на нивото на метхемоглобин в кръвта като значимия ефект за извеждане на ADI, въз основа на подход с референтна доза (benchmark dose).\n\nСобственият систематичен преглед на ЕФСА установява, че не е било възможно ясно да се разграничат N-нитрозо съединенията, образувани от добавения към месото нитрит при разрешените нива, от вече присъстващите в хранителната матрица без добавен нитрит, и че използваните от ЕФСА оценки на експозицията не са специфични единствено за употребата на нитрит като хранителна добавка. Произход на съдържанието: собствено резюме на NutriGuard (app/seed/e_additives_curated_starter.csv, ред E250, поле human_evidence) подтикна за директна проверка на тази точка спрямо основното становище, чийто собствен текст е цитиран тук.\n\nХарактеристиката на опасността на ЕФСА отчита образуването на ендогенни N-нитрозо съединения (ENOCs) при избора на величината на промяната в метхемоглобина, използвана като референтен отговор за извеждане на самата ADI -- не само като отделна, последваща стъпка в характеристиката на риска. Панелът изисква този избор да запази резултиращия марж на експозиция за образуване на нитрозамини над 10 000 (изчислен е приблизително 420 000, около 40 пъти по-висок).",
+        "en": "EFSA's 2017 re-evaluation identified an increase in blood methaemoglobin level as the relevant effect for deriving the ADI, using a benchmark-dose approach.\n\nEFSA's own systematic review found it was not possible to clearly separate N-nitroso compounds formed from nitrite added to meat at authorised levels from those already present in the food matrix without added nitrite, and that the exposure estimates it used for its margin-of-exposure calculation were not specific to nitrite's use as a food additive alone. Content origin: NutriGuard's own curated summary (app/seed/e_additives_curated_starter.csv, row E250, human_evidence field) prompted checking this point directly against the primary opinion, whose own text is what is cited here.\n\nEFSA's hazard characterisation considered the formation of endogenous N-nitroso compounds (ENOCs) when choosing the magnitude of methaemoglobin change used as the benchmark response for deriving the ADI itself -- not only as a separate, later risk-characterisation step. The Panel required this choice to keep the resulting margin of exposure for nitrosamine formation above 10,000 (it calculated approximately 420,000, about 40-fold higher)."
+      },
+      "purpose_in_food": {
+        "bg": "Използва се като агент за осоляване и консервант в месни продукти: инхибира покълването на спорите на Clostridium botulinum и образуването на техния токсин, и допринася за характерния цвят и вкус на осолените месни продукти.",
+        "en": "Used as a curing agent and preservative in meat products: it inhibits the germination and toxin production of Clostridium botulinum spores and contributes to the characteristic colour and flavour of cured meats."
+      },
+      "references": "Commission Regulation (EU) No 231/2012 (food additive specifications) (https://eur-lex.europa.eu/eli/reg/2012/231/oj); accessed 2026-10-01\nEFSA ANS Panel, Re-evaluation of potassium nitrite (E 249) and sodium nitrite (E 250) as food additives (full text) (https://pmc.ncbi.nlm.nih.gov/articles/PMC7009987/); accessed 2026-10-01"
+    },
+    "E330": {
+      "common_name": {
+        "bg": "Лимонена киселина",
+        "en": "Citric acid"
+      },
+      "description": {
+        "bg": "Регламент (ЕС) № 231/2012 определя лимонената киселина като произведена или от лимонов, или от ананасов сок, или чрез ферментация на въглехидратни разтвори или друга подходяща среда с Candida spp. или нетоксигенни щамове на Aspergillus niger -- т.е. собствената дефиниция на регламента допуска всеки от двата пътя, а не изключително ферментация.",
+        "en": "Commission Regulation (EU) No 231/2012 defines citric acid as produced either from lemon or pineapple juice, or by fermentation of carbohydrate solutions or other suitable media using Candida spp. or non-toxicogenic strains of Aspergillus niger -- i.e. the regulation's own definition allows either route, not fermentation exclusively."
+      },
+      "dietary_guidance": {
+        "bg": "",
+        "en": ""
+      },
+      "e_number": "E330",
+      "effect_conditions": {
+        "bg": "",
+        "en": ""
+      },
+      "health_concerns": {
+        "bg": "През 1974 г. JECFA заключава, че лимонената киселина и нейните калциеви/калиеви/натриеви соли не представляват значителен риск за здравето, предвид установената ѝ роля като нормален междинен продукт на метаболизма, и определя ADI като „неограничена“. Това е конкретно регулаторно заключение -- че не е счетено за необходимо числено ограничение въз основа на наличните данни -- а не твърдение, че всяко количество е автоматично безопасно независимо от количеството или контекста.",
+        "en": "JECFA concluded in 1974 that citric acid and its calcium/potassium/sodium salts did not constitute a significant hazard to health, given its well-established role as a normal intermediary of metabolism, and set the ADI as 'not limited'. This is a specific regulatory conclusion -- that no numeric limit was considered necessary based on the available data -- not a statement that any amount is automatically safe regardless of quantity or context."
+      },
+      "purpose_in_food": {
+        "bg": "Използва се като регулатор на киселинността и секвестрант: коригира/стабилизира pH (подкиселяване) и свързва (хелатира) йони на следови метали, а също подпомага вкуса в много храни и напитки.",
+        "en": "Used as an acidity regulator and sequestrant: it adjusts/stabilises pH (acidification) and binds (chelates) trace metal ions, and supports flavour in many foods and beverages."
+      },
+      "references": "Commission Regulation (EU) No 231/2012 (citric acid specification) (https://eur-lex.europa.eu/eli/reg/2012/231/oj); accessed 2026-10-01"
+    },
+    "E951": {
+      "common_name": {
+        "bg": "Аспартам",
+        "en": "Aspartame"
+      },
+      "description": {
+        "bg": "Аспартамът е синтетичен дипептиден подсладител (L-аспартил-L-фенилаланинов метилов естер), приблизително 200 пъти по-сладък от захарозата по тегло.",
+        "en": "Aspartame is a synthetic dipeptide sweetener (L-aspartyl-L-phenylalanine methyl ester), roughly 200 times sweeter than sucrose by weight."
+      },
+      "dietary_guidance": {
+        "bg": "",
+        "en": ""
+      },
+      "e_number": "E951",
+      "effect_conditions": {
+        "bg": "Допустимата дневна доза (ADI) от 40 мг/кг телесно тегло дневно НЕ се прилага за хора с фенилкетонурия (ФКУ): те се нуждаят от пълен контрол на приема на фенилаланин с храната, за да управляват риска от повишени плазмени нива на фенилаланин, независимо от ADI, определена за общото население. Това е съществуващо медицинско хранително ограничение за управление на ФКУ, а не персонализирана препоръка, изведена тук наново.",
+        "en": "The ADI of 40 mg/kg bw/day is NOT applicable to people with phenylketonuria (PKU): they require total control of dietary phenylalanine intake to manage the risk from elevated phenylalanine plasma levels, independent of the ADI set for the general population. This is an existing medical dietary restriction for PKU management, not personalised guidance newly derived here."
+      },
+      "health_concerns": {
+        "bg": "В червата аспартамът се разгражда до съставните си части -- фенилаланин, аспарагинова киселина и метанол -- които след това навлизат в нормалните метаболитни пътища на организма.\n\nВ пет отделни оценки на ЕФСА между 2006 и 2013 г. ЕФСА последователно заключава, че няма основание за преразглеждане на допустимата дневна доза от 40 мг/кг телесно тегло дневно за аспартам, въз основа на наличните към всяка дата на оценка данни.\n\nПрез 2023 г. IARC класифицира аспартама като „възможно канцерогенен за хора“ (Група 2B, въз основа на ограничени доказателства), докато JECFA, преглеждайки същите нови данни в същия ден, потвърждава съществуващата ADI от 40 мг/кг телесно тегло дневно и заключава, че хранителната експозиция при настоящите нива не поражда опасения за здравето. Преоценка на ЕФСА от 2026 г. (в рамките на преоценката на E962, вижте „Информация за прием“ по-долу) също не установява причинно-следствена връзка между настоящата експозиция на аспартам и изследваните здравни резултати и не променя ADI.",
+        "en": "Aspartame is broken down in the gut into its constituent parts -- phenylalanine, aspartic acid and methanol -- which then enter the body's normal metabolic pathways.\n\nAcross five separate EFSA assessments between 2006 and 2013, EFSA consistently concluded there was no reason to revise the Acceptable Daily Intake of 40 mg/kg body weight per day for aspartame, based on the evidence available at each assessment date.\n\nIn 2023, IARC classified aspartame as 'possibly carcinogenic to humans' (Group 2B, based on limited evidence), while JECFA, reviewing the same new evidence on the same day, reaffirmed the existing 40 mg/kg bw/day ADI and concluded dietary exposure at current levels does not pose a health concern. A 2026 EFSA re-evaluation (within the scope of re-assessing E962, see Intake information below) likewise found no causal link between current aspartame exposure and the health outcomes examined, and did not change the ADI."
+      },
+      "purpose_in_food": {
+        "bg": "Използва се като нискокалоричен подсладител с висока сладост в диетични напитки, беззахарни сладкарски изделия и подобни продукти.",
+        "en": "Used as a high-intensity, non-nutritive sweetener in diet beverages, sugar-free confectionery and similar products."
+      },
+      "references": "EFSA plain-language summary: Re-evaluation of salt of aspartame-acesulfame (E 962) as food additive (https://www.efsa.europa.eu/en/plain-language-summary/re-evaluation-salt-aspartame-acesulfame-e-962-food-additive); accessed 2026-10-01\nEFSA press release: EFSA completes full risk assessment on aspartame and concludes it is safe at current levels of exposure (https://www.efsa.europa.eu/en/press/news/131210); accessed 2026-10-01\nEFSA ANS Panel, Scientific Opinion on the re-evaluation of aspartame (E 951) as a food additive (https://web.archive.org/web/2026*/https://www.efsa.europa.eu/en/efsajournal/pub/3496); accessed 2026-10-01\nJECFA Toxicological Monograph on Aspartame, WHO Food Additives Series 15 (1980), via IPCS INCHEM (https://inchem.org/documents/jecfa/jecmono/v15je03.htm); accessed 2026-10-01"
+    }
+  },
+  "scientific_review_status": "not_reviewed",
+  "translation_review_status": "not_reviewed"
+}

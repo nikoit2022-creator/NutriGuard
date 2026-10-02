@@ -177,6 +177,7 @@ private val bulgarianUiText = mapOf(
     "Allergens" to "Алергени",
     "Restricted in" to "Ограничена в",
     "Daily intake guidance" to "Насоки за дневен прием",
+    "Conditions and limitations" to "Условия и ограничения",
     "Source" to "Източник",
     "Sources" to "Източници",
     "Inspect ingredient" to "Виж информацията за съставката",

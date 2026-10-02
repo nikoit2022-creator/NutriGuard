@@ -157,6 +157,9 @@ data class IngredientDto(
     val adiMaxMgPerKgBwPerDay: Double? = null,
     val adiSource: String? = null,
     val sourceUrl: String? = null,
+    val effectConditions: String? = null,
+    val dietaryGuidance: String? = null,
+    val adiPopulationScope: String? = null,
     val localizations: Map<String, IngredientLocalizationDto> = emptyMap(),
     val isGluten: Boolean? = null,
     val isLactose: Boolean? = null,
@@ -207,6 +210,9 @@ data class IngredientDto(
                 adiMaxMgPerKgBwPerDay = json.optNullableDouble("adiMaxMgPerKgBwPerDay"),
                 adiSource = json.optString("adiSource").takeIf { it.isNotBlank() },
                 sourceUrl = json.optString("sourceUrl").takeIf { it.isNotBlank() },
+                effectConditions = json.optString("effectConditions").cleanOrNull(),
+                dietaryGuidance = json.optString("dietaryGuidance").cleanOrNull(),
+                adiPopulationScope = json.optString("adiPopulationScope").cleanOrNull(),
                 localizations = parseIngredientLocalizations(json.optJSONObject("localizations")),
                 isGluten = json.optNullableBoolean("isGluten"),
                 isLactose = json.optNullableBoolean("isLactose"),
@@ -327,6 +333,9 @@ fun List<IngredientDto>.toEntities(idPrefix: String): List<IngredientEntity> =
             adiMaxMgPerKgBwPerDay = ing.adiMaxMgPerKgBwPerDay,
             adiSource = ing.adiSource.cleanOrNull(),
             sourceUrl = ing.sourceUrl.cleanOrNull(),
+            effectConditions = ing.effectConditions.cleanOrNull(),
+            dietaryGuidance = ing.dietaryGuidance.cleanOrNull(),
+            adiPopulationScope = ing.adiPopulationScope.cleanOrNull(),
             localizationsJson = ingredientLocalizationsToJson(ing.localizations),
             isGluten = ing.isGluten,
             isLactose = ing.isLactose,
@@ -348,6 +357,9 @@ data class IngredientLocalizationDto(
     val language: String? = null,
     val translationStatus: String? = null,
     val translationSource: String? = null,
+    val ownerApprovedWithoutReview: Boolean = false,
+    val effectConditions: String? = null,
+    val dietaryGuidance: String? = null,
     val commonName: String? = null,
     val category: String? = null,
     val description: String? = null,
@@ -365,6 +377,9 @@ data class IngredientLocalizationDto(
             language = json.optString("language").cleanOrNull(),
             translationStatus = json.optString("translationStatus").cleanOrNull(),
             translationSource = json.optString("translationSource").cleanOrNull(),
+            ownerApprovedWithoutReview = json.optBoolean("ownerApprovedWithoutReview", false),
+            effectConditions = json.optString("effectConditions").cleanOrNull(),
+            dietaryGuidance = json.optString("dietaryGuidance").cleanOrNull(),
             commonName = json.optString("commonName").cleanOrNull(),
             category = json.optString("category").cleanOrNull(),
             description = json.optString("description").cleanOrNull(),
@@ -405,6 +420,9 @@ private fun ingredientLocalizationsToJson(
         putIfPresent("language", value.language)
         putIfPresent("translationStatus", value.translationStatus)
         putIfPresent("translationSource", value.translationSource)
+        item.put("ownerApprovedWithoutReview", value.ownerApprovedWithoutReview)
+        putIfPresent("effectConditions", value.effectConditions)
+        putIfPresent("dietaryGuidance", value.dietaryGuidance)
         putIfPresent("commonName", value.commonName)
         putIfPresent("category", value.category)
         putIfPresent("description", value.description)

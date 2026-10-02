@@ -60,15 +60,41 @@ def _wire_profile(source: Any) -> dict[str, Any]:
     profile["translationSource"] = (
         translation_source.value if hasattr(translation_source, "value") else translation_source
     )
+    profile["ownerApprovedWithoutReview"] = bool(getattr(source, "owner_approved_without_review", False))
     return profile
 
 
+def _is_servable(row: Any, *, expected_hash: str) -> bool:
+    """A localization row may be served when EITHER it has gone through
+    real translation review (`REVIEWED` + current hash, the original,
+    unchanged rule), OR an owner has explicitly approved this specific
+    DRAFT content for display without that review (docs/
+    OPENFOODTOX_APP_PILOT_INTEGRATION_TASK.md's narrowly scoped
+    owner-approved-publication mechanism). The hash check still applies
+    in both branches -- an owner's approval covers the content as it
+    was when approved, never a later, unreviewed edit to the English
+    source. The flag never widens to cover an ordinary, unapproved
+    DRAFT row (every existing/other writer leaves it `False`), so this
+    is strictly additive, not a loosening of the REVIEWED gate itself."""
+    if getattr(row, "source_content_hash", None) != expected_hash:
+        return False
+    status = getattr(row, "translation_status", None)
+    status_value = status.value if hasattr(status, "value") else status
+    if status_value == IngredientTranslationStatus.REVIEWED.value:
+        return True
+    return status_value == IngredientTranslationStatus.DRAFT.value and bool(
+        getattr(row, "owner_approved_without_review", False)
+    )
+
+
 def build_localizations(ingredient: Any) -> dict[str, dict[str, Any]]:
-    """Return canonical English plus only current, reviewed Bulgarian.
+    """Return canonical English plus only current, servable Bulgarian.
 
     Drafts and translations of an older canonical source are omitted,
     causing the Android client to fall back to the unchanged English
-    fields instead of showing stale or unreviewed scientific prose.
+    fields instead of showing stale or unreviewed scientific prose --
+    unless an owner has explicitly approved that specific DRAFT content
+    for display (see `_is_servable`).
     """
     result = {"en": _wire_profile(ingredient)}
     expected_hash = canonical_text_hash(ingredient)
@@ -79,13 +105,7 @@ def build_localizations(ingredient: Any) -> dict[str, dict[str, Any]]:
     if rows is None:
         rows = getattr(ingredient, "localization_rows", ())
     for row in rows or ():
-        status = getattr(row, "translation_status", None)
-        status_value = status.value if hasattr(status, "value") else status
-        if (
-            getattr(row, "language", None) == "bg"
-            and status_value == IngredientTranslationStatus.REVIEWED.value
-            and getattr(row, "source_content_hash", None) == expected_hash
-        ):
+        if getattr(row, "language", None) == "bg" and _is_servable(row, expected_hash=expected_hash):
             result["bg"] = _wire_profile(row)
             break
     return result

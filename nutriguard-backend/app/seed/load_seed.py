@@ -40,7 +40,11 @@ from app.models.enums import (
 from app.models.ingredient import Ingredient
 from app.models.ingredient_localization import IngredientLocalization
 from app.repositories import ingredient_alias_repository
-from app.services.ingredient_catalog import derive_ins_number_from_e_number, register_curated_alias
+from app.services.ingredient_catalog import (
+    derive_ins_number_from_e_number,
+    parse_field_provenance,
+    register_curated_alias,
+)
 from app.services.ingredient_normalization import normalize_ingredient_name
 from app.services.ingredient_localization import canonical_text_hash
 
@@ -104,6 +108,56 @@ _EXTRA_ALIASES: list[tuple[str, str, str | None]] = [
     ("e322_soy_lecithin", "соев лецитин", "bg"),
     ("e322_soy_lecithin", "емулгатор соев лецитин", "bg"),
 ]
+
+
+# Fields a later, more specific, field-level-provenance-tracked write
+# (today: only `app.seed.load_openfoodtox_pilot_content`'s bounded,
+# owner-approved four-identity import) may already have explicitly
+# supplied -- see `_protect_field_provenance_tracked_values` below.
+# Deliberately the exact set that importer is ever allowed to touch on
+# an existing row's `Ingredient` columns (its own module docstring's
+# `_UPDATABLE_EN_FIELDS`, plus `references`).
+_PROVENANCE_PROTECTED_FIELDS: tuple[str, ...] = (
+    "description", "purpose_in_food", "health_concerns",
+    "effect_conditions", "dietary_guidance", "references",
+)
+
+
+def _preserve_independent_field_tracking(kwargs: dict, existing: Ingredient | None) -> None:
+    """Keeps this bulk reseed from silently reverting a field a later,
+    independently-tracked import has already explicitly supplied
+    (docs/OPENFOODTOX_APP_INTEGRATION_FIX_TASK.md defect 1: production's
+    `SEED_ON_START` re-runs this exact loader on every restart, and the
+    unconditional `session.merge` below used to blindly overwrite such a
+    field back to this static JSON's own value -- or, for a field this
+    JSON doesn't even carry, e.g. `effect_conditions`/`dietary_guidance`,
+    back to blank).
+
+    `existing.field_provenance_json` is this row's own authoritative
+    record of which fields a later process has independently supplied
+    (see `app.services.ingredient_catalog.resolve_field_source`) -- an
+    entry there for one of `_PROVENANCE_PROTECTED_FIELDS` can only have
+    been written by that kind of bounded, explicit, field-specific
+    import (this bulk reseed itself never writes per-field provenance),
+    so mutates `kwargs` in place to carry the CURRENT stored value
+    through for exactly those fields, leaving every other field (every
+    scientific/regulatory/scoring column, `effect_conditions`/
+    `dietary_guidance` when untouched, etc.) reseeded exactly as before.
+
+    Also carries the raw `field_provenance_json` blob itself forward
+    unchanged -- `_row_to_kwargs` never sets it (this JSON has no
+    concept of per-field provenance), so without this the `session.merge`
+    below would null it out on every single restart, silently losing
+    this protection (and every other field's recorded true origin, see
+    `resolve_field_source`) after the row's very next reseed.
+    """
+    if existing is None:
+        return
+    kwargs["field_provenance_json"] = existing.field_provenance_json
+    provenance = parse_field_provenance(existing.field_provenance_json)
+    for field_name in _PROVENANCE_PROTECTED_FIELDS:
+        if field_name in provenance:
+            kwargs[field_name] = getattr(existing, field_name)
 
 
 def _row_to_kwargs(row: dict) -> dict:
@@ -263,10 +317,22 @@ async def _load_bg_localizations(session) -> int:
             raise RuntimeError(f"Bulgarian localization target {item['ingredientId']!r} does not exist")
         key = {"ingredient_id": ingredient.id, "language": "bg"}
         existing = await session.get(IngredientLocalization, (ingredient.id, "bg"))
-        if (
-            existing is not None
-            and existing.translation_status == IngredientTranslationStatus.REVIEWED
-            and existing.translation_source == IngredientTranslationSource.HUMAN_CURATED
+        if existing is not None and (
+            (
+                existing.translation_status == IngredientTranslationStatus.REVIEWED
+                and existing.translation_source == IngredientTranslationSource.HUMAN_CURATED
+            )
+            # docs/OPENFOODTOX_APP_INTEGRATION_FIX_TASK.md defect 1: a
+            # row an owner has explicitly approved for display without
+            # review (`app.seed.load_openfoodtox_pilot_content`'s own
+            # narrowly scoped DRAFT+MACHINE_TRANSLATED publication path)
+            # is just as much a later, more specific write as a
+            # HUMAN_CURATED one -- this generic reseed must not silently
+            # revert it back to the old, unapproved seed translation (or
+            # its REVIEWED/MACHINE_TRANSLATED status, which would falsely
+            # relabel owner-approved-draft content as reviewed) on every
+            # restart either.
+            or existing.owner_approved_without_review
         ):
             continue
         values = {
@@ -304,6 +370,8 @@ async def load_seed() -> int:
     async with AsyncSessionLocal() as session:
         for row in rows:
             kwargs = _row_to_kwargs(row)
+            existing = await session.get(Ingredient, kwargs["id"])
+            _preserve_independent_field_tracking(kwargs, existing)
             ingredient = Ingredient(**kwargs)
             await session.merge(ingredient)
             count += 1

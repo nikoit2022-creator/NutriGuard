@@ -175,6 +175,8 @@ fun hasUsefulIngredientDetails(ingredient: IngredientEntity): Boolean = listOf(
     ingredient.description,
     ingredient.purposeInFood,
     ingredient.healthConcerns,
+    ingredient.effectConditions.orEmpty(),
+    ingredient.dietaryGuidance.orEmpty(),
     ingredient.evidenceLevel,
     ingredient.countriesRestrictedOrBanned,
     ingredient.sideEffects,

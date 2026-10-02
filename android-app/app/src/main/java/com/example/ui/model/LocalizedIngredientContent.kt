@@ -17,6 +17,8 @@ data class LocalizedIngredientContent(
     val evidenceLevel: String,
     val countriesRestrictedOrBanned: String,
     val acceptableDailyIntake: String,
+    val effectConditions: String,
+    val dietaryGuidance: String,
     val sideEffects: String,
     val allergens: String,
     val riskRationale: String?
@@ -38,7 +40,8 @@ private object IngredientLocalizationCacheJson {
 }
 
 /**
- * Resolves verified backend copy per field. Bulgarian falls back to the
+ * Resolves backend-published copy per field (including explicitly owner-approved
+ * drafts, which are not scientific verification). Bulgarian falls back to the
  * backend's English localization, then to the legacy canonical field. Raw OCR
  * and product identity are deliberately outside this model and stay unchanged.
  */
@@ -72,6 +75,8 @@ fun IngredientEntity.localizedContent(language: AppLanguage): LocalizedIngredien
             english?.acceptableDailyIntake,
             acceptableDailyIntake
         ),
+        effectConditions = resolve(requested?.effectConditions, english?.effectConditions, effectConditions.orEmpty()),
+        dietaryGuidance = resolve(requested?.dietaryGuidance, english?.dietaryGuidance, dietaryGuidance.orEmpty()),
         sideEffects = resolve(requested?.sideEffects, english?.sideEffects, sideEffects),
         allergens = resolve(requested?.allergens, english?.allergens, allergens),
         riskRationale = resolve(

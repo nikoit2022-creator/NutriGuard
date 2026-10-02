@@ -167,6 +167,8 @@ fun IngredientDetailBottomSheet(
             val hasOverview = localized.description.cleanOrNull() != null ||
                 localized.purposeInFood.cleanOrNull() != null
             val hasHealthInformation = localized.healthConcerns.cleanOrNull() != null ||
+                localized.effectConditions.cleanOrNull() != null ||
+                localized.dietaryGuidance.cleanOrNull() != null ||
                 localized.sideEffects.cleanOrNull() != null ||
                 localized.allergens.cleanOrNull() != null ||
                 ingredient.whoIarcClassification.cleanOrNull() != null ||
@@ -199,9 +201,11 @@ fun IngredientDetailBottomSheet(
                 ingredient.adiMaxMgPerKgBwPerDay,
                 language
             )
-            (numericAdi ?: localized.acceptableDailyIntake.cleanOrNull())?.let { adi ->
-                InfoSectionItem("Acceptable daily intake", adi)
-            }
+            InfoSectionItem("Acceptable daily intake", intakeText(numericAdi, localized.acceptableDailyIntake))
+            // Keep conditions next to ADI: a numeric limit must never hide PKU or
+            // other exclusions supplied by the backend's localized narrative.
+            InfoSectionItem("Conditions and limitations", localized.effectConditions)
+            InfoSectionItem("Daily intake guidance", localized.dietaryGuidance)
 
             if (hasRegulatoryInformation) DetailGroupTitle("Evidence and regulation")
             RegulatoryStatusRow("EFSA", ingredient.efsaApprovalStatus)
@@ -316,7 +320,7 @@ private fun InfoSectionItem(title: String, content: String, highlightColor: Colo
     }
 }
 
-private fun formatAdi(minimum: Double?, maximum: Double?, language: AppLanguage): String? {
+internal fun formatAdi(minimum: Double?, maximum: Double?, language: AppLanguage): String? {
     if (minimum == null && maximum == null) return null
     val range = when {
         minimum != null && maximum != null -> "${minimum.cleanNumber()}–${maximum.cleanNumber()}"
@@ -339,6 +343,16 @@ private fun formatAdi(minimum: Double?, maximum: Double?, language: AppLanguage)
 }
 
 private fun Double.cleanNumber(): String = BigDecimal.valueOf(this).stripTrailingZeros().toPlainString()
+
+/** Preserve caveats in narrative ADI even when structured numeric data exists. */
+internal fun intakeText(numeric: String?, narrative: String?): String {
+    fun key(text: String) = text.lowercase()
+        .replace("body weight", "bw")
+        .replace("–", "-")
+        .replace(Regex("\\s+"), "")
+    return listOfNotNull(numeric.cleanOrNull(), narrative.cleanOrNull())
+        .distinctBy(::key).joinToString("\n\n")
+}
 
 private fun buildSources(ingredient: IngredientEntity): List<String> {
     val entries = buildList {

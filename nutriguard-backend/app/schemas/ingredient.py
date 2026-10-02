@@ -56,6 +56,7 @@ class IngredientLocalizationRow(ORMModel):
     translation_status: IngredientTranslationStatus
     translation_source: IngredientTranslationSource
     source_content_hash: str
+    owner_approved_without_review: bool = False
 
 
 class IngredientLocalizedTextOut(ORMModel):
@@ -76,6 +77,13 @@ class IngredientLocalizedTextOut(ORMModel):
     risk_rationale: str
     translation_status: IngredientTranslationStatus | None = None
     translation_source: IngredientTranslationSource | None = None
+    # `True` only for a DRAFT (never REVIEWED) row an owner has
+    # explicitly approved for display without a human translator
+    # review -- see `app.services.ingredient_localization._is_servable`.
+    # Always `False` for the canonical English entry, which needs no
+    # such approval. Lets a client honestly label this specific content
+    # as "not independently reviewed" if it chooses to.
+    owner_approved_without_review: bool = False
 
 
 class IngredientOut(ORMModel):
