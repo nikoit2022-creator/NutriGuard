@@ -1,5 +1,19 @@
 # CODEX_HANDOFF
 
+## 2026-10-02: Android pilot mapping completed (Codex)
+
+- Android DTO/entity/localization and Room v4->v5 migration now retain the
+  pilot conditions, guidance and publication metadata; details keep caveats
+  next to numeric intake rather than replacing narrative with bare numbers.
+- Fixture-based Android suite: 123 tests, 0 failures/errors/skips; debug APK
+  assembled. See android-app/OPENFOODTOX_PILOT_HANDOFF.md for scope and
+  manual acceptance checklist. No physical-device test yet.
+- Independently ran 35 focused existing backend tests (21 response/import/
+  localization plus 14 artifact/migration tests): all passed. Three separate
+  temporary review probes reproduced the regressions assigned below.
+- Next: Claude fixes OPENFOODTOX_APP_INTEGRATION_FIX_TASK.md and regenerates
+  fixtures; rerun Android suite before combined release. No merge/deploy.
+
 ## 2026-10-02: application integration review (Codex)
 
 - Reviewed `78cbd5b`; existing targeted backend tests independently run:

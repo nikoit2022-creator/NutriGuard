@@ -39,6 +39,9 @@ data class IngredientEntity(
     val adiMaxMgPerKgBwPerDay: Double? = null,
     val adiSource: String? = null,
     val sourceUrl: String? = null,
+    val effectConditions: String? = null,
+    val dietaryGuidance: String? = null,
+    val adiPopulationScope: String? = null,
     /**
      * Additive backend `localizations` object, retained verbatim as compact JSON so
      * English/Bulgarian scientific copy remains available after the app goes offline.

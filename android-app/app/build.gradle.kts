@@ -67,6 +67,8 @@ android {
     buildConfig = true
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
+  // Exercise the actual committed backend contract fixtures without duplicating them.
+  sourceSets.getByName("test").resources.srcDir("../../nutriguard-backend/docs/openfoodtox_app_pilot_fixtures")
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true
