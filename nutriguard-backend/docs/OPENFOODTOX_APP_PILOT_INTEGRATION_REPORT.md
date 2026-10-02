@@ -73,18 +73,27 @@ by this import, regardless of status.
 | `references` (EN only -- citations are not per-language) | DOI/URL list | Sources, at the bottom |
 | `localizations.bg.ownerApprovedWithoutReview` | `true` for every pilot BG row | Not in the task's table, but present so Android can honestly flag "not independently reviewed" content if it chooses to; `false` everywhere else, including every `en` entry |
 
-**Important, repeating the task's own warning**: current Android main
-does not consume `effectConditions`/`dietaryGuidance`/`adiPopulationScope`,
-and its numeric ADI display takes precedence over text. For E250/E330/E951
-this is a pre-existing gap this pilot does not change (their ADI fields
-are untouched). For E150d specifically there is nothing to hide, because
-no number is served at all. Codex must wire `effectConditions`/
-`dietaryGuidance`/`adiPopulationScope` end-to-end (DTO fields, Room
-entity/migration, localization lookup, view binding) before any future
-identity relies on those fields to carry an essential caveat. No backend
-migration is required on the Android/Room side for this pilot's own four
-identities -- they work today purely through fields the client already
-has, exactly because the ADI/approval fields were left alone.
+**Correction (2026-10-02, OPENFOODTOX_APP_INTEGRATION_FIX_TASK.md)**: an
+earlier version of this section claimed Android needed no integration
+work for this pilot's own four identities "because the ADI/approval
+fields were left alone." That claim was misleading and has been
+retracted -- it is NOT true that nothing here needs Android wiring.
+`effectConditions` is not cosmetic for this very pilot: E951's
+`effectConditions` carries the PKU (phenylketonuria) exception, a
+safety-relevant caveat on a sweetener already in the catalog today. An
+Android build that doesn't read `effectConditions` silently drops that
+warning for every existing E951-containing product the moment this
+pilot's content ships, not just for some future identity. Current
+Android main does not consume `effectConditions`/`dietaryGuidance`/
+`adiPopulationScope`, and its numeric ADI display takes precedence over
+text; for E250/E330/E951 this is a pre-existing gap, but THIS pilot is
+what first makes it consumer-visible and safety-relevant (via E951),
+not a hypothetical "future identity." Codex has since wired
+`effectConditions`/`dietaryGuidance`/`adiPopulationScope` end-to-end
+(DTO fields, Room entity/migration, localization lookup, view binding --
+see `android-app/OPENFOODTOX_PILOT_HANDOFF.md`); deployment of this
+pilot content must wait for both halves (this backend content AND that
+Android wiring) to ship together, never the backend content alone.
 
 Representative, real response bodies: `docs/openfoodtox_app_pilot_fixtures/{e250,e150d,e330,e951}_ingredient_out.json`
 (EN fields at top level, BG under `localizations.bg`). Regenerate with:
@@ -163,12 +172,42 @@ ones already touched earlier in the same call (E250), exactly as they
 were before (`test_rollback_on_failure_leaves_no_partial_writes`).
 Idempotency: re-running `--apply` with no further content changes
 produces an all-`no_op` plan and writes nothing new
-(`test_apply_is_idempotent`). For a real deployment, back up the
-database before `--apply` (same as any other migration/import) and use
-`alembic downgrade -1` plus a restore if the column itself needs to come
-out; this import has no separate "undo" command of its own beyond
-re-running `load_seed()`'s own data if a full revert of content is ever
-needed (not expected, given the dry-run report and tests above).
+(`test_apply_is_idempotent`).
+
+**Rollback, corrected (2026-10-02, OPENFOODTOX_APP_INTEGRATION_FIX_TASK.md)**:
+an earlier version of this section recommended "re-running `load_seed()`'s
+own data" as this import's undo mechanism. That recommendation is
+withdrawn -- `load_seed()` is not a rollback tool here: it is the very
+unconditional-reseed path that defect 1 identified (production's
+`SEED_ON_START` re-invoking it on every restart used to silently revert
+this import's own content back to the old curated-seed text). The fix
+for that defect makes `load_seed()` correctly LEAVE already-applied
+pilot content alone; it does not, and was never meant to, give
+`load_seed()` a second job of restoring PRE-pilot values on request --
+it has no record of what those were. Using it to "roll back" would
+therefore do nothing today (by design, post-fix) while still being the
+wrong tool conceptually, and recommending it was itself a symptom of
+conflating "the bulk reseed" with "a scoped import's own undo."
+
+An honest targeted rollback, by identity:
+- **E150d** (a new, isolated row, created only by this import, with
+  `risk_assessment_available=False` so no existing product's Health
+  Score or warnings ever depended on it): delete the single `ingredients`
+  row `e150d_sulphite_ammonia_caramel`, its one `ingredient_localizations`
+  `bg` row, and the two aliases `register_curated_alias` registered for
+  it (its own common name, and the bare `E150d` alias). Scoped and safe
+  specifically because nothing else in the catalog references this id.
+- **E250/E330/E951** (updates to pre-existing rows): this import keeps
+  no per-field "before" snapshot, so there is no automated targeted
+  undo for these three -- only two real options, and both have explicit
+  data-loss implications: (a) a full database restore from a backup
+  taken immediately before `--apply` (loses ANY other writes made to the
+  database between that backup and the restore, not just this import's
+  changes -- back up immediately before every `--apply` specifically so
+  this stays available and recent); or (b) a new, explicit corrective
+  profile/import restoring the specific prior field values by hand,
+  reviewed with the same owner-approval rigor as this one, since it is
+  itself a content change to a live, existing ingredient.
 
 ## 8. Explicitly not done (per the task's own stop condition)
 

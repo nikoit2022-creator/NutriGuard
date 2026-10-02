@@ -56,6 +56,25 @@ _NEW_INGREDIENT_DISPLAY = {
     }
 }
 
+# Owner-approved common name for EVERY allowlisted identity (task:
+# OPENFOODTOX_APP_INTEGRATION_FIX_TASK.md defect 3, "BG names are
+# English") -- carried explicitly here rather than ever letting
+# `app/seed/load_openfoodtox_pilot_content.py` guess a Bulgarian name
+# from the canonical English `common_name`. E150d's is the same pair
+# already in `_NEW_INGREDIENT_DISPLAY` above (its only display identity
+# source, since it does not exist in any seed file). E250/E951 match
+# this repository's own existing, already-reviewed
+# `app/seed/ingredients_seed_bg.json` entries exactly (no change in
+# practice for those two); E330 and E150d match the owner-approved
+# headings already published in
+# docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md.
+_COMMON_NAME = {
+    "E250": {"en": "Sodium Nitrite", "bg": "Натриев нитрит"},
+    "E150d": _NEW_INGREDIENT_DISPLAY["E150d"]["common_name"],
+    "E330": {"en": "Citric acid", "bg": "Лимонена киселина"},
+    "E951": {"en": "Aspartame", "bg": "Аспартам"},
+}
+
 
 def _join_effects(entry) -> tuple[str, str]:
     parts_en = [note.text.en for note in entry.effects]
@@ -123,6 +142,7 @@ def build_artifact() -> dict:
 
         profile = {
             "e_number": e_number,
+            "common_name": _COMMON_NAME[e_number],
             "description": {
                 "en": entry.identity.en if entry.identity else "",
                 "bg": entry.identity.bg if entry.identity else "",

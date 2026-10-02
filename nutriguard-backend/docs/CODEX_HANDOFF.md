@@ -1,5 +1,125 @@
 # CODEX_HANDOFF
 
+## 2026-10-02: application pilot integration regressions fixed (Claude)
+
+Implemented `docs/OPENFOODTOX_APP_INTEGRATION_FIX_TASK.md` (Codex's
+review of `78cbd5b`, baseline fast-forwarded to `68c76ee` first --
+Android's pilot mapping, preserved verbatim, no Android files touched).
+Same isolated worktree. Full SHA after this commit: see the commit this
+entry ships in (`git log -1` on this branch).
+
+**Defect 1 -- restart overwrote imported profiles.** `load_seed()`'s
+unconditional `session.merge` (base `ingredients_seed.json` loop) and
+`_load_bg_localizations`'s unconditional BG upsert both used to blindly
+revert the four pilot identities' EN/BG content back to the old
+curated-seed text on every container restart (`SEED_ON_START=true`
+re-invokes `load_seed()`). Fixed by protection, not reapplication:
+`load_seed.py` now checks each row's OWN `field_provenance_json` (the
+pilot importer's own per-field provenance -- nothing else in this
+codebase writes it) before reseeding, and carries the pilot-supplied
+value (and the provenance blob itself, so the protection survives a
+SECOND restart too) through the merge untouched; `_load_bg_localizations`
+now also skips any BG row with `owner_approved_without_review=True`, the
+same way it already skipped `HUMAN_CURATED` ones. Also gave `references`
+its own field-provenance entry in `load_openfoodtox_pilot_content.py`
+(`_apply_update`) -- it was the one updatable field the importer never
+recorded, so it alone would have kept reverting. Every OTHER ingredient
+and field reseeds exactly as before (verified directly).
+
+**Defect 2 -- EN-only update made approved BG disappear.** `_apply_bg`
+used to skip entirely on a `no_op` BG-text plan, including the hash
+refresh -- so an EN-only approved artifact update (still calls
+`_apply_bg`, since `en_changes` is non-empty) left the BG row's
+`source_content_hash` pointing at the ingredient's PREVIOUS English
+content, and `build_localizations` correctly (but unintentionally)
+started treating the still-approved, unchanged BG prose as stale. Fixed
+by only ever skipping entirely on `HUMAN_CURATED`; a true `no_op` now
+still refreshes the hash/metadata (text fields stay untouched, since
+`bg_values` is all `None` in that case). An ordinary, UNGOVERNED direct
+edit to the EN column (never going through this importer) still
+correctly invalidates BG -- verified directly, so this isn't a widened
+gate.
+
+**Defect 3 -- BG names were English.** `_apply_bg` initialized a new BG
+row's `common_name` from the canonical English name. The artifact
+(`app/seed/openfoodtox_pilot_profiles.json`, rebuilt via
+`scripts/openfoodtox/build_app_pilot_content.py`) now carries an
+explicit, owner-approved `common_name.bg` for all FOUR identities (not
+just E150d) -- E250/E951 match this repo's own already-reviewed
+`ingredients_seed_bg.json` entries exactly (no behavior change for
+those two), E330/E150d match the headings already published in
+`docs/OPENFOODTOX_PILOT_REVIEW_DRAFTS.md`. `_plan_bg`/`_apply_bg` now
+carry and assert this name explicitly, for both a brand-new BG row and
+an existing one (self-healing, not just at creation).
+
+**Permanent regressions**: 9 new SQLite tests in
+`tests/integration/test_openfoodtox_pilot_import.py` (3 classes, one
+per defect) -- verified they fail against the pre-fix code (6 of 9;
+the other 3 cover already-correct behavior the fix must not regress)
+before restoring the fix. Focused suite: `python3 -m pytest -q
+tests/integration/test_openfoodtox_pilot_import.py
+tests/integration/test_openfoodtox_app_pilot_response_paths.py
+tests/unit/test_ingredient_localization.py
+tests/integration/test_load_seed.py` -- **35 passed**. Full suite:
+`python3 -m pytest -q` -- **904 passed, 20 skipped** (16 pre-existing
+opt-in Postgres + 4 new, see below), 3 warnings (pre-existing).
+
+**Close existing delivery requirements**:
+- OpenAPI regenerated inside a disposable `docker build` of this
+  branch (pinned `requirements.txt`, Python 3.12-slim, matching
+  `Dockerfile` exactly) -- confirmed the previously committed
+  `openapi.json` actually had NEWER-environment drift (`format:
+  binary` vs `contentMediaType`; `ValidationError`'s extra `input`/
+  `ctx` fields), not the pinned deployment output. Replaced with the
+  disposable image's exact output; zero other diff (no schema change
+  from this round's fixes).
+- Added `tests/postgres/test_openfoodtox_pilot_import_postgres.py`
+  (opt-in, same convention as the rest of that directory): (a)
+  `TestMigrationWithPreexistingRows` -- real `alembic` downgrade/upgrade
+  around the `a8b9c0d1e2f3` migration with a raw pre-existing
+  `ingredient_localizations` row inserted before it runs, asserting
+  `owner_approved_without_review` defaults `false` for that row (not
+  just for rows created after the column existed) -- separate,
+  explicitly-named env var (`NUTRIGUARD_TEST_POSTGRES_MIGRATION_URL`)
+  since this one mutates schema state; (b) the real import against a
+  real `asyncpg` connection, plus real `POST /api/v1/scan/barcode` and
+  `POST /api/v1/scan/label-image` response-path tests (external
+  provider/Gemini mocked, no network) serving the pilot's
+  owner-approved content -- the prior assignment only ever verified an
+  empty-Postgres migration cycle plus SQLite-backed direct/listing/
+  OCR-text/partial paths. Ran all of this against disposable,
+  destroyed-after-use containers (never `nutriguard-backend-db-1`):
+  migration test passed (pre-existing row's flag confirmed `false`
+  post-migration); import + barcode + label-image tests passed (3/3,
+  BG common names correctly localized through both real scan paths).
+- `docs/OPENFOODTOX_APP_PILOT_INTEGRATION_REPORT.md` corrected in two
+  places the task flagged: (1) withdrew the claim that this pilot
+  needs no Android integration work -- E951's `effectConditions`
+  carries the PKU exception, a safety-relevant caveat Android main
+  didn't consume before Codex's `68c76ee` wiring; the report now says
+  deployment must wait for both halves. (2) withdrew "re-running
+  `load_seed()`'s own data" as a rollback recommendation (it was the
+  very overwrite path defect 1 fixed, and was never actually able to
+  restore pre-pilot values); replaced with a precise targeted-rollback
+  description (delete the one isolated E150d row; for the three
+  updates, an explicit backup-restore or a new reviewed corrective
+  import -- no automated undo exists for those three).
+- Regenerated `docs/openfoodtox_app_pilot_fixtures/*.json` (real bytes,
+  `scripts/openfoodtox/generate_app_pilot_fixtures.py`) -- the only
+  real diff per file is the corrected BG `commonName` (defect 3) plus
+  this run's fresh timestamps. Re-ran Android's full unit suite against
+  the regenerated fixtures (`android-app`'s own `build.gradle.kts`
+  sources them directly as test resources): **123 passed, 0
+  failures/errors/skips** -- unchanged from Codex's count, confirming
+  the regeneration didn't disturb the Android mapping.
+
+No merge, no deploy, no live database/container access (disposable
+Postgres 16 + a disposable pinned-deps image this round, both destroyed
+after use; `docker ps` confirmed only the pre-existing
+`nutriguard-backend-*`/`ng-stage3-pg-dev` containers were ever running),
+no secrets changes, no Android code changes (fixtures only, which
+Android's own build reads as data).
+
 ## 2026-10-02: Android pilot mapping completed (Codex)
 
 - Android DTO/entity/localization and Room v4->v5 migration now retain the

@@ -138,6 +138,7 @@ class IdentityPlan:
     en_changes: list[FieldChange] = field(default_factory=list)
     bg_action: str = "none"  # "create" | "replace" | "skip_human_curated" | "no_op"
     bg_changes: list[FieldChange] = field(default_factory=list)
+    bg_common_name: str = ""
     notes: list[str] = field(default_factory=list)
 
 
@@ -200,6 +201,12 @@ def _plan_create(profile: dict) -> IdentityPlan:
 
 
 def _plan_bg(plan: IdentityPlan, bg_row: IngredientLocalization | None, profile: dict) -> None:
+    # Task defect 3 ("BG names are English"): the artifact carries an
+    # explicit, owner-approved Bulgarian common name for all four
+    # allowlisted identities -- recorded on the plan unconditionally so
+    # `_apply_bg` can always assert it, rather than ever falling back to
+    # guessing a translation from the canonical English `common_name`.
+    plan.bg_common_name = (profile.get("common_name") or {}).get("bg", "")
     if bg_row is not None and bg_row.translation_source == IngredientTranslationSource.HUMAN_CURATED:
         plan.bg_action = "skip_human_curated"
         plan.notes.append(
@@ -216,8 +223,12 @@ def _plan_bg(plan: IdentityPlan, bg_row: IngredientLocalization | None, profile:
     if bg_row is None:
         plan.bg_action = "create"
         plan.bg_changes = [FieldChange(k, "", v) for k, v in new_bg.items() if v]
+        if plan.bg_common_name:
+            plan.bg_changes.append(FieldChange("common_name", "", plan.bg_common_name))
         return
     changes = []
+    if plan.bg_common_name and plan.bg_common_name != (bg_row.common_name or ""):
+        changes.append(FieldChange("common_name", bg_row.common_name or "", plan.bg_common_name))
     for field_name, new_value in new_bg.items():
         old_value = getattr(bg_row, field_name) or ""
         if new_value and new_value != old_value:
@@ -260,11 +271,8 @@ async def _apply_update(session, plan: IdentityPlan, now: datetime) -> None:
         raise RuntimeError(f"{plan.ingredient_id} disappeared between planning and apply")
     touched = []
     for change in plan.en_changes:
-        if change.field == "references":
-            existing.references = change.new
-        else:
-            setattr(existing, change.field, change.new)
-            touched.append(change.field)
+        setattr(existing, change.field, change.new)
+        touched.append(change.field)
     _record_field_provenance(existing, touched, now=now)
     await _apply_bg(session, existing, plan, now=now)
 
@@ -330,9 +338,21 @@ async def _apply_create(session, plan: IdentityPlan, profile: dict, now: datetim
 
 
 async def _apply_bg(session, ingredient: Ingredient, plan: IdentityPlan, *, now: datetime) -> None:
-    if plan.bg_action in ("skip_human_curated", "no_op"):
+    # Task defect 2 ("EN-only content update makes approved BG
+    # disappear"): a `no_op` plan (no BG *text* changed) must still fall
+    # through to refresh `source_content_hash`/metadata below -- the only
+    # thing that may ever skip this entirely is a HUMAN_CURATED row this
+    # import must never touch. Without this, an approved EN-only update
+    # (this function IS reached for that case -- see `_apply_update`,
+    # which always calls it once `en_changes` is non-empty) would leave
+    # the BG row's hash pointing at the ingredient's PREVIOUS canonical
+    # English content, and the next read would then (correctly, but
+    # unintentionally) treat the still-approved, still-current BG prose
+    # as stale and stop serving it.
+    if plan.bg_action == "skip_human_curated":
         return
     bg_values = {
+        "common_name": plan.bg_common_name or None,
         "description": next((c.new for c in plan.bg_changes if c.field == "description"), None),
         "purpose_in_food": next((c.new for c in plan.bg_changes if c.field == "purpose_in_food"), None),
         "health_concerns": next((c.new for c in plan.bg_changes if c.field == "health_concerns"), None),
@@ -342,11 +362,7 @@ async def _apply_bg(session, ingredient: Ingredient, plan: IdentityPlan, *, now:
     existing_bg = await session.get(IngredientLocalization, (ingredient.id, "bg"))
     expected_hash = canonical_text_hash(ingredient)
     if existing_bg is None:
-        existing_bg = IngredientLocalization(
-            ingredient_id=ingredient.id,
-            language="bg",
-            common_name=ingredient.common_name,
-        )
+        existing_bg = IngredientLocalization(ingredient_id=ingredient.id, language="bg")
         session.add(existing_bg)
     for field_name, value in bg_values.items():
         if value is not None:

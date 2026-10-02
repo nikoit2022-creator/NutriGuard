@@ -700,7 +700,7 @@
         "properties": {
           "image": {
             "type": "string",
-            "contentMediaType": "application/octet-stream",
+            "format": "binary",
             "title": "Image"
           },
           "barcode": {
@@ -1016,108 +1016,6 @@
         ],
         "title": "HealthWarningOut",
         "description": "Mirrors com.example.util.HealthWarning (API Contract 5.8)."
-      },
-      "IngredientLocalizationRow": {
-        "properties": {
-          "language": {
-            "type": "string",
-            "title": "Language"
-          },
-          "commonName": {
-            "type": "string",
-            "title": "Commonname"
-          },
-          "category": {
-            "type": "string",
-            "title": "Category"
-          },
-          "description": {
-            "type": "string",
-            "title": "Description"
-          },
-          "purposeInFood": {
-            "type": "string",
-            "title": "Purposeinfood"
-          },
-          "healthConcerns": {
-            "type": "string",
-            "title": "Healthconcerns"
-          },
-          "evidenceLevel": {
-            "type": "string",
-            "title": "Evidencelevel"
-          },
-          "countriesRestrictedOrBanned": {
-            "type": "string",
-            "title": "Countriesrestrictedorbanned"
-          },
-          "efsaStatus": {
-            "type": "string",
-            "title": "Efsastatus"
-          },
-          "fdaStatus": {
-            "type": "string",
-            "title": "Fdastatus"
-          },
-          "acceptableDailyIntake": {
-            "type": "string",
-            "title": "Acceptabledailyintake"
-          },
-          "sideEffects": {
-            "type": "string",
-            "title": "Sideeffects"
-          },
-          "allergens": {
-            "type": "string",
-            "title": "Allergens"
-          },
-          "effectConditions": {
-            "type": "string",
-            "title": "Effectconditions",
-            "default": ""
-          },
-          "dietaryGuidance": {
-            "type": "string",
-            "title": "Dietaryguidance",
-            "default": ""
-          },
-          "translationStatus": {
-            "$ref": "#/components/schemas/IngredientTranslationStatus"
-          },
-          "translationSource": {
-            "$ref": "#/components/schemas/IngredientTranslationSource"
-          },
-          "sourceContentHash": {
-            "type": "string",
-            "title": "Sourcecontenthash"
-          },
-          "ownerApprovedWithoutReview": {
-            "type": "boolean",
-            "title": "Ownerapprovedwithoutreview",
-            "default": false
-          }
-        },
-        "type": "object",
-        "required": [
-          "language",
-          "commonName",
-          "category",
-          "description",
-          "purposeInFood",
-          "healthConcerns",
-          "evidenceLevel",
-          "countriesRestrictedOrBanned",
-          "efsaStatus",
-          "fdaStatus",
-          "acceptableDailyIntake",
-          "sideEffects",
-          "allergens",
-          "translationStatus",
-          "translationSource",
-          "sourceContentHash"
-        ],
-        "title": "IngredientLocalizationRow",
-        "description": "Internal ORM adapter; excluded from the public wire shape."
       },
       "IngredientLocalizedTextOut": {
         "properties": {
@@ -2199,13 +2097,6 @@
           "type": {
             "type": "string",
             "title": "Error Type"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "ctx": {
-            "type": "object",
-            "title": "Context"
           }
         },
         "type": "object",

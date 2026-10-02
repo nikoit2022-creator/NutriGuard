@@ -37,7 +37,7 @@
   "isLactose": false,
   "isVegan": true,
   "isVegetarian": true,
-  "lastVerifiedAt": 1790858319232,
+  "lastVerifiedAt": 1790941935104,
   "localizations": {
     "bg": {
       "acceptableDailyIntake": "0–40 mg/kg телесно тегло/ден",
@@ -83,7 +83,7 @@
   "needsRefresh": false,
   "purposeInFood": "Used as a high-intensity, non-nutritive sweetener in diet beverages, sugar-free confectionery and similar products.",
   "references": "EFSA plain-language summary: Re-evaluation of salt of aspartame-acesulfame (E 962) as food additive (https://www.efsa.europa.eu/en/plain-language-summary/re-evaluation-salt-aspartame-acesulfame-e-962-food-additive); accessed 2026-10-01\nEFSA press release: EFSA completes full risk assessment on aspartame and concludes it is safe at current levels of exposure (https://www.efsa.europa.eu/en/press/news/131210); accessed 2026-10-01\nEFSA ANS Panel, Scientific Opinion on the re-evaluation of aspartame (E 951) as a food additive (https://web.archive.org/web/2026*/https://www.efsa.europa.eu/en/efsajournal/pub/3496); accessed 2026-10-01\nJECFA Toxicological Monograph on Aspartame, WHO Food Additives Series 15 (1980), via IPCS INCHEM (https://inchem.org/documents/jecfa/jecmono/v15je03.htm); accessed 2026-10-01",
-  "retrievedAt": 1790858319232,
+  "retrievedAt": 1790941935104,
   "riskAssessmentAvailable": true,
   "riskLevel": "POTENTIAL_CONCERN",
   "riskRationale": "Moderate Evidence",
