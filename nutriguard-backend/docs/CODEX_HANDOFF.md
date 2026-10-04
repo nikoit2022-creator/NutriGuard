@@ -1,5 +1,23 @@
 # CODEX_HANDOFF
 
+## 2026-10-04: Export local product catalog for GitHub
+
+- User requested uploading all locally stored products to the repository.
+- Added `data/local_products.json`: read-only export of all 99 `products` rows,
+  sorted by barcode, with export timestamp and original product fields.
+- Added `data/README.md` describing scope, test/incomplete records, ingredient
+  references and the fact that this snapshot is not automatically imported.
+- Validation: Python JSON parse, count = 99, unique barcodes = 99, sorted
+  barcodes and credential-pattern scan all passed. Image URLs only use
+  `images.openfoodfacts.org`, with no query strings or embedded credentials.
+- No application code changed; backend pytest was not run for this data/docs
+  change. No live database mutation or deployment performed.
+- Unresolved: source catalog includes test records and incomplete scans; all
+  records preserved as requested. Related ingredient/evidence tables omitted.
+- Recommended next step: review and merge the catalog branch through GitHub;
+  implement an importer separately only if automatic loading is wanted.
+
+
 ## 2026-10-02 (latest): PR #32 (OpenFoodTox pilot) deployed and verified (Claude Code)
 
 - Owner authorized deployment per issue #33, gated on PR #32 merged with
