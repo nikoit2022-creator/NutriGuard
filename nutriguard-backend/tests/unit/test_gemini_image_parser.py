@@ -72,6 +72,32 @@ def test_gemini_ingredient_matches_scientific_database_when_present():
     assert ingredients[0].id == "e951_aspartame"  # DB ingredient used, not a synthetic one
 
 
+def test_cyrillic_e_number_in_structured_gemini_ingredient_is_recognized():
+    """Gemini's structured `ingredients[]` objects go straight to
+    `create_synthetic_ingredient` when no scientific-database row
+    matches (`gemini_image_parser._resolve_ingredients`), WITHOUT ever
+    passing through `ocr_normalizer.normalize_and_extract_tokens`'s
+    Cyrillic-E fold -- a label photo of Bulgarian/Russian/Ukrainian/
+    Serbian text can have Gemini echo back a Cyrillic "Е" eNumber
+    (e.g. "Е300") verbatim in its own JSON. This must still resolve to
+    the same canonical e_number/id as the Latin spelling, not degrade
+    to an unrecognized bare "300"."""
+    payload = {
+        "productName": "Test Product",
+        "rawIngredientText": "Антиоксидант: Е300",
+        # `commonName` empty -> `_resolve_ingredients` falls back to
+        # building the synthetic ingredient straight from `eNumber`
+        # (still Cyrillic here, exactly as Gemini might echo it back).
+        "ingredients": [{"commonName": "", "eNumber": "Е300"}],
+    }
+    result = parse_gemini_image_json_result(json.dumps(payload), [])
+    assert result is not None
+    _, ingredients = result
+    assert len(ingredients) == 1
+    assert ingredients[0].e_number == "E300"
+    assert ingredients[0].id == create_synthetic_ingredient("E300").id
+
+
 def test_missing_ingredients_array_falls_back_to_tokenizing_raw_text():
     payload = {
         "productName": "Test Product",

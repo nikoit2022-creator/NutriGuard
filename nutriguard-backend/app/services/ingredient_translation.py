@@ -65,7 +65,17 @@ _MIN_TRANSLATION_CONFIDENCE = 0.55
 # result when language cannot be established") -- rejected here, which
 # the caller turns into `identity_uncertain=True` rather than a
 # silently wrong guess either way.
-_E_NUMBER_RE = re.compile(r"\bE[- ]?(\d{3,4}[A-Za-z]?)\b", re.IGNORECASE)
+# This module only ever runs on a source token whose detected language
+# is NOT "en"/"bg"/"unknown" (see `ingredient_catalog.
+# _resolve_ingredient_languages`) -- but that still includes other
+# Cyrillic-script languages (Russian, Ukrainian, Serbian, ...), which
+# spell E-numbers with the CYRILLIC letter "Е" (U+0415/U+0435), visually
+# identical to Latin "E" -- see `app.services.ocr_normalizer._E_NUMBER`.
+# Without accepting both scripts here, a correct translation that
+# preserves a Cyrillic source E-number as Latin-script "E300" would look
+# like it invented an E-number the source never had, and get rejected
+# as unreliable.
+_E_NUMBER_RE = re.compile(r"\b[eе][- ]?(\d{3,4}[A-Za-z]?)\b", re.IGNORECASE)
 _NUMBER_WITH_UNIT_RE = re.compile(
     r"(?<![A-Za-z0-9])(\d+(?:[.,]\d+)?)\s*(%|kcal|kj|mcg|µg|mg|kg|g|ml|l)?(?![A-Za-z0-9])",
     re.IGNORECASE,

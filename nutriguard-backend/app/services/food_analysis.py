@@ -189,6 +189,38 @@ def _ingredient_ids_string(ingredients: list[Any]) -> str:
     return ",".join(ing.id for ing in ingredients)
 
 
+def _synthesize_unknown_from_original_text(
+    tokens: list[str], matchable_tokens: list[str], norm: "NormalizedIngredientResult"
+) -> list[Any]:
+    """`norm.unknown_ingredients` (see `match_against_database`) is
+    computed against `matchable_tokens` -- the Bulgarian-alias-
+    substituted list built so an English and a Bulgarian mention of the
+    same ingredient match/dedupe together (see
+    `label_language.bulgarian_ingredient_alias`). Building the synthetic
+    ingredient straight from that SUBSTITUTED text would silently
+    replace a Bulgarian token's displayed identity with its English
+    alias -- contradicting `bulgarian_ingredient_alias`'s own documented
+    contract ("never alter the stored/displayed text") -- and would
+    desynchronize the new ingredient's id from `Product.
+    raw_ingredient_text`, which still holds the ORIGINAL, unsubstituted
+    text: `reconstruct_synthetic_ingredient` re-tokenizes that exact
+    original text on every later read and can never reproduce an id
+    generated from an alias it has no record of. Recovering the first
+    original token that produced each unknown matchable value and
+    building the synthetic ingredient from THAT keeps the stored text
+    and the id it's keyed under self-consistent, while still getting
+    the dedup benefit of matching on the alias (two original tokens that
+    alias to the same matchable value still collapse to one entry
+    here, exactly as `match_against_database` already deduped them)."""
+    original_by_matchable: dict[str, str] = {}
+    for original, matchable in zip(tokens, matchable_tokens):
+        original_by_matchable.setdefault(matchable, original)
+    return [
+        create_synthetic_ingredient(original_by_matchable.get(unknown, unknown))
+        for unknown in norm.unknown_ingredients
+    ]
+
+
 def _to_product_model(
     barcode: str,
     data: AnalyzedProductData,
@@ -1590,8 +1622,7 @@ async def _finalize_barcode_enrichment(
         matchable_tokens = [label_language.bulgarian_ingredient_alias(t) or t for t in tokens]
         norm = match_against_database(matchable_tokens, await ingredient_repository.get_all(db))
         rebuilt: list[Any] = list(norm.matched_ingredients)
-        for unknown in norm.unknown_ingredients:
-            rebuilt.append(create_synthetic_ingredient(unknown))
+        rebuilt.extend(_synthesize_unknown_from_original_text(tokens, matchable_tokens, norm))
         if rebuilt:
             # Persistent ingredient knowledge cache -- see
             # `ingredient_catalog`'s module docstring.
@@ -1951,8 +1982,7 @@ async def _finalize_standalone_label_analysis(
         matchable_tokens = [label_language.bulgarian_ingredient_alias(t) or t for t in tokens]
         norm = match_against_database(matchable_tokens, await ingredient_repository.get_all(db))
         rebuilt: list[Any] = list(norm.matched_ingredients)
-        for unknown in norm.unknown_ingredients:
-            rebuilt.append(create_synthetic_ingredient(unknown))
+        rebuilt.extend(_synthesize_unknown_from_original_text(tokens, matchable_tokens, norm))
         if rebuilt:
             # Persistent ingredient knowledge cache -- see
             # `ingredient_catalog`'s module docstring.

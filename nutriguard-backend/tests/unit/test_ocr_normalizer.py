@@ -303,3 +303,39 @@ def test_reconstruct_synthetic_ingredient_recovers_a_long_ascii_name_via_id_fall
     content_hash = original.id[-12:]
     assert content_hash not in restored.common_name.lower()
     assert "modified corn starch" in restored.common_name.lower()
+
+
+def test_cyrillic_e_prefix_is_treated_as_e_number():
+    tokens = normalize_and_extract_tokens("Вода, Регулатор на киселинността: Е300, Е211, Елда")
+    assert tokens == ["Вода", "Регулатор на киселинността: E300", "E211", "Елда"]
+    assert create_synthetic_ingredient("Е211").e_number == "E211"
+    assert create_synthetic_ingredient("Елда").e_number is None
+
+
+def test_cyrillic_e_number_letter_suffix_variants_stay_distinct():
+    """Е150d (caramel, sulphite ammonia process) is a DIFFERENT
+    regulatory substance from plain Е150 (plain caramel) -- the letter
+    suffix must survive Cyrillic recognition, never be dropped, and the
+    two must never collapse to the same identity/id."""
+    plain = create_synthetic_ingredient("Е150")
+    suffixed = create_synthetic_ingredient("Е150d")
+    assert plain.e_number == "E150"
+    assert suffixed.e_number == "E150D"
+    assert plain.e_number != suffixed.e_number
+    assert plain.id != suffixed.id
+
+    # Latin-script spelling of the same two must resolve identically
+    # (same canonical e_number, same id) to its Cyrillic counterpart --
+    # Cyrillic/Latin is a transcription difference, not a different
+    # ingredient.
+    assert create_synthetic_ingredient("E150").id == plain.id
+    assert create_synthetic_ingredient("E150d").id == suffixed.id
+
+
+def test_bare_cyrillic_number_without_e_prefix_is_never_inferred_as_an_e_number():
+    """A bare number on a label (e.g. a quantity, a lot code) must never
+    be silently promoted to an E-number just because it LOOKS like one
+    -- only a literal "E"/"Е" prefix in the source text is evidence."""
+    bare = create_synthetic_ingredient("300")
+    assert bare.e_number is None
+    assert bare.category == "Ingredient"  # never "Food Additive (E300)"

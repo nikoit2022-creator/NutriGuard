@@ -15,7 +15,11 @@ from app.services.ingredient_normalization import normalize_ingredient_name
 
 _BRACKET_OR_PERCENT = re.compile(r"\[.*?\]|\(.*?%\)")
 _NON_WORD_EDGES = re.compile(r"^\W+|\W+$")
-_E_NUMBER = re.compile(r"e[- ]?(\d{3,4}[a-z]?)", re.IGNORECASE)
+# Bulgarian labels routinely spell E-numbers with the CYRILLIC letter "Е"
+# (U+0415), visually identical to Latin "E". Accept both so "Е300" is
+# recognised as E300 instead of degrading to a bare "300" with no match.
+_E_NUMBER = re.compile(r"[e\u0435][- ]?(\d{3,4}[a-z]?)", re.IGNORECASE)
+_CYRILLIC_E_BEFORE_NUMBER = re.compile(r"(?<![^\W\d_])[\u0415\u0435](?=[- ]?\d{3,4}[A-Za-z]?\b)")
 
 # `Ingredient.id` is `String(64)` (see app/models/ingredient.py) -- every
 # synthetic id generated below MUST fit inside that limit regardless of
@@ -37,6 +41,9 @@ class NormalizedIngredientResult:
 
 
 def normalize_and_extract_tokens(raw_text: str) -> list[str]:
+    # Fold Cyrillic "Е" used as an E-number prefix to Latin "E" so token
+    # text, deterministic ids and E-number matching are all consistent.
+    raw_text = _CYRILLIC_E_BEFORE_NUMBER.sub("E", raw_text)
     cleaned = _BRACKET_OR_PERCENT.sub("", raw_text)
     cleaned = cleaned.replace("\n", " ")
     cleaned = re.sub(re.escape("Ingredients:"), "", cleaned, flags=re.IGNORECASE)
@@ -267,7 +274,22 @@ def create_synthetic_ingredient(name: str) -> SyntheticIngredient:
     always the safe, neutral default (never inferred from a keyword in
     the OCR name) and `risk_assessment_available=False` tells callers
     (Health Score, API clients) that it is not a real assessment.
+
+    Folds a CYRILLIC "Е" E-number prefix to Latin "E" HERE, not only in
+    `normalize_and_extract_tokens` -- this function is also called
+    directly on text that never went through that tokenizer (e.g.
+    `gemini_image_parser._resolve_ingredients`, which builds a
+    synthetic ingredient straight from Gemini's own structured
+    `commonName`/`eNumber` fields, which may themselves still be
+    Cyrillic-script for a Bulgarian/Russian/Ukrainian/Serbian label).
+    Without this, the SAME E-number would mint two different ids
+    depending on which script happened to reach this function, and a
+    caller that passes raw Cyrillic text here directly would get an id
+    `reconstruct_synthetic_ingredient` could never re-derive by
+    re-tokenizing (which always folds first) -- exactly this module's
+    own "existing damaged records" failure mode.
     """
+    name = _CYRILLIC_E_BEFORE_NUMBER.sub("E", name)
     lower = name.lower()
     e_match = _E_NUMBER.search(lower)
     formatted_e = ("E" + e_match.group(1).upper()) if e_match else None
