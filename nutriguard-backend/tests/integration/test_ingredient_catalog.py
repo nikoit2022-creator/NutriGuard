@@ -703,3 +703,81 @@ async def test_official_identifier_match_with_no_prior_alias_conflict_is_unaffec
 
     assert resolved.id == curated.id
     assert await ingredient_repository.count(db_session) == 1
+
+
+# --- E-number case normalization (E150D / E150d duplicate root cause) ------
+
+
+def _e150d_curated() -> Ingredient:
+    return _seeded_ingredient(
+        id="e150d_sulphite_ammonia_caramel",
+        common_name="Sulphite ammonia caramel",
+        normalized_name="sulphite ammonia caramel",
+        e_number="E150d",
+        ins_number="150d",
+        verification_status=IngredientVerificationStatus.LIMITED_DATA,
+    )
+
+
+@pytest.mark.asyncio
+async def test_official_identifier_lookup_ignores_suffix_case(db_session):
+    db_session.add(_e150d_curated())
+    await db_session.flush()
+
+    for spelling in ("E150D", "E150d", "e150d", " E150d "):
+        found = await ingredient_repository.get_by_official_identifier(db_session, e_number=spelling)
+        assert found is not None and found.id == "e150d_sulphite_ammonia_caramel", spelling
+    assert (await ingredient_repository.get_by_official_identifier(db_session, ins_number="150D")).id == (
+        "e150d_sulphite_ammonia_caramel"
+    )
+
+
+@pytest.mark.asyncio
+async def test_official_identifier_lookup_keeps_subtype_distinctions(db_session):
+    db_session.add(_e150d_curated())
+    await db_session.flush()
+
+    for other in ("E150a", "E150B", "E150c", "E150", "E1500", "E15"):
+        assert await ingredient_repository.get_by_official_identifier(db_session, e_number=other) is None, other
+
+
+@pytest.mark.asyncio
+async def test_ocr_e150d_resolves_to_the_curated_row_instead_of_minting_a_duplicate(db_session):
+    db_session.add(_e150d_curated())
+    await db_session.flush()
+
+    synthetic = create_synthetic_ingredient("Colorant: e150d")
+    assert synthetic.e_number == "E150D"  # OCR upper-cases the suffix
+
+    resolved = await ingredient_catalog.get_or_create_catalog_ingredient(db_session, synthetic)
+
+    assert resolved.id == "e150d_sulphite_ammonia_caramel"
+    assert await ingredient_repository.count(db_session) == 1  # no E150D twin created
+
+
+@pytest.mark.asyncio
+async def test_lookup_is_deterministic_when_legacy_case_duplicates_already_exist(db_session):
+    """Live data already holds BOTH an OCR "E150D" row and the curated
+    "E150d" row; lookup must pick the curated one every time and must not
+    raise on multiple matches."""
+    legacy_ocr = _seeded_ingredient(
+        id="synth_colorant_e150d_0495700507e9",
+        common_name="Colorant: e150d",
+        normalized_name="colorant: e150d",
+        e_number="E150D",
+        ins_number="150D",
+        verification_status=IngredientVerificationStatus.UNVERIFIED,
+        source=IngredientSource.OCR_HEURISTIC,
+        confidence=0.2,
+    )
+    db_session.add_all([legacy_ocr, _e150d_curated()])
+    await db_session.flush()
+
+    for _ in range(3):
+        found = await ingredient_repository.get_by_official_identifier(db_session, e_number="E150D")
+        assert found.id == "e150d_sulphite_ammonia_caramel"
+    assert (await ingredient_repository.get_by_id_or_e_number(db_session, "E150D")).id == (
+        "e150d_sulphite_ammonia_caramel"
+    )
+    # an exact id still wins over an E-number spelling
+    assert (await ingredient_repository.get_by_id_or_e_number(db_session, legacy_ocr.id)).id == legacy_ocr.id

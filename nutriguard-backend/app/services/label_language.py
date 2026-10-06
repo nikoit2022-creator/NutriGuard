@@ -155,7 +155,17 @@ class _TranslationPayload(BaseModel):
 # result), THAT mismatch is what these checks catch, the same as any
 # other unreliable translation.
 
-_E_NUMBER_RE = re.compile(r"\bE[- ]?(\d{3,4}[A-Za-z]?)\b", re.IGNORECASE)
+# Bulgarian/Russian/Ukrainian/Serbian source text routinely spells
+# E-numbers with the CYRILLIC letter "Е" (U+0415/U+0435), visually
+# identical to Latin "E" -- see `app.services.ocr_normalizer._E_NUMBER`.
+# Source text here may be in any of those scripts (this check runs on
+# whatever `source_text` the caller passes, not only Bulgarian), so the
+# same dual-script acceptance applies: without it, a Cyrillic source
+# E-number is invisible to this count while the Latin-script translated
+# text's matching E-number is not, making a CORRECT translation look
+# like it invented an E-number (or dropped one), and rejecting it as
+# unreliable.
+_E_NUMBER_RE = re.compile(r"\b[eе][- ]?(\d{3,4}[A-Za-z]?)\b", re.IGNORECASE)
 # A bare number (optionally with a decimal part, comma OR dot), not
 # immediately preceded by a letter/digit (so the "211" in "E211" is
 # never counted as a standalone numeric value -- it's already covered

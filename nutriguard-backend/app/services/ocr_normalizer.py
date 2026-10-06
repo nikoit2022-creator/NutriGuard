@@ -8,14 +8,20 @@ section 7.3).
 import hashlib
 import re
 from dataclasses import dataclass, replace
+from enum import Enum
 from typing import Any
 
 from app.models.enums import TRUSTED_INGREDIENT_SOURCES, IngredientSource, RiskLevel
 from app.services.ingredient_normalization import normalize_ingredient_name
+from app.services.label_language import bulgarian_ingredient_alias
 
 _BRACKET_OR_PERCENT = re.compile(r"\[.*?\]|\(.*?%\)")
 _NON_WORD_EDGES = re.compile(r"^\W+|\W+$")
-_E_NUMBER = re.compile(r"e[- ]?(\d{3,4}[a-z]?)", re.IGNORECASE)
+# Bulgarian labels routinely spell E-numbers with the CYRILLIC letter "Е"
+# (U+0415), visually identical to Latin "E". Accept both so "Е300" is
+# recognised as E300 instead of degrading to a bare "300" with no match.
+_E_NUMBER = re.compile(r"[e\u0435][- ]?(\d{3,4}[a-z]?)", re.IGNORECASE)
+_CYRILLIC_E_BEFORE_NUMBER = re.compile(r"(?<![^\W\d_])[\u0415\u0435](?=[- ]?\d{3,4}[A-Za-z]?\b)")
 
 # `Ingredient.id` is `String(64)` (see app/models/ingredient.py) -- every
 # synthetic id generated below MUST fit inside that limit regardless of
@@ -36,7 +42,14 @@ class NormalizedIngredientResult:
     raw_tokens: list[str]
 
 
-def normalize_and_extract_tokens(raw_text: str) -> list[str]:
+def normalize_and_extract_tokens(raw_text: str, *, fold_cyrillic_e: bool = True) -> list[str]:
+    # Fold Cyrillic "Е" used as an E-number prefix to Latin "E" so token
+    # text, deterministic ids and E-number matching are all consistent.
+    # `fold_cyrillic_e=False` exists ONLY so `resolve_synthetic_identity`
+    # can reproduce the token text pre-fold code hashed; never use it to
+    # build a NEW id.
+    if fold_cyrillic_e:
+        raw_text = _CYRILLIC_E_BEFORE_NUMBER.sub("E", raw_text)
     cleaned = _BRACKET_OR_PERCENT.sub("", raw_text)
     cleaned = cleaned.replace("\n", " ")
     cleaned = re.sub(re.escape("Ingredients:"), "", cleaned, flags=re.IGNORECASE)
@@ -267,7 +280,22 @@ def create_synthetic_ingredient(name: str) -> SyntheticIngredient:
     always the safe, neutral default (never inferred from a keyword in
     the OCR name) and `risk_assessment_available=False` tells callers
     (Health Score, API clients) that it is not a real assessment.
+
+    Folds a CYRILLIC "Е" E-number prefix to Latin "E" HERE, not only in
+    `normalize_and_extract_tokens` -- this function is also called
+    directly on text that never went through that tokenizer (e.g.
+    `gemini_image_parser._resolve_ingredients`, which builds a
+    synthetic ingredient straight from Gemini's own structured
+    `commonName`/`eNumber` fields, which may themselves still be
+    Cyrillic-script for a Bulgarian/Russian/Ukrainian/Serbian label).
+    Without this, the SAME E-number would mint two different ids
+    depending on which script happened to reach this function, and a
+    caller that passes raw Cyrillic text here directly would get an id
+    `reconstruct_synthetic_ingredient` could never re-derive by
+    re-tokenizing (which always folds first) -- exactly this module's
+    own "existing damaged records" failure mode.
     """
+    name = _CYRILLIC_E_BEFORE_NUMBER.sub("E", name)
     lower = name.lower()
     e_match = _E_NUMBER.search(lower)
     formatted_e = ("E" + e_match.group(1).upper()) if e_match else None
@@ -318,19 +346,127 @@ def create_synthetic_ingredient(name: str) -> SyntheticIngredient:
     )
 
 
+class SyntheticIdentityMatch(str, Enum):
+    CURRENT = "CURRENT"
+    LEGACY_CYRILLIC_E = "LEGACY_CYRILLIC_E"
+    LEGACY_ALIAS = "LEGACY_ALIAS"
+    LEGACY_BARE_SLUG = "LEGACY_BARE_SLUG"
+    LEGACY_HASH10 = "LEGACY_HASH10"
+    AMBIGUOUS = "AMBIGUOUS"
+    NONE = "NONE"
+
+
+@dataclass(frozen=True)
+class SyntheticIdentityResolution:
+    match: SyntheticIdentityMatch
+    ingredient: SyntheticIngredient | None = None
+
+
+def _identity_key(ing: SyntheticIngredient) -> tuple[str, str | None]:
+    return (ing.common_name.casefold(), ing.e_number)
+
+
+def _legacy_slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9_]", "", text.lower().replace(" ", "_"))
+
+
+def _legacy_bare_slug_id(text: str) -> str | None:
+    """Generation 0 (commit 3add7a1): ``synth_<slug>``, no hash, no
+    underscore collapsing. Every non-ASCII-only name collapses onto a
+    near-empty slug, so such ids are usually AMBIGUOUS by construction."""
+    return f"{_ID_PREFIX}{_legacy_slug(text)}"
+
+
+def _legacy_hash10_id(text: str) -> str | None:
+    """Generation 1 (commits 09f6136..1d8c3d9): same as generation 0, but a
+    name whose slug was EMPTY got ``synth_`` + sha1(name)[:10]."""
+    if _legacy_slug(text):
+        return None
+    return f"{_ID_PREFIX}{hashlib.sha1(text.encode('utf-8')).hexdigest()[:10]}"
+
+
+def resolve_synthetic_identity(ingredient_id: str, raw_text: str) -> SyntheticIdentityResolution:
+    """Deterministically match a STORED synthetic id to a token of the
+    STORED original text (never to the id alone, never to a bare number).
+
+    Order: (1) today's id; (2) ids older code minted, only when the
+    stored text itself supports them --
+      - LEGACY_CYRILLIC_E: pre-fold code hashed the UNFOLDED token, so a
+        token carrying a literal Cyrillic "Е"+digits E-number prefix has
+        a different legacy id than today's. Recovered as today's folded
+        ingredient (its E-number is literally in the stored text).
+      - LEGACY_ALIAS: pre-fix code hashed the Bulgarian ALIAS text
+        ("Water" for "Вода") while the stored text kept the original.
+        Recovered as the ORIGINAL token, as a fresh scan now builds it.
+      - LEGACY_BARE_SLUG / LEGACY_HASH10: ids of the two earliest
+        generations (no content hash / 10-hex hash for an empty slug),
+        still present in live data. Matched only through a stored token.
+    A stage that matches tokens yielding different identities is
+    AMBIGUOUS and recovers nothing (the caller keeps its readable-slug
+    fallback). The stored id is never rewritten here."""
+    tokens = normalize_and_extract_tokens(raw_text or "")
+    for token in tokens:
+        candidate = create_synthetic_ingredient(token)
+        if candidate.id == ingredient_id:
+            return SyntheticIdentityResolution(SyntheticIdentityMatch.CURRENT, candidate)
+
+    unfolded = normalize_and_extract_tokens(raw_text or "", fold_cyrillic_e=False)
+    if len(unfolded) != len(tokens):  # folding only swaps a letter; never expected
+        unfolded = list(tokens)
+
+    def _stage(kind, id_of):
+        """Ingredients (built from today's folded token) whose token --
+        optionally via its Bulgarian alias -- hashes to the stored id
+        under one generation's `id_of`. `id_of(text)` returns None to
+        skip a text that generation could not have minted."""
+        out = []
+        for folded, raw in zip(tokens, unfolded):
+            alias = bulgarian_ingredient_alias(raw)
+            if kind == "alias":
+                texts = [alias] if alias else []
+            else:
+                texts = [raw]
+            if any(id_of(t) == ingredient_id for t in texts):
+                out.append(create_synthetic_ingredient(folded))
+        return out
+
+    stages = (
+        (
+            SyntheticIdentityMatch.LEGACY_CYRILLIC_E,
+            [
+                create_synthetic_ingredient(folded)
+                for folded, raw in zip(tokens, unfolded)
+                if folded != raw and _synthetic_id(raw) == ingredient_id
+            ],
+        ),
+        (SyntheticIdentityMatch.LEGACY_ALIAS, _stage("alias", _synthetic_id)),
+        # Generation 0 (baseline) minted "synth_" + slug with NO hash, and
+        # generation 1 a 10-hex hash only when that slug was empty.
+        (SyntheticIdentityMatch.LEGACY_BARE_SLUG, _stage("text", _legacy_bare_slug_id) + _stage("alias", _legacy_bare_slug_id)),
+        (SyntheticIdentityMatch.LEGACY_HASH10, _stage("text", _legacy_hash10_id) + _stage("alias", _legacy_hash10_id)),
+    )
+    for match, candidates in stages:
+        if not candidates:
+            continue
+        if len({_identity_key(c) for c in candidates}) > 1:
+            return SyntheticIdentityResolution(SyntheticIdentityMatch.AMBIGUOUS)
+        return SyntheticIdentityResolution(match, replace(candidates[0], id=ingredient_id))
+    return SyntheticIdentityResolution(SyntheticIdentityMatch.NONE)
+
+
 def reconstruct_synthetic_ingredient(ingredient_id: str, raw_text: str) -> SyntheticIngredient:
     """Recover a synthetic ingredient's human label from persisted OCR text.
 
     Products historically stored only synthetic IDs. Rebuilding directly
     from that ID exposed implementation strings such as ``Synth_5ecbec8146``
     to users and permanently lost Cyrillic names. Recreate each raw token and
-    match its deterministic ID first; use a readable legacy fallback only
+    match its deterministic ID first (including ids minted by older code,
+    see `resolve_synthetic_identity`); use a readable legacy fallback only
     when the original token is genuinely unavailable.
     """
-    for token in normalize_and_extract_tokens(raw_text or ""):
-        candidate = create_synthetic_ingredient(token)
-        if candidate.id == ingredient_id:
-            return candidate
+    resolution = resolve_synthetic_identity(ingredient_id, raw_text)
+    if resolution.ingredient is not None:
+        return resolution.ingredient
 
     # Current id shape (see `_synthetic_id`) is "<slug>_<hash>" or, when
     # the name had no ASCII-alphanumeric characters at all, just

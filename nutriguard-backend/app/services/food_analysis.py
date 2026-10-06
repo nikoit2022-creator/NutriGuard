@@ -156,6 +156,7 @@ from app.services.ocr_normalizer import (
     match_against_database,
     normalize_and_extract_tokens,
     reconstruct_synthetic_ingredient,
+    resolve_synthetic_identity,
 )
 from app.services.warning_engine import HealthWarning
 
@@ -187,6 +188,38 @@ async def _run_ai_or_fallback(title_hint: str, raw_text: str, db_ingredients: li
 
 def _ingredient_ids_string(ingredients: list[Any]) -> str:
     return ",".join(ing.id for ing in ingredients)
+
+
+def _synthesize_unknown_from_original_text(
+    tokens: list[str], matchable_tokens: list[str], norm: "NormalizedIngredientResult"
+) -> list[Any]:
+    """`norm.unknown_ingredients` (see `match_against_database`) is
+    computed against `matchable_tokens` -- the Bulgarian-alias-
+    substituted list built so an English and a Bulgarian mention of the
+    same ingredient match/dedupe together (see
+    `label_language.bulgarian_ingredient_alias`). Building the synthetic
+    ingredient straight from that SUBSTITUTED text would silently
+    replace a Bulgarian token's displayed identity with its English
+    alias -- contradicting `bulgarian_ingredient_alias`'s own documented
+    contract ("never alter the stored/displayed text") -- and would
+    desynchronize the new ingredient's id from `Product.
+    raw_ingredient_text`, which still holds the ORIGINAL, unsubstituted
+    text: `reconstruct_synthetic_ingredient` re-tokenizes that exact
+    original text on every later read and can never reproduce an id
+    generated from an alias it has no record of. Recovering the first
+    original token that produced each unknown matchable value and
+    building the synthetic ingredient from THAT keeps the stored text
+    and the id it's keyed under self-consistent, while still getting
+    the dedup benefit of matching on the alias (two original tokens that
+    alias to the same matchable value still collapse to one entry
+    here, exactly as `match_against_database` already deduped them)."""
+    original_by_matchable: dict[str, str] = {}
+    for original, matchable in zip(tokens, matchable_tokens):
+        original_by_matchable.setdefault(matchable, original)
+    return [
+        create_synthetic_ingredient(original_by_matchable.get(unknown, unknown))
+        for unknown in norm.unknown_ingredients
+    ]
 
 
 def _to_product_model(
@@ -780,8 +813,32 @@ async def fetch_ingredients_for_product(db: AsyncSession, product: Product) -> l
                 await ingredient_catalog.resolve_canonical_alias_owner(db, by_id[ingredient_id])
             )
         else:
-            resolved.append(reconstruct_synthetic_ingredient(ingredient_id, product.raw_ingredient_text))
+            resolved.append(await _resolve_unmatched_reference(db, ingredient_id, product.raw_ingredient_text))
     return resolved
+
+
+async def _resolve_unmatched_reference(db: AsyncSession, ingredient_id: str, raw_text: str) -> Any:
+    """Read-only resolution of a stored id that is not a catalogue row.
+
+    A stored id is recovered ONLY when a token of the stored text
+    deterministically reproduces it (`resolve_synthetic_identity`: current
+    or legacy id, unambiguous). When that token literally carries an
+    E-number, the catalogue row that owns the official identifier is
+    returned (the same E-number-first rule a fresh scan uses), so content
+    added to the catalogue AFTER the product was saved is reached, for
+    current-format ids as well as legacy ones. Nothing is written and the
+    stored id is never rewritten. A bare number is never turned into an
+    E-number, and an ambiguous or unsupported id keeps the readable-slug
+    fallback (fail closed)."""
+    resolution = resolve_synthetic_identity(ingredient_id, raw_text)
+    if resolution.ingredient is None:
+        return reconstruct_synthetic_ingredient(ingredient_id, raw_text)
+    synthetic = resolution.ingredient
+    if synthetic.e_number:
+        row = await ingredient_repository.get_by_official_identifier(db, e_number=synthetic.e_number)
+        if row is not None:
+            return await ingredient_catalog.resolve_canonical_alias_owner(db, row)
+    return synthetic
 
 
 async def _get_profile_namespace(db: AsyncSession, user_id: uuid.UUID) -> SimpleNamespace:
@@ -1590,8 +1647,7 @@ async def _finalize_barcode_enrichment(
         matchable_tokens = [label_language.bulgarian_ingredient_alias(t) or t for t in tokens]
         norm = match_against_database(matchable_tokens, await ingredient_repository.get_all(db))
         rebuilt: list[Any] = list(norm.matched_ingredients)
-        for unknown in norm.unknown_ingredients:
-            rebuilt.append(create_synthetic_ingredient(unknown))
+        rebuilt.extend(_synthesize_unknown_from_original_text(tokens, matchable_tokens, norm))
         if rebuilt:
             # Persistent ingredient knowledge cache -- see
             # `ingredient_catalog`'s module docstring.
@@ -1951,8 +2007,7 @@ async def _finalize_standalone_label_analysis(
         matchable_tokens = [label_language.bulgarian_ingredient_alias(t) or t for t in tokens]
         norm = match_against_database(matchable_tokens, await ingredient_repository.get_all(db))
         rebuilt: list[Any] = list(norm.matched_ingredients)
-        for unknown in norm.unknown_ingredients:
-            rebuilt.append(create_synthetic_ingredient(unknown))
+        rebuilt.extend(_synthesize_unknown_from_original_text(tokens, matchable_tokens, norm))
         if rebuilt:
             # Persistent ingredient knowledge cache -- see
             # `ingredient_catalog`'s module docstring.
