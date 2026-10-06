@@ -18,6 +18,10 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.coroutineContext
+import com.example.data.diagnostics.ScanTraceContext
+import com.example.data.diagnostics.LocalScanStage
+import com.example.data.diagnostics.LocalScanOutcome
 
 class NutriGuardApiService(
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
@@ -27,6 +31,34 @@ class NutriGuardApiService(
         .build()
 ) {
     private val baseUrl: String = BuildConfig.BACKEND_BASE_URL.trimEnd('/')
+    // Avoid invisible OkHttp retries with the same request sequence. Auth retry is explicit.
+    private val scanHttpClient = httpClient.newBuilder().retryOnConnectionFailure(false)
+        .followRedirects(false).followSslRedirects(false).build()
+
+    private suspend fun recordResponse(response: okhttp3.Response) {
+        coroutineContext[ScanTraceContext]?.let { trace ->
+            trace.reason = when (response.code) {
+                401 -> com.example.data.diagnostics.ScanReason.AUTH_EXPIRED
+                429 -> com.example.data.diagnostics.ScanReason.RATE_LIMITED
+                422 -> com.example.data.diagnostics.ScanReason.VALIDATION_REJECTED
+                in 500..599 -> com.example.data.diagnostics.ScanReason.SERVER_ERROR
+                else -> null
+            }
+            trace.serverAttemptId = response.header("X-Scan-Attempt-Id")?.let { raw ->
+                runCatching { com.example.data.diagnostics.ScanAttemptId(raw) }.getOrNull()
+            }
+            trace.record(LocalScanStage.RESPONSE, if (response.isSuccessful) LocalScanOutcome.SUCCEEDED else LocalScanOutcome.FAILED)
+        }
+    }
+
+    private suspend fun Request.Builder.withScanTrace(): Request.Builder {
+        val trace = coroutineContext[ScanTraceContext] ?: return this
+        val sequence = trace.nextRequest()
+        trace.record(LocalScanStage.REQUEST, LocalScanOutcome.STARTED)
+        return header("X-Scan-Attempt-Id", trace.id.value)
+            .header("X-Scan-Request-Sequence", sequence.toString())
+            .tag(ScanTraceContext::class.java, trace)
+    }
 
     // Barcode discovery may query several external providers sequentially
     // server-side (Open Food Facts, GS1, UPCitemdb) before answering, so
@@ -38,7 +70,7 @@ class NutriGuardApiService(
     // here; connect/read/write on the derived client stay inherited
     // from `httpClient`, only capped tighter by the overall call bound.
     private val barcodeHttpClient: OkHttpClient by lazy {
-        httpClient.newBuilder()
+        scanHttpClient.newBuilder()
             .callTimeout(BARCODE_CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .build()
     }
@@ -63,17 +95,20 @@ class NutriGuardApiService(
             .url(endpointUrl)
             .post(jsonPayload.toString().toRequestBody("application/json".toMediaType()))
             .header("Accept", "application/json")
+            .withScanTrace()
             .build()
 
         val response = try {
             barcodeHttpClient.newCall(request).execute()
         } catch (e: SocketTimeoutException) {
+            coroutineContext[ScanTraceContext]?.reason = com.example.data.diagnostics.ScanReason.NETWORK_TIMEOUT
             Log.w(TAG, "Barcode lookup timed out calling $endpointUrl")
             throw BarcodeTimeoutException(
                 "The product lookup is taking too long. Please check your connection and try again.",
                 e
             )
         } catch (e: IOException) {
+            coroutineContext[ScanTraceContext]?.reason = com.example.data.diagnostics.ScanReason.NETWORK_OFFLINE
             Log.e(TAG, "Network connection failure to $endpointUrl: ${e.localizedMessage}", e)
             throw BarcodeNetworkException(
                 "Unable to reach the NutriGuard server. Check your network connection and try again.",
@@ -82,6 +117,7 @@ class NutriGuardApiService(
         }
 
         response.use { resp ->
+            recordResponse(resp)
             val responseBody = resp.body?.string() ?: ""
             if (!resp.isSuccessful) {
                 handleUnsuccessfulResponse(resp.code, responseBody)
@@ -90,9 +126,12 @@ class NutriGuardApiService(
             try {
                 val jsonObject = JSONObject(responseBody)
                 val dto = ScanLabelImageResponseDto.fromJson(jsonObject)
-                return@withContext dto.toParsedEntities()
+                val parsed = dto.toParsedEntities()
+                coroutineContext[ScanTraceContext]?.record?.invoke(LocalScanStage.PARSING, LocalScanOutcome.SUCCEEDED)
+                return@withContext parsed
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to parse backend barcode response JSON: ${e.localizedMessage}", e)
+                coroutineContext[ScanTraceContext]?.let { it.reason = com.example.data.diagnostics.ScanReason.DECODE_ERROR; it.record(LocalScanStage.PARSING, LocalScanOutcome.FAILED) }
+                Log.e(TAG, "Failed to parse backend response JSON")
                 throw BarcodeParseException("Received an unexpected response from the server.", e)
             }
         }
@@ -133,6 +172,7 @@ class NutriGuardApiService(
             .url(endpointUrl)
             .post(jsonPayload.toString().toRequestBody("application/json".toMediaType()))
             .header("Accept", "application/json")
+            .withScanTrace()
             .build()
 
         // Deliberately the base httpClient (same one scanLabelImage
@@ -141,14 +181,16 @@ class NutriGuardApiService(
         // processing a label-image scan does, and no new timeout
         // configuration was requested for this endpoint.
         val response = try {
-            httpClient.newCall(request).execute()
+            scanHttpClient.newCall(request).execute()
         } catch (e: SocketTimeoutException) {
+            coroutineContext[ScanTraceContext]?.reason = com.example.data.diagnostics.ScanReason.NETWORK_TIMEOUT
             Log.w(TAG, "OCR text analysis timed out calling $endpointUrl")
             throw BarcodeTimeoutException(
                 "The text analysis is taking too long. Please check your connection and try again.",
                 e
             )
         } catch (e: IOException) {
+            coroutineContext[ScanTraceContext]?.reason = com.example.data.diagnostics.ScanReason.NETWORK_OFFLINE
             Log.e(TAG, "Network connection failure to $endpointUrl: ${e.localizedMessage}", e)
             throw BarcodeNetworkException(
                 "Unable to reach the NutriGuard server. Check your network connection and try again.",
@@ -157,6 +199,7 @@ class NutriGuardApiService(
         }
 
         response.use { resp ->
+            recordResponse(resp)
             val responseBody = resp.body?.string() ?: ""
             if (!resp.isSuccessful) {
                 handleUnsuccessfulResponse(resp.code, responseBody)
@@ -165,9 +208,12 @@ class NutriGuardApiService(
             try {
                 val jsonObject = JSONObject(responseBody)
                 val dto = ScanLabelImageResponseDto.fromJson(jsonObject)
-                return@withContext dto.toParsedEntities()
+                val parsed = dto.toParsedEntities()
+                coroutineContext[ScanTraceContext]?.record?.invoke(LocalScanStage.PARSING, LocalScanOutcome.SUCCEEDED)
+                return@withContext parsed
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to parse backend OCR text response JSON: ${e.localizedMessage}", e)
+                coroutineContext[ScanTraceContext]?.let { it.reason = com.example.data.diagnostics.ScanReason.DECODE_ERROR; it.record(LocalScanStage.PARSING, LocalScanOutcome.FAILED) }
+                Log.e(TAG, "Failed to parse backend response JSON")
                 throw BarcodeParseException("Received an unexpected response from the server.", e)
             }
         }
@@ -196,12 +242,27 @@ class NutriGuardApiService(
      * uses, for identical typed error handling on both endpoints.
      */
     suspend fun scanLabelImage(bitmap: Bitmap, barcode: String? = null): ParsedScanData = withContext(Dispatchers.IO) {
+        coroutineContext[ScanTraceContext]?.record?.invoke(LocalScanStage.IMAGE_PREPARATION, LocalScanOutcome.STARTED)
         val stream = ByteArrayOutputStream()
         val compressSuccess = bitmap.compress(Bitmap.CompressFormat.JPEG, 80, stream)
         if (!compressSuccess) {
+            coroutineContext[ScanTraceContext]?.let {
+                it.reason = com.example.data.diagnostics.ScanReason.DECODE_ERROR
+                it.record(LocalScanStage.IMAGE_PREPARATION, LocalScanOutcome.FAILED)
+            }
             throw IOException("Failed to compress image bitmap to JPEG format")
         }
         val byteArray = stream.toByteArray()
+        coroutineContext[ScanTraceContext]?.recordMetrics?.invoke(
+            LocalScanStage.IMAGE_PREPARATION,
+            LocalScanOutcome.SUCCEEDED,
+            mapOf(
+                "imageWidthPx" to bitmap.width.toDouble(),
+                "imageHeightPx" to bitmap.height.toDouble(),
+                "imageBytes" to byteArray.size.toDouble(),
+                "uploadBytes" to byteArray.size.toDouble()
+            )
+        )
         val cleanedBarcode = barcode?.trim()?.takeIf { it.isNotEmpty() }
         val requestBody = buildLabelImageRequestBody(byteArray, cleanedBarcode)
 
@@ -216,20 +277,23 @@ class NutriGuardApiService(
             .url(endpointUrl)
             .post(requestBody)
             .header("Accept", "application/json")
+            .withScanTrace()
             .build()
 
         // Deliberately the base httpClient, unmodified -- image upload
         // must keep its existing connect/read/write timeouts exactly as
         // configured above, not the barcode-lookup call's shorter bound.
         val response = try {
-            httpClient.newCall(request).execute()
+            scanHttpClient.newCall(request).execute()
         } catch (e: SocketTimeoutException) {
+            coroutineContext[ScanTraceContext]?.reason = com.example.data.diagnostics.ScanReason.NETWORK_TIMEOUT
             Log.w(TAG, "Label image upload timed out calling $endpointUrl")
             throw BarcodeTimeoutException(
                 "The label analysis is taking too long. Please check your connection and try again.",
                 e
             )
         } catch (e: IOException) {
+            coroutineContext[ScanTraceContext]?.reason = com.example.data.diagnostics.ScanReason.NETWORK_OFFLINE
             Log.e(TAG, "Network connection failure to $endpointUrl: ${e.localizedMessage}", e)
             throw BarcodeNetworkException(
                 "Unable to reach the NutriGuard server. Check your network connection and try again.",
@@ -238,6 +302,7 @@ class NutriGuardApiService(
         }
 
         response.use { resp ->
+            recordResponse(resp)
             val responseBody = resp.body?.string() ?: ""
             if (!resp.isSuccessful) {
                 handleUnsuccessfulResponse(resp.code, responseBody)
@@ -246,9 +311,12 @@ class NutriGuardApiService(
             try {
                 val jsonObject = JSONObject(responseBody)
                 val dto = ScanLabelImageResponseDto.fromJson(jsonObject)
-                return@withContext dto.toParsedEntities()
+                val parsed = dto.toParsedEntities()
+                coroutineContext[ScanTraceContext]?.record?.invoke(LocalScanStage.PARSING, LocalScanOutcome.SUCCEEDED)
+                return@withContext parsed
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to parse backend response JSON: ${e.localizedMessage}. Response was: $responseBody", e)
+                coroutineContext[ScanTraceContext]?.let { it.reason = com.example.data.diagnostics.ScanReason.DECODE_ERROR; it.record(LocalScanStage.PARSING, LocalScanOutcome.FAILED) }
+                Log.e(TAG, "Failed to parse backend response JSON")
                 throw BarcodeParseException("Received an unexpected response from the server.", e)
             }
         }

@@ -10,6 +10,22 @@ import org.junit.Test
 
 class RecognizedIngredientUiModelTest {
     @Test
+    fun emptyLocalizationDoesNotEnableEmptyDetails() {
+        val empty = ingredient(description = "", purpose = "", evidence = "", riskAssessmentAvailable = false)
+            .copy(references = "", localizationsJson = """{"en":{"commonName":"Water"},"bg":{"commonName":"Вода"}}""")
+        org.junit.Assert.assertFalse(com.example.ui.components.hasUsefulIngredientDetails(empty))
+        org.junit.Assert.assertFalse(com.example.ui.components.hasUsefulIngredientDetails(empty, AppLanguage.BULGARIAN))
+    }
+
+    @Test
+    fun localizedNarrativeEnablesDetailsOnlyForAvailableLanguage() {
+        val empty = ingredient(description = "", purpose = "", evidence = "", riskAssessmentAvailable = false)
+            .copy(references = "", localizationsJson = """{"bg":{"description":"Описание на съставката."}}""")
+        org.junit.Assert.assertFalse(com.example.ui.components.hasUsefulIngredientDetails(empty))
+        org.junit.Assert.assertTrue(com.example.ui.components.hasUsefulIngredientDetails(empty, AppLanguage.BULGARIAN))
+    }
+
+    @Test
     fun scoreBoundaries_mapToExpectedRatings() {
         assertEquals(IngredientSafetyRating.HIGH_CONCERN, ratingForSafetyScore(0))
         assertEquals(IngredientSafetyRating.HIGH_CONCERN, ratingForSafetyScore(29))

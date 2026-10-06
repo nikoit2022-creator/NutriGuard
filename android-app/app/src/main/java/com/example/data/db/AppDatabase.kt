@@ -23,9 +23,10 @@ import kotlinx.coroutines.launch
         IngredientEntity::class,
         ProductEntity::class,
         UserHealthProfile::class,
-        ScanHistoryEntity::class
+        ScanHistoryEntity::class,
+        com.example.data.diagnostics.ScanAttemptRecord::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -34,8 +35,15 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun productDao(): ProductDao
     abstract fun userHealthProfileDao(): UserHealthProfileDao
     abstract fun scanHistoryDao(): ScanHistoryDao
+    abstract fun scanAttemptDao(): com.example.data.diagnostics.ScanAttemptDao
 
     companion object {
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `scan_history` ADD COLUMN `scanAttemptId` TEXT")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `scan_attempts` (`scanAttemptId` TEXT NOT NULL, `input` TEXT NOT NULL, `startedAt` INTEGER NOT NULL, `outcome` TEXT NOT NULL, `serverAttemptId` TEXT, PRIMARY KEY(`scanAttemptId`))")
+            }
+        }
         private val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // Rebuild only the ingredient catalog table so the six
@@ -144,7 +152,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "nutriguard_db"
                 )
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .addCallback(object : Callback() {
                         override fun onCreate(db: SupportSQLiteDatabase) {
                             super.onCreate(db)

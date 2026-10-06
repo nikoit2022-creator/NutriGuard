@@ -60,6 +60,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -98,6 +99,9 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import java.io.File
+import com.example.data.diagnostics.ScanInput
+import com.example.data.diagnostics.ScanAttemptOutcome
+import com.example.ui.components.ScanAttemptFooter
 import kotlin.math.ceil
 import kotlin.math.max
 
@@ -113,6 +117,7 @@ fun ScanHomeScreen(
         Toast.makeText(context, localizeUiText(message, language), Toast.LENGTH_SHORT).show()
     }
     val recentScans by viewModel.scanHistory.collectAsState()
+    val scanAttempt by viewModel.scanAttempt.collectAsState()
     val barcodeLookupState by viewModel.barcodeLookupState.collectAsState()
     val pendingBarcode by viewModel.pendingBarcode.collectAsState()
     val labelCameraRequestBarcode by viewModel.labelCameraRequestBarcode.collectAsState()
@@ -121,28 +126,17 @@ fun ScanHomeScreen(
     var showManualEntry by remember { mutableStateOf(false) }
     var barcodeInput by remember { mutableStateOf("") }
     var rawTextInput by remember { mutableStateOf("") }
-    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingCameraUri by rememberSaveable { mutableStateOf<Uri?>(null) }
     // The app-owned File backing pendingCameraUri, tracked separately so
     // it can be deleted -- a gallery-picked content:// Uri (imagePickerLauncher,
     // below) never has one of these and must never be deleted by this screen.
-    var pendingCameraFile by remember { mutableStateOf<File?>(null) }
+    var pendingCameraFile by rememberSaveable { mutableStateOf<File?>(null) }
+    var cameraAttemptId by rememberSaveable { mutableStateOf<String?>(null) }
+    var galleryAttemptId by rememberSaveable { mutableStateOf<String?>(null) }
     var lastSubmittedBarcode by remember { mutableStateOf<String?>(null) }
     var selectedIngredient by remember { mutableStateOf<IngredientEntity?>(null) }
 
-    // If this screen is disposed (e.g. the user navigates away) while an
-    // ingredient-label capture was launched but its result was never
-    // delivered, the temp file would otherwise leak forever. Safe to run
-    // unconditionally: cameraLauncher's own callback clears
-    // pendingCameraFile to null as the very first thing it does, before
-    // it reads the file, so if this still sees a non-null file, nothing
-    // is actively reading it.
-    DisposableEffect(Unit) {
-        onDispose {
-            pendingCameraFile?.delete()
-            pendingCameraFile = null
-            pendingCameraUri = null
-        }
-    }
+    // Do not delete an in-flight capture on configuration change. Its callback owns cleanup.
 
     val isSearchingBarcode = barcodeLookupState is BarcodeLookupUiState.Searching
 
@@ -181,21 +175,35 @@ fun ScanHomeScreen(
         GmsBarcodeScanning.getClient(context, barcodeScannerOptions)
     }
     val startBarcodeScan: () -> Unit = {
+        if (viewModel.beginScanAttempt(ScanInput.BARCODE_CAMERA)) {
+        val attemptId = viewModel.scanAttempt.value?.id
+        try {
         barcodeScanner.startScan()
             .addOnSuccessListener { barcode ->
+                if (viewModel.scanAttempt.value?.id != attemptId || viewModel.scanAttempt.value?.outcome != null) return@addOnSuccessListener
                 val value = normalizeScannedBarcode(barcode.rawValue)
                 if (value != null) {
                     submitBarcode(value)
                 } else {
+                    viewModel.finishAcquisition(cancelled = false)
                     toast("No barcode value was detected.")
                 }
             }
             .addOnCanceledListener {
+                if (viewModel.scanAttempt.value?.id != attemptId) return@addOnCanceledListener
+                viewModel.finishAcquisition(cancelled = true)
                 // Stay on the scan screen when the user closes the scanner.
             }
             .addOnFailureListener {
+                if (viewModel.scanAttempt.value?.id != attemptId) return@addOnFailureListener
+                viewModel.finishAcquisition(cancelled = false)
                 toast("Unable to start barcode scanner.")
             }
+        } catch (_: Exception) {
+            viewModel.finishAcquisition(cancelled = false)
+            toast("Unable to start barcode scanner.")
+        }
+        }
     }
 
     // Both the gallery pick and the camera capture below call the SAME
@@ -211,16 +219,22 @@ fun ScanHomeScreen(
     val imagePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
+        // A restored interrupted attempt is terminal: never silently replay its operation.
+        val expectedId = galleryAttemptId
+        galleryAttemptId = null
+        if (expectedId == null || viewModel.scanAttempt.value?.id?.value != expectedId || viewModel.scanAttempt.value?.outcome != null) return@rememberLauncherForActivityResult
+        if (uri == null) viewModel.finishAcquisition(cancelled = true)
         uri?.let {
             try {
-                val inputStream = context.contentResolver.openInputStream(it)
-                val bitmap = BitmapFactory.decodeStream(inputStream)
+                val bitmap = context.contentResolver.openInputStream(it)?.use(BitmapFactory::decodeStream)
                 if (bitmap != null) {
                     viewModel.analyzeLabelImage(bitmap)
                 } else {
+                    viewModel.finishAcquisition(cancelled = false)
                     toast("Unable to read the selected image.")
                 }
             } catch (e: Exception) {
+                viewModel.finishAcquisition(cancelled = false)
                 toast("Unable to process the selected image.")
             }
         }
@@ -231,8 +245,15 @@ fun ScanHomeScreen(
     ) { captured ->
         val uri = pendingCameraUri
         val file = pendingCameraFile
+        val expectedId = cameraAttemptId
+        cameraAttemptId = null
         pendingCameraUri = null
         pendingCameraFile = null
+
+        if (expectedId == null || viewModel.scanAttempt.value?.id?.value != expectedId || viewModel.scanAttempt.value?.outcome != null) {
+            file?.delete()
+            return@rememberLauncherForActivityResult
+        }
 
         if (captured && uri != null) {
             try {
@@ -240,9 +261,11 @@ fun ScanHomeScreen(
                 if (bitmap != null) {
                     viewModel.analyzeLabelImage(bitmap)
                 } else {
+                    viewModel.finishAcquisition(cancelled = false)
                     toast("Unable to read the captured image.")
                 }
             } catch (_: Exception) {
+                viewModel.finishAcquisition(cancelled = false)
                 toast("Unable to process the captured image.")
             } finally {
                 // decodeCapturedBitmap has fully read the file into `bitmap`
@@ -251,6 +274,7 @@ fun ScanHomeScreen(
                 file?.delete()
             }
         } else {
+            viewModel.finishAcquisition(cancelled = !captured)
             // Cancelled (or captured with no URI, which shouldn't happen in
             // practice): nothing was ever read from the file.
             file?.delete()
@@ -258,6 +282,8 @@ fun ScanHomeScreen(
     }
 
     val startIngredientPhotoCapture: () -> Unit = {
+        if (viewModel.beginScanAttempt(ScanInput.LABEL_CAMERA)) {
+        cameraAttemptId = viewModel.scanAttempt.value?.id?.value
         var createdFile: File? = null
         try {
             val photoFile = File.createTempFile("ingredient_label_", ".jpg", context.cacheDir)
@@ -271,10 +297,12 @@ fun ScanHomeScreen(
             pendingCameraUri = uri
             cameraLauncher.launch(uri)
         } catch (_: Exception) {
+            viewModel.finishAcquisition(cancelled = false)
             createdFile?.delete()
             pendingCameraFile = null
             pendingCameraUri = null
             toast("Unable to open the camera.")
+        }
         }
     }
 
@@ -303,6 +331,7 @@ fun ScanHomeScreen(
             ) {
         // App Header
         item {
+            if (com.example.BuildConfig.DEBUG) com.example.ui.components.AppBuildLabel()
             Spacer(modifier = Modifier.height(NutriGuardSpacing.md))
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -463,7 +492,13 @@ fun ScanHomeScreen(
                                 Color.White,
                                 RoundedCornerShape(NutriGuardRadius.medium)
                             )
-                            .clickable { imagePickerLauncher.launch("image/*") },
+                            .clickable {
+                                if (viewModel.beginScanAttempt(ScanInput.LABEL_GALLERY)) {
+                                    galleryAttemptId = viewModel.scanAttempt.value?.id?.value
+                                    try { imagePickerLauncher.launch("image/*") }
+                                    catch (_: Exception) { viewModel.finishAcquisition(cancelled = false) }
+                                }
+                            },
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -555,6 +590,17 @@ fun ScanHomeScreen(
                 }
 
                 is BarcodeLookupUiState.Idle -> Unit
+            }
+        }
+
+        scanAttempt?.takeIf { it.outcome != null }?.let { attempt ->
+            item {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                    if (attempt.outcome == ScanAttemptOutcome.CANCELLED) Text("Scan cancelled")
+                    if (attempt.outcome == ScanAttemptOutcome.INTERRUPTED) Text("Scan interrupted")
+                    if (attempt.outcome == ScanAttemptOutcome.FAILED && barcodeLookupState !is BarcodeLookupUiState.Failed) Text("Unable to read scan input")
+                    ScanAttemptFooter(attempt.id, serverId = attempt.serverId)
+                }
             }
         }
 

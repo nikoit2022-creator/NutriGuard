@@ -20,6 +20,7 @@ interface AppContainer {
     val authService: NutriGuardAuthService
     val apiService: NutriGuardApiService
     val foodAnalysisRepository: FoodAnalysisRepository
+    val scanDiagnostics: com.example.data.diagnostics.ScanDiagnostics
 }
 
 /**
@@ -27,6 +28,7 @@ interface AppContainer {
  * application-scoped repositories, token store, and authenticated network client.
  */
 class DefaultAppContainer(private val context: Context) : AppContainer {
+    override val scanDiagnostics by lazy { com.example.data.diagnostics.ScanDiagnostics(context, authTokenStore) }
     private val database: AppDatabase by lazy {
         AppDatabase.getDatabase(context)
     }
@@ -80,7 +82,8 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             productDao = database.productDao(),
             userProfileDao = database.userHealthProfileDao(),
             scanHistoryDao = database.scanHistoryDao(),
-            apiService = apiService
+            apiService = apiService,
+            attemptDao = database.scanAttemptDao()
         )
     }
 }

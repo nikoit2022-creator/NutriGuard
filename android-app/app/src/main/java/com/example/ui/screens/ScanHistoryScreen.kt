@@ -61,6 +61,7 @@ fun ScanHistoryScreen(
 ) {
     val language = LocalAppLanguage.current
     val historyList by viewModel.scanHistory.collectAsState()
+    val attempts by viewModel.scanAttempts.collectAsState()
     var pendingBarcode by remember { mutableStateOf<String?>(null) }
 
     // A history item is re-analyzed through the same async barcode
@@ -98,7 +99,25 @@ fun ScanHistoryScreen(
                 Spacer(modifier = Modifier.height(NutriGuardSpacing.sm))
             }
 
-            if (historyList.isEmpty()) {
+            if (com.example.BuildConfig.DEBUG) {
+                items(attempts, key = { "attempt-${it.scanAttemptId}" }) { attempt ->
+                    Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                        val bg = language == AppLanguage.BULGARIAN
+                        val outcome = when (attempt.outcome) {
+                            "SUCCESS" -> if (bg) "Успешно" else "Success"
+                            "PARTIAL" -> if (bg) "Частичен резултат" else "Partial result"
+                            "CANCELLED" -> if (bg) "Отказано" else "Cancelled"
+                            "INTERRUPTED" -> if (bg) "Прекъснато" else "Interrupted"
+                            else -> if (bg) "Неуспешно" else "Failed"
+                        }
+                        Text(outcome + " · " + SimpleDateFormat("dd MMM HH:mm", Locale.getDefault()).format(Date(attempt.startedAt)))
+                        runCatching { com.example.data.diagnostics.ScanAttemptId(attempt.scanAttemptId) }
+                            .getOrNull()?.let { com.example.ui.components.ScanAttemptFooter(it,
+                                serverId = attempt.serverAttemptId?.let { raw -> runCatching { com.example.data.diagnostics.ScanAttemptId(raw) }.getOrNull() }) }
+                    }
+                }
+            }
+            if (historyList.isEmpty() && attempts.isEmpty()) {
                 item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -232,6 +251,10 @@ fun ScanHistoryScreen(
                                         fontSize = 11.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                                     )
+                                    history.scanAttemptId?.let { raw ->
+                                        runCatching { com.example.data.diagnostics.ScanAttemptId(raw) }.getOrNull()
+                                            ?.let { com.example.ui.components.ScanAttemptFooter(it) }
+                                    }
                                 }
                             }
 

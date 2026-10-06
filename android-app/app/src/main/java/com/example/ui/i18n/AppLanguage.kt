@@ -28,6 +28,9 @@ enum class AppLanguage(val code: String) {
 val LocalAppLanguage = staticCompositionLocalOf { AppLanguage.ENGLISH }
 
 private val bulgarianUiText = mapOf(
+    "Scan cancelled" to "Сканирането е отказано",
+    "Scan interrupted" to "Сканирането е прекъснато",
+    "Unable to read scan input" to "Неуспешно получаване на данните за сканиране",
     "Scan" to "Сканиране",
     "History" to "История",
     "Profile" to "Профил",
@@ -93,7 +96,7 @@ private val bulgarianUiText = mapOf(
     "Scan nutrition table" to "Снимай хранителната таблица",
     "Scan ingredient list" to "Снимай списъка със съставки",
     "Scan label for more information" to "Снимай етикета за повече информация",
-    "Health Score pending • Scan the missing label information to complete it" to "Здравната оценка се изчислява • Снимай липсващата информация от етикета",
+    "Health Score pending • Scan the missing label information to complete it" to "Недостатъчно данни за здравна оценка • Снимай липсващата информация от етикета",
     "Couldn't Complete Lookup" to "Търсенето не можа да завърши",
     "No barcode value was detected." to "Не беше разпознат баркод.",
     "Unable to start barcode scanner." to "Баркод скенерът не може да бъде стартиран.",
@@ -155,7 +158,7 @@ private val bulgarianUiText = mapOf(
     "Verified from Food Safety Database" to "Проверено в базата за безопасност на храните",
     "Analyzed via NutriGuard Scientific Engine" to "Анализирано от научната система на NutriGuard",
     "No analysis available." to "Няма наличен анализ.",
-    "Health Score Pending" to "Здравната оценка се изчислява",
+    "Health Score Pending" to "Недостатъчно данни за здравна оценка",
     "Ingredients were recognized successfully. Scan the nutrition table to calculate a Health Score." to "Съставките са разпознати. Снимай хранителната таблица, за да изчислим здравната оценка.",
     "Nutrition data was found, but the ingredient list still needs a clearer scan." to "Хранителните стойности са намерени, но е необходима по-ясна снимка на съставките.",
     "This scan saved useful product data, but more label evidence is needed before a Health Score can be calculated." to "Сканирането запази полезна информация, но е необходима още информация от етикета за здравна оценка.",

@@ -75,6 +75,8 @@ fun ProductDetailScreen(
 ) {
     val language = LocalAppLanguage.current
     val uiState by viewModel.analysisState.collectAsState()
+    val resultAttemptId by viewModel.resultAttemptId.collectAsState()
+    val resultServerId by viewModel.resultServerId.collectAsState()
     var selectedIngredientForDetail by remember { mutableStateOf<IngredientEntity?>(null) }
     var selectedNovaGroup by remember { mutableStateOf<Int?>(null) }
     var selectedHealthFactor by remember { mutableStateOf<HealthFactor?>(null) }
@@ -304,7 +306,7 @@ fun ProductDetailScreen(
                 items(analysis.ingredients) { ingredient ->
                     IngredientChip(
                         ingredient = ingredient,
-                        onClick = if (hasUsefulIngredientDetails(ingredient)) {
+                        onClick = if (hasUsefulIngredientDetails(ingredient, language)) {
                             { selectedIngredientForDetail = ingredient }
                         } else {
                             null
@@ -368,6 +370,7 @@ fun ProductDetailScreen(
                 }
 
                 item {
+                    resultAttemptId?.let { com.example.ui.components.ScanAttemptFooter(it, serverId = resultServerId) }
                     Spacer(modifier = Modifier.height(24.dp))
                 }
             }

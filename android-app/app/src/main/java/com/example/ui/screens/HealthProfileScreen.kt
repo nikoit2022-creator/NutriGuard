@@ -71,6 +71,7 @@ fun HealthProfileScreen(
             verticalArrangement = Arrangement.spacedBy(NutriGuardSpacing.lg)
         ) {
         item {
+            com.example.ui.components.AppBuildLabel()
             Spacer(modifier = Modifier.height(NutriGuardSpacing.md))
             Row(
                 modifier = Modifier.fillMaxWidth(),
