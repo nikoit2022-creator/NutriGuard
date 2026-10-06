@@ -88,14 +88,11 @@ async def test_real_catalog_ingredient_id_is_not_flagged(db_session):
 
 
 @pytest.mark.asyncio
-async def test_legacy_cyrillic_e_number_id_is_flagged_as_bare_number(db_session):
-    """Reproduces the exact pre-fix-era damage this audit exists to
-    find: an id minted by OLDER code from a Cyrillic E-number token
-    ("Е950", slug="950", hash of the Cyrillic text) no longer matches
-    what TODAY's code (which folds Cyrillic E to Latin E before
-    hashing) derives from the SAME persisted raw text -- so it falls to
-    the legacy slug/hash fallback and recovers only a bare, identity-
-    less "950", never silently "fixed" or "still E950"."""
+async def test_legacy_cyrillic_e_number_id_is_recoverable_and_not_flagged(db_session):
+    """An id minted by OLDER code from a Cyrillic E-number token
+    ("Е950", slug="950", hash of the unfolded Cyrillic text) is backward-
+    compatibly recovered from the stored original text -- so it is no
+    longer "damage" and must not be flagged."""
     legacy_id = "synth_950_b4230eb5adbe"  # sha1("е950")[:12], Cyrillic lowercase е
     db_session.add(
         _bare_product(
@@ -106,12 +103,24 @@ async def test_legacy_cyrillic_e_number_id_is_flagged_as_bare_number(db_session)
     )
     await db_session.commit()
 
+    assert await _audit(db_session, limit=None) == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_id_without_supporting_cyrillic_text_is_still_flagged_as_bare_number(db_session):
+    """The same legacy id, but the stored text only has a bare "950": the
+    E-number is NOT inferred, so it stays a BARE_NUMBER_NO_IDENTITY finding."""
+    legacy_id = "synth_950_b4230eb5adbe"
+    db_session.add(
+        _bare_product("1000000000079", raw_ingredient_text="Подсладители: 955, 950.", ingredient_ids=legacy_id)
+    )
+    await db_session.commit()
+
     findings = await _audit(db_session, limit=None)
     assert len(findings) == 1
-    finding = findings[0]
-    assert finding.stored_ingredient_id == legacy_id
-    assert finding.category == "BARE_NUMBER_NO_IDENTITY"
-    assert finding.reconstructed_common_name == "950"
+    assert findings[0].stored_ingredient_id == legacy_id
+    assert findings[0].category == "BARE_NUMBER_NO_IDENTITY"
+    assert findings[0].reconstructed_common_name == "950"
 
 
 @pytest.mark.asyncio

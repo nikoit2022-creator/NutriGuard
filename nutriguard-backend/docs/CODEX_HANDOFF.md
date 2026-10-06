@@ -1,5 +1,26 @@
 # CODEX_HANDOFF
 
+## 2026-10-06: Cyrillic E-number follow-up: legacy identities, live audit, E150D/E150d, completeness (Claude Code)
+
+- Full findings, exact test results and limitations: `docs/CYRILLIC_E_NUMBER_FOLLOWUP_REPORT.md`.
+  Scan-attempt diagnostics (issue #30) integration plan and contract for Codex:
+  `docs/SCAN_ATTEMPT_DIAGNOSTICS_INTEGRATION_PLAN.md` (no diagnostics code was integrated).
+- Branch `fix/backend-cyrillic-e-number-followup` (from `a915243`). Not merged, not deployed; the live
+  database was only read in `READ ONLY` transactions; no container, secret or live checkout was touched.
+- Changed: `ocr_normalizer.resolve_synthetic_identity` (legacy id generations 0-3, ambiguity-safe),
+  `food_analysis._resolve_unmatched_reference` (legacy E-number references reach the catalogue row),
+  case-insensitive E-/INS-number lookup in `ingredient_repository`, new read-only scripts
+  `scripts/audit_catalogue_readonly.py` and `scripts/plan_e_number_remediation.py`, updated
+  `scripts/audit_synthetic_ingredient_identity.py`, and tests.
+- Tests (disposable image + PostgreSQL 16 on the deployment VM): default offline suite 945 passed, 21 skipped;
+  with the disposable database 964 passed, 1 failed (pre-existing, fails identically on the old code), 1 skipped;
+  OpenAPI unchanged.
+- Unresolved: 38 live references are ambiguous (gen-0 collapsed Cyrillic ids); E150D/E150d duplicate and 7 legacy
+  Cyrillic-E rows are planned, not repaired; status strings stored as ingredients ("AI response was unavailable or invalid",
+  "Ingredients could not be extracted from the image") need a separate fix; the lookup change needs review before deploy.
+- Recommended next step: review and merge this branch, then a separate approved task applies the E150D remediation
+  steps from the dry-run plan and only then proposes the `upper(e_number)` unique index; Codex builds diagnostics from the integration plan.
+
 ## 2026-10-02 (latest): PR #32 (OpenFoodTox pilot) deployed and verified (Claude Code)
 
 - Owner authorized deployment per issue #33, gated on PR #32 merged with

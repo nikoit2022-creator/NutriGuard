@@ -48,16 +48,16 @@ import re
 import sys
 from dataclasses import asdict, dataclass
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import settings
 from app.models.ingredient import Ingredient
 from app.models.product import Product
 from app.services.ocr_normalizer import (
-    create_synthetic_ingredient,
-    normalize_and_extract_tokens,
+    SyntheticIdentityMatch,
     reconstruct_synthetic_ingredient,
+    resolve_synthetic_identity,
 )
 
 _BARE_NUMBER = re.compile(r"^\d+$")
@@ -74,28 +74,24 @@ class AuditFinding:
     raw_ingredient_text_excerpt: str
 
 
-def _main_loop_would_match(ingredient_id: str, raw_text: str) -> bool:
-    """Mirrors `reconstruct_synthetic_ingredient`'s own first loop: does
-    re-tokenizing `raw_text` with TODAY's code and hashing any token
-    reproduce `ingredient_id` exactly? If so, this id is genuinely,
-    confidently recoverable -- not a finding.
+def _confidently_recoverable(ingredient_id: str, raw_text: str) -> bool:
+    """True when `resolve_synthetic_identity` matches `ingredient_id` to a
+    token of the stored text -- under today's id OR a legacy id older code
+    minted (Cyrillic-E / Bulgarian-alias), which reads back correctly and
+    is therefore not damage. AMBIGUOUS and NONE stay findings.
 
-    NOTE this is deliberately NOT the same check as comparing
-    `reconstruct_synthetic_ingredient(...).id` to `ingredient_id`: that
-    function's own FALLBACK branch always overwrites its result's `id`
-    back to whatever `ingredient_id` was passed in (see its final
-    `replace(..., id=ingredient_id)`), so that comparison is always
-    True and would never catch a real mismatch -- the only reliable
-    signal is whether the confident main loop itself found a match.
-    """
-    return any(
-        create_synthetic_ingredient(token).id == ingredient_id
-        for token in normalize_and_extract_tokens(raw_text or "")
+    NOTE this is deliberately NOT a comparison of
+    `reconstruct_synthetic_ingredient(...).id` to `ingredient_id`: its
+    fallback branch always overwrites the result's `id` with the stored
+    one, so that comparison is always True."""
+    return resolve_synthetic_identity(ingredient_id, raw_text).match not in (
+        SyntheticIdentityMatch.NONE,
+        SyntheticIdentityMatch.AMBIGUOUS,
     )
 
 
 def _classify_fallback_recovery(reconstructed_common_name: str) -> str:
-    """Only called once `_main_loop_would_match` is already False -- i.e.
+    """Only called once `_confidently_recoverable` is already False -- i.e.
     `reconstruct_synthetic_ingredient` fell through to its legacy
     slug/hash fallback. Categorizes WHAT it recovered, worst first, for
     a human reviewer to triage; never a repair decision on its own."""
@@ -124,8 +120,8 @@ async def _audit(session: AsyncSession, *, limit: int | None) -> list[AuditFindi
         for ingredient_id in ids:
             if ingredient_id in real_id_set:
                 continue  # resolves to a real catalog row -- not synthetic, nothing to audit here
-            if _main_loop_would_match(ingredient_id, product.raw_ingredient_text or ""):
-                continue  # confidently reconstructs under today's code -- not a finding
+            if _confidently_recoverable(ingredient_id, product.raw_ingredient_text or ""):
+                continue  # reads back correctly (today's or a recoverable legacy id) -- not a finding
             reconstructed = reconstruct_synthetic_ingredient(ingredient_id, product.raw_ingredient_text or "")
             category = _classify_fallback_recovery(reconstructed.common_name)
             findings.append(
@@ -161,6 +157,8 @@ async def main(argv: list[str] | None = None) -> int:
 
     try:
         async with session_factory() as session:
+            if session.bind.dialect.name == "postgresql":
+                await session.execute(text("SET TRANSACTION READ ONLY"))
             findings = await _audit(session, limit=args.limit)
             await session.rollback()  # belt-and-suspenders: never commit, even though nothing was written
     finally:

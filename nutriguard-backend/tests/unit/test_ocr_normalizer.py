@@ -339,3 +339,152 @@ def test_bare_cyrillic_number_without_e_prefix_is_never_inferred_as_an_e_number(
     bare = create_synthetic_ingredient("300")
     assert bare.e_number is None
     assert bare.category == "Ingredient"  # never "Food Additive (E300)"
+
+
+# --- Backward-compatible reads of ids minted before the Cyrillic-E fold ------
+# Legacy ids are produced exactly as pre-fold code did: hash the token text
+# AS WRITTEN (Cyrillic "Е" intact). `_synthetic_id` never folded; only
+# `create_synthetic_ingredient` / the tokenizer do.
+
+import pytest  # noqa: E402
+
+from app.services import ocr_normalizer  # noqa: E402
+from app.services.ocr_normalizer import (  # noqa: E402
+    SyntheticIdentityMatch,
+    _synthetic_id,
+    normalize_and_extract_tokens,
+    resolve_synthetic_identity,
+)
+
+CYR_E = "Е"
+
+
+def test_legacy_cyrillic_e_number_id_recovers_identity_from_stored_text():
+    legacy_id = _synthetic_id(f"{CYR_E}300")
+    assert legacy_id != create_synthetic_ingredient(f"{CYR_E}300").id  # the regression: ids moved
+    restored = reconstruct_synthetic_ingredient(legacy_id, f"Вода; {CYR_E}300, захар")
+    assert restored.id == legacy_id  # stored id is preserved, never rewritten
+    assert restored.e_number == "E300"
+    assert restored.common_name != "300"
+    assert resolve_synthetic_identity(legacy_id, f"{CYR_E}300").match == SyntheticIdentityMatch.LEGACY_CYRILLIC_E
+
+
+def test_legacy_cyrillic_e_number_with_cyrillic_words_has_no_readable_slug_yet_recovers():
+    token = f"киселина {CYR_E}330"
+    legacy_id = _synthetic_id(token)
+    restored = reconstruct_synthetic_ingredient(legacy_id, f"Вода, {token}")
+    assert restored.e_number == "E330"
+    assert restored.common_name.endswith("E330")
+    assert restored.common_name != "Ingredient detected on label"
+
+
+def test_current_id_still_wins_and_is_not_reported_as_legacy():
+    current = create_synthetic_ingredient(f"{CYR_E}300")
+    res = resolve_synthetic_identity(current.id, f"{CYR_E}300")
+    assert res.match == SyntheticIdentityMatch.CURRENT
+    assert res.ingredient.id == current.id
+
+
+def test_bare_number_is_never_promoted_to_an_e_number():
+    # Stored text has only a bare "950"; a legacy-shaped id for "Е950" must
+    # NOT be guessed into E950 from it.
+    legacy_id = _synthetic_id(f"{CYR_E}950")
+    assert resolve_synthetic_identity(legacy_id, "950").match == SyntheticIdentityMatch.NONE
+    restored = reconstruct_synthetic_ingredient(legacy_id, "950")
+    assert restored.e_number is None
+    # and the stored id's own digits never become an E-number via the slug fallback either
+    assert restored.category == "Ingredient"
+
+
+def test_unrelated_text_does_not_recover_a_legacy_cyrillic_e_id():
+    legacy_id = _synthetic_id(f"{CYR_E}300")
+    assert resolve_synthetic_identity(legacy_id, f"{CYR_E}301, Вода").match == SyntheticIdentityMatch.NONE
+
+
+def test_pure_cyrillic_name_without_slug_still_round_trips_without_any_legacy_path():
+    ing = create_synthetic_ingredient("Аромат")
+    assert resolve_synthetic_identity(ing.id, "Вода, Аромат").match == SyntheticIdentityMatch.CURRENT
+
+
+def test_legacy_alias_substituted_id_recovers_original_text_not_alias():
+    legacy_id = _synthetic_id("Water")  # pre-fix code hashed the English alias of "Вода"
+    res = resolve_synthetic_identity(legacy_id, "Вода, Захар")
+    assert res.match == SyntheticIdentityMatch.LEGACY_ALIAS
+    assert res.ingredient.id == legacy_id
+    assert res.ingredient.common_name == "Вода"
+
+
+def test_alias_legacy_id_not_matched_when_the_alias_source_word_is_absent():
+    assert resolve_synthetic_identity(_synthetic_id("Water"), "Захар, Сол").match == SyntheticIdentityMatch.NONE
+
+
+def test_ambiguous_legacy_match_recovers_nothing(monkeypatch):
+    """Two DIFFERENT E-number tokens that (artificially) share a legacy id
+    must not be resolved by picking one."""
+    real = ocr_normalizer._synthetic_id
+    monkeypatch.setattr(ocr_normalizer, "_synthetic_id", lambda n: "synth_collide" if CYR_E in n else real(n))
+    res = resolve_synthetic_identity("synth_collide", f"{CYR_E}300, {CYR_E}202")
+    assert res.match == SyntheticIdentityMatch.AMBIGUOUS
+    assert res.ingredient is None
+    # reconstruct falls back to the readable-slug path, never an arbitrary E-number
+    assert reconstruct_synthetic_ingredient("synth_collide", f"{CYR_E}300, {CYR_E}202").e_number is None
+
+
+def test_duplicate_tokens_with_one_identity_are_not_ambiguous():
+    legacy_id = _synthetic_id(f"{CYR_E}300")
+    assert resolve_synthetic_identity(legacy_id, f"{CYR_E}300, {CYR_E}300").match == SyntheticIdentityMatch.LEGACY_CYRILLIC_E
+
+
+def test_unfolded_tokenization_differs_only_in_the_prefix_letter():
+    raw = f"Вода; киселина: {CYR_E}300, {CYR_E}202."
+    folded = normalize_and_extract_tokens(raw)
+    unfolded = normalize_and_extract_tokens(raw, fold_cyrillic_e=False)
+    assert len(folded) == len(unfolded)
+    assert any(CYR_E in t for t in unfolded) and not any(CYR_E in t for t in folded)
+
+
+# --- Generation 0/1 ids still present in live data -----------------------
+# G0 (baseline): "synth_" + slug, no hash. G1: empty slug -> sha1(name)[:10].
+
+
+def test_generation0_bare_slug_id_recovers_original_token_text():
+    res = resolve_synthetic_identity("synth_cows_milk", "cow's milk, live sourdough")
+    assert res.match == SyntheticIdentityMatch.LEGACY_BARE_SLUG
+    assert res.ingredient.id == "synth_cows_milk"
+    assert res.ingredient.common_name == "Cow's milk"  # not the lossy slug "Cows milk"
+
+
+def test_generation0_slug_is_not_matched_without_a_supporting_token():
+    assert resolve_synthetic_identity("synth_cows_milk", "water, sugar").match == SyntheticIdentityMatch.NONE
+
+
+def test_generation0_empty_slug_shared_by_several_cyrillic_tokens_is_ambiguous():
+    # "вода" and "сол" both collapse to "synth_" -- must not pick either.
+    res = resolve_synthetic_identity("synth_", "вода, сол, закваска")
+    assert res.match == SyntheticIdentityMatch.AMBIGUOUS
+    assert reconstruct_synthetic_ingredient("synth_", "вода, сол").common_name == "Ingredient detected on label"
+
+
+def test_generation0_cyrillic_e_number_matches_only_with_its_own_stored_text():
+    legacy = "synth_300"  # G0 slug of "Е300"
+    assert resolve_synthetic_identity(legacy, f"Вода, {CYR_E}300").ingredient.e_number == "E300"
+    # a bare "300" token alongside it makes the id ambiguous -- never guessed
+    assert resolve_synthetic_identity(legacy, f"{CYR_E}300, 300").match == SyntheticIdentityMatch.AMBIGUOUS
+    # and bare "300" alone is not an E-number
+    assert resolve_synthetic_identity(legacy, "300").ingredient.e_number is None
+
+
+def test_generation1_hash10_id_for_a_pure_cyrillic_token_recovers_it():
+    import hashlib
+
+    legacy = "synth_" + hashlib.sha1("Вода".encode("utf-8")).hexdigest()[:10]
+    res = resolve_synthetic_identity(legacy, "Вода, Захар")
+    assert res.match == SyntheticIdentityMatch.LEGACY_HASH10
+    assert res.ingredient.common_name == "Вода"
+
+
+def test_generation1_hash_is_case_sensitive_so_a_differently_cased_token_does_not_match():
+    import hashlib
+
+    legacy = "synth_" + hashlib.sha1("Вода".encode("utf-8")).hexdigest()[:10]
+    assert resolve_synthetic_identity(legacy, "вода").match == SyntheticIdentityMatch.NONE
