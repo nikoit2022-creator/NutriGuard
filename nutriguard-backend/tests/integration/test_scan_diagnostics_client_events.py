@@ -247,9 +247,9 @@ async def test_rejects_a_batch_larger_than_the_configured_max(app_client):
 
 
 @pytest.mark.asyncio
-async def test_rejects_a_body_larger_than_the_configured_byte_limit_via_content_length(
-    app_client, monkeypatch
-):
+async def test_rejects_an_oversized_body_with_an_accurate_content_length(app_client, monkeypatch):
+    """The ordinary case: a normal (non-adversarial) client that sends
+    an honest `Content-Length` for a body that is simply too big."""
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BODY_BYTES", 64)
@@ -265,28 +265,64 @@ async def test_rejects_a_body_larger_than_the_configured_byte_limit_via_content_
 
 
 @pytest.mark.asyncio
-async def test_rejects_an_oversized_body_streamed_without_a_content_length_header(app_client, monkeypatch):
-    """Codex review round 2, finding 6: the bound must hold even when
-    Content-Length is missing/understated (e.g. chunked transfer), not
-    only via the fast pre-check. httpx always sets a real
-    Content-Length for a `content=` bytes payload, so this asserts the
-    STREAMING check itself catches an oversized body directly (with the
-    Content-Length pre-check bypassed by disabling it), rather than
-    relying on transport-level chunking support in the test client."""
+async def test_rejects_an_oversized_body_with_no_content_length_in_several_chunks(
+    app_client, monkeypatch
+):
+    """Codex review round 3: the previous version of this test could not
+    actually prove the chunked/no-Content-Length case -- httpx always
+    attaches a real Content-Length for a `content=<bytes>` payload, so
+    it only ever exercised the (now-removed) Content-Length pre-check,
+    never the no-header/chunked path it claimed to cover.
+
+    Streaming the body from an async generator makes httpx omit
+    Content-Length entirely and deliver the body as several separate
+    ASGI `http.request` messages (verified directly below) -- exactly
+    the case `app.core.body_size_limit.BodySizeLimitMiddleware` exists
+    for, and the one the review finding identified as unenforced."""
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BODY_BYTES", 64)
-    headers = await _register_device(app_client, "diag-events-body-too-big-streamed")
+    headers = await _register_device(app_client, "diag-events-chunked-no-length")
 
     big_payload = json.dumps({"events": [_event(appVersion="1" * 200)]}).encode("utf-8")
+    assert len(big_payload) > 64
+
+    async def chunks():
+        for i in range(0, len(big_payload), 16):
+            yield big_payload[i : i + 16]
+
+    resp = await app_client.post(
+        "/api/v1/scan-diagnostics/client-events",
+        content=chunks(),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+    assert "content-length" not in {k.lower() for k in resp.request.headers}
+    assert resp.status_code == 413
+    assert resp.json()["error"]["code"] == "PAYLOAD_TOO_LARGE"
+
+
+@pytest.mark.asyncio
+async def test_rejects_an_oversized_body_with_a_lying_content_length(app_client, monkeypatch):
+    """A `Content-Length` header that understates the real body size
+    must not let an oversized body through. `BodySizeLimitMiddleware`
+    counts the actual bytes arriving off the wire -- it never trusts
+    (or even reads) the declared header -- so an attacker cannot evade
+    the bound simply by lying about the length."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BODY_BYTES", 64)
+    headers = await _register_device(app_client, "diag-events-lying-content-length")
+
+    big_payload = json.dumps({"events": [_event(appVersion="1" * 200)]}).encode("utf-8")
+    assert len(big_payload) > 64
+
     resp = await app_client.post(
         "/api/v1/scan-diagnostics/client-events",
         content=big_payload,
-        headers={**headers, "Content-Type": "application/json"},
+        headers={**headers, "Content-Type": "application/json", "Content-Length": "10"},
     )
-    assert resp.status_code in (413, 422)  # 413 from the streaming check, or 422 (appVersion pattern)
-    if resp.status_code == 413:
-        assert resp.json()["error"]["code"] == "PAYLOAD_TOO_LARGE"
+    assert resp.status_code == 413
+    assert resp.json()["error"]["code"] == "PAYLOAD_TOO_LARGE"
 
 
 @pytest.mark.asyncio

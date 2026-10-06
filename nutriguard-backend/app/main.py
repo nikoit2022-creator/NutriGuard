@@ -1,7 +1,6 @@
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 
 import structlog
 from fastapi import FastAPI, Request, status
@@ -11,8 +10,9 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 
 from app.api.v1.router import api_router
+from app.core.body_size_limit import BodySizeLimitMiddleware
 from app.core.config import settings
-from app.core.exceptions import AppError
+from app.core.exceptions import AppError, error_envelope
 from app.core.logging import configure_logging, get_logger
 from app.core.rate_limit import limiter
 from app.core.scan_attempt import (
@@ -23,14 +23,6 @@ from app.core.scan_attempt import (
 
 configure_logging()
 logger = get_logger(__name__)
-
-
-def _now_ms() -> int:
-    return int(datetime.now(timezone.utc).timestamp() * 1000)
-
-
-def _error_envelope(code: str, message: str, details=None) -> dict:
-    return {"error": {"code": code, "message": message, "details": details, "timestamp": _now_ms()}}
 
 
 @asynccontextmanager
@@ -115,6 +107,18 @@ def create_app() -> FastAPI:
         response.headers[SCAN_ATTEMPT_ID_HEADER] = context.attempt_id
         return response
 
+    # Codex review round 3: registered LAST (deliberately, not merely by
+    # convention) -- `Starlette.add_middleware` prepends to its own
+    # middleware list, so the most-recently-added middleware ends up
+    # OUTERMOST, wrapping every middleware added above. This one must be
+    # outermost: it enforces a byte cap on the raw ASGI request body
+    # before Starlette's routing -- and therefore FastAPI's own
+    # body-buffering -- ever runs, which only holds if nothing upstream
+    # of it (CORS, the two above) gets a chance to touch the request
+    # first. See `app.core.body_size_limit` for why a route-level
+    # dependency could not provide this guarantee.
+    app.add_middleware(BodySizeLimitMiddleware)
+
     # --- Exception handlers -------------------------------------------------
 
     @app.exception_handler(AppError)
@@ -122,7 +126,7 @@ def create_app() -> FastAPI:
         logger.warning("app_error", code=exc.code, message=exc.message)
         return JSONResponse(
             status_code=exc.status_code,
-            content=_error_envelope(exc.code, exc.message, exc.details),
+            content=error_envelope(exc.code, exc.message, exc.details),
         )
 
     @app.exception_handler(RequestValidationError)
@@ -140,14 +144,14 @@ def create_app() -> FastAPI:
         errors = [{k: v for k, v in error.items() if k != "ctx"} for error in exc.errors()]
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content=_error_envelope("VALIDATION_ERROR", "Request validation failed.", errors),
+            content=error_envelope("VALIDATION_ERROR", "Request validation failed.", errors),
         )
 
     @app.exception_handler(RateLimitExceeded)
     async def handle_rate_limit(request: Request, exc: RateLimitExceeded):
         return JSONResponse(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            content=_error_envelope("RATE_LIMIT_EXCEEDED", "Too many requests. Please slow down."),
+            content=error_envelope("RATE_LIMIT_EXCEEDED", "Too many requests. Please slow down."),
         )
 
     @app.exception_handler(Exception)
@@ -156,7 +160,7 @@ def create_app() -> FastAPI:
         # Never leak stack traces, SQL errors, or internal details to clients.
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=_error_envelope("INTERNAL_ERROR", "An unexpected error occurred."),
+            content=error_envelope("INTERNAL_ERROR", "An unexpected error occurred."),
         )
 
     app.include_router(api_router, prefix=settings.API_V1_PREFIX)

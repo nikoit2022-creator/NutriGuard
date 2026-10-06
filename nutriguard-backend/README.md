@@ -2974,3 +2974,33 @@ records, and never mutates anything.
   `ClientDiagnosticOutcome` (`PARTIAL`/`INTERRUPTED`) enum values —
   additive, so no existing value changed meaning.
 
+**Round 3 (Codex review) fix:**
+
+- **Body-size enforcement moved to ASGI middleware**
+  (`app.core.body_size_limit.BodySizeLimitMiddleware`): Round 2's fix
+  (the "streaming request-size enforcement" bullet above) enforced the
+  byte limit from a FastAPI route dependency, which turned out to still
+  be too late — FastAPI's own request handler reads and fully buffers
+  a route's entire request body (to parse its declared Pydantic body
+  parameter) *before* resolving any dependency on that same route, and
+  Starlette's underlying `Request.body()` has no size bound of its own,
+  so a missing/lying `Content-Length` or a chunked-transfer body was
+  already sitting fully buffered in memory by the time the dependency
+  ran; re-reading it via `request.stream()` at that point just replayed
+  the already-buffered bytes in one shot rather than genuinely
+  streaming. The limit is now enforced by a pure ASGI middleware,
+  registered as the outermost middleware in `app.main.create_app`, that
+  counts bytes off the raw ASGI `receive` channel for exactly this one
+  route and rejects before Starlette's routing (and therefore FastAPI's
+  body buffering) ever runs — no route-level dependency can provide
+  this guarantee for a FastAPI endpoint that declares a Pydantic body
+  parameter. No wire-format or OpenAPI-schema change: same 413
+  `PAYLOAD_TOO_LARGE` response shape, confirmed byte-for-byte via the
+  shared `app.core.exceptions.error_envelope` helper. See
+  `app/core/body_size_limit.py` for the full rationale and
+  `tests/unit/test_body_size_limit.py` /
+  `tests/integration/test_scan_diagnostics_client_events.py` for
+  regression coverage (including a genuinely multi-chunk,
+  no-Content-Length body and a lying-`Content-Length` body, neither of
+  which the Round 2 fix actually had coverage for).
+

@@ -196,13 +196,24 @@ explains it.
 - **Batch bound**: `1..SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BATCH`
   events per request (default 20). More → 422 `VALIDATION_ERROR`.
 - **Body size bound**: `SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BODY_BYTES`
-  (default 16 KiB), enforced on the raw request body **before**
-  Pydantic parses it: a fast `Content-Length` pre-check, THEN (Round 2
-  fix) a bounded **streaming** read that aborts the instant the running
-  total exceeds the limit — never fully buffering an oversized body
-  first, so a missing/lying `Content-Length` or a chunked-transfer body
-  is bounded exactly the same way. Exceeding it → 413
+  (default 16 KiB), enforced by `app.core.body_size_limit.BodySizeLimitMiddleware`
+  — a pure ASGI middleware that counts bytes off the raw ASGI `receive`
+  channel for exactly this route, **before Starlette's routing (and
+  therefore FastAPI's own body buffering) ever runs**. It aborts the
+  instant the running total exceeds the limit, so a missing/lying
+  `Content-Length` or a chunked-transfer body is bounded exactly the
+  same way as an honestly-declared oversized one. Exceeding it → 413
   `PAYLOAD_TOO_LARGE`.
+
+  (Round 2's fix enforced this from a FastAPI route dependency instead
+  — Round 3 found that was too late to matter: FastAPI's own request
+  handler calls `await request.body()` to parse this route's declared
+  Pydantic body parameter *before* resolving any `Depends()` on that
+  same route, and Starlette's `Request.body()` has no size bound of its
+  own, so the entire oversized body was already fully buffered by the
+  time that dependency ran. Moving the check to ASGI middleware, ahead
+  of routing entirely, is the only way to bound it before FastAPI ever
+  sees the request.)
 
 ### 4.1 Request: `{"events": [ClientDiagnosticEvent, ...]}`
 

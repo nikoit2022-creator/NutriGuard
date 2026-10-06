@@ -11,6 +11,11 @@ backend-side scan diagnostics (see that module), tagged
 coordinated through a SEPARATE small SQLite ledger
 (`app.core.client_event_ledger`) -- also not the application database,
 and also bounded.
+
+`settings.SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BODY_BYTES` is enforced
+in `app.core.body_size_limit.BodySizeLimitMiddleware`, NOT here --
+Codex review round 3 found that a route-level dependency runs too late
+to bound this route's own body-buffering; see that module's docstring.
 """
 from uuid import UUID
 
@@ -19,8 +24,6 @@ from fastapi import APIRouter, Depends, Request
 
 from app.api.deps import get_current_user_id
 from app.core import client_event_ledger, scan_diagnostics
-from app.core.config import settings
-from app.core.exceptions import PayloadTooLargeError
 from app.core.owner_scope import pseudonymous_owner_scope
 from app.core.rate_limit import DIAGNOSTICS_RATE, limiter
 from app.schemas.scan_diagnostics import ClientDiagnosticEvent, ClientEventBatchRequest, ClientEventBatchResponse
@@ -28,53 +31,6 @@ from app.schemas.scan_diagnostics import ClientDiagnosticEvent, ClientEventBatch
 router = APIRouter(prefix="/scan-diagnostics", tags=["scan-diagnostics"])
 
 _logger = structlog.get_logger(__name__)
-
-
-async def _enforce_body_size(request: Request) -> None:
-    """Runs as a dependency, resolved independently of (and before) the
-    declared `body: ClientEventBatchRequest` parameter is parsed and
-    validated -- an oversized raw body is rejected here with a bounded
-    read, rather than first being fully parsed by Pydantic. Declaring
-    `body` as a normal FastAPI parameter (instead of manually parsing
-    JSON) is deliberate: it gives Android/Codex a real, complete request
-    schema in `openapi.json`, not just the response shape.
-
-    Codex review round 2, finding 6: the previous implementation still
-    called `await request.body()` (Starlette's own default -- reads and
-    buffers the ENTIRE body into memory before returning it), so a
-    request with a missing/lying `Content-Length` (or a chunked-transfer
-    body) was fully buffered before this function's own size check ever
-    ran -- the `Content-Length` pre-check above was the only real bound,
-    and it trivially doesn't apply when that header is absent or
-    understated. This now reads the body as a STREAM, in bounded
-    chunks, and raises the moment the running total exceeds the limit
-    -- never buffering more than `MAX_BODY_BYTES` (plus at most one
-    chunk) at once, regardless of what any header claims."""
-    content_length = request.headers.get("content-length")
-    if content_length is not None and content_length.isdigit():
-        if int(content_length) > settings.SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BODY_BYTES:
-            raise PayloadTooLargeError(
-                "Request body exceeds the "
-                f"{settings.SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BODY_BYTES}-byte limit."
-            )
-
-    limit = settings.SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BODY_BYTES
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > limit:
-            raise PayloadTooLargeError(f"Request body exceeds the {limit}-byte limit.")
-        chunks.append(chunk)
-    # Starlette's own `Request.body()` -- which FastAPI calls internally
-    # to parse the declared `body: ClientEventBatchRequest` parameter --
-    # only re-reads the stream when `self._body` is not already set;
-    # setting it here (to the SAME bytes it would otherwise have read
-    # itself, now already verified within bound) means that later,
-    # internal read returns this cached value instead of attempting a
-    # second stream iteration (which Starlette would reject outright --
-    # a stream can only be consumed once).
-    request._body = b"".join(chunks)
 
 
 def _process_one_event(owner_scope: str, event: ClientDiagnosticEvent) -> str:
@@ -141,7 +97,6 @@ async def submit_client_events(
     request: Request,
     batch: ClientEventBatchRequest,
     user_id: UUID = Depends(get_current_user_id),
-    _size_checked: None = Depends(_enforce_body_size),
 ) -> ClientEventBatchResponse:
     # A stable, one-way pseudonymous scope derived from the authenticated
     # user id (see app.core.owner_scope) -- the raw user id itself is

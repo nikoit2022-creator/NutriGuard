@@ -6,7 +6,26 @@ of the API Contract, and carries the HTTP status that should be returned.
 These are translated to the standard error envelope by the exception
 handlers registered in `app/main.py`.
 """
+import time
 from typing import Any, Optional
+
+
+def error_envelope(code: str, message: str, details: Optional[Any] = None) -> dict:
+    """The standard `{"error": {...}}` JSON envelope (API Contract
+    section 4.2). Shared so anything that must produce this exact shape
+    OUTSIDE FastAPI's own exception-handler pipeline (e.g.
+    `app.core.body_size_limit`, a pure ASGI middleware that runs ahead
+    of routing -- see its module docstring for why) renders
+    byte-for-byte the same body `app.main`'s own exception handlers
+    already produce for every `AppError`."""
+    return {
+        "error": {
+            "code": code,
+            "message": message,
+            "details": details,
+            "timestamp": int(time.time() * 1000),
+        }
+    }
 
 
 class AppError(Exception):
@@ -105,7 +124,19 @@ class RateLimitExceededError(AppError):
 
 class PayloadTooLargeError(AppError):
     """Issue #30: the raw request body for a client diagnostic-event
-    batch exceeded `settings.SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BODY_BYTES`."""
+    batch exceeded `settings.SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BODY_BYTES`.
+
+    Codex review round 3: no longer raised directly. FastAPI reads and
+    buffers a route's ENTIRE request body (to parse its declared
+    Pydantic body parameter) before resolving any of that route's own
+    `Depends()`, so a dependency can never bound that buffering -- see
+    `app.core.body_size_limit`, the pure ASGI middleware that now
+    enforces this limit ahead of routing instead. It sends this class's
+    `code`/`status_code` directly (it runs outside FastAPI's own
+    exception-handler pipeline, so it cannot raise and let
+    `app.main.handle_app_error` catch it) -- kept here as the single
+    source of truth for this error code/status, consistent with every
+    other `AppError` subclass in this module."""
 
     code = "PAYLOAD_TOO_LARGE"
     status_code = 413
