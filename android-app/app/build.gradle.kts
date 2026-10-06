@@ -35,6 +35,22 @@ android {
     versionCode = 2
     versionName = "1.1"
 
+    val gitRevision = runCatching {
+      providers.exec {
+        workingDir(rootProject.projectDir)
+        isIgnoreExitValue = true
+        commandLine("git", "-c", "safe.directory=${rootProject.projectDir.parentFile.invariantSeparatorsPath}", "rev-parse", "--short=12", "HEAD")
+      }.standardOutput.asText.get().trim()
+    }.getOrDefault("").takeIf { it.matches(Regex("[0-9a-f]{7,40}")) } ?: "unknown"
+    val gitDirty = runCatching {
+      providers.exec {
+        workingDir(rootProject.projectDir)
+        isIgnoreExitValue = true
+        commandLine("git", "-c", "safe.directory=${rootProject.projectDir.parentFile.invariantSeparatorsPath}", "status", "--porcelain", "--untracked-files=normal", "--", "app", "build.gradle.kts", "settings.gradle.kts", "gradle")
+      }.standardOutput.asText.get().isNotBlank()
+    }.getOrDefault(false)
+    buildConfigField("String", "SOURCE_REVISION", "\"$gitRevision${if (gitDirty) "-dirty" else ""}\"")
+
     buildConfigField("String", "BACKEND_BASE_URL", "\"$escapedBackendBaseUrl\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

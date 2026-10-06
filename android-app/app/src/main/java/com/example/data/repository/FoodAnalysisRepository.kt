@@ -16,6 +16,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
+import com.example.data.diagnostics.ScanTraceContext
 
 data class FullProductAnalysis(
     val product: ProductEntity,
@@ -34,6 +36,9 @@ data class FullProductAnalysis(
  * [FoodAnalysisRepository] here in production, unchanged.
  */
 interface ProductAnalysisSource {
+    val scanAttempts: Flow<List<com.example.data.diagnostics.ScanAttemptRecord>>
+        get() = kotlinx.coroutines.flow.flowOf(emptyList())
+    suspend fun saveScanAttempt(record: com.example.data.diagnostics.ScanAttemptRecord) {}
     val allIngredients: Flow<List<IngredientEntity>>
     val allProducts: Flow<List<ProductEntity>>
     val scanHistory: Flow<List<ScanHistoryEntity>>
@@ -68,8 +73,23 @@ class FoodAnalysisRepository(
     private val productDao: ProductDao,
     private val userProfileDao: UserHealthProfileDao,
     private val scanHistoryDao: ScanHistoryDao,
-    private val apiService: NutriGuardApiService
+    private val apiService: NutriGuardApiService,
+    private val attemptDao: com.example.data.diagnostics.ScanAttemptDao? = null
 ) : ProductAnalysisSource {
+    private suspend fun <T> tracedPersistence(block: suspend () -> T): T {
+        val trace = coroutineContext[ScanTraceContext]
+        trace?.record?.invoke(com.example.data.diagnostics.LocalScanStage.PERSISTENCE, com.example.data.diagnostics.LocalScanOutcome.STARTED)
+        return try {
+            block().also { trace?.record?.invoke(com.example.data.diagnostics.LocalScanStage.PERSISTENCE, com.example.data.diagnostics.LocalScanOutcome.SUCCEEDED) }
+        } catch (e: Exception) {
+            trace?.record?.invoke(com.example.data.diagnostics.LocalScanStage.PERSISTENCE, com.example.data.diagnostics.LocalScanOutcome.FAILED)
+            throw e
+        }
+    }
+    override val scanAttempts get() = attemptDao?.observe() ?: kotlinx.coroutines.flow.flowOf(emptyList())
+    override suspend fun saveScanAttempt(record: com.example.data.diagnostics.ScanAttemptRecord) {
+        attemptDao?.save(record)
+    }
 
     private fun ProductEntity.hasUsableVerifiedScore(): Boolean =
         isVerified && hasVerifiedNutrition && hasVerifiedIngredients && healthScore != null
@@ -82,7 +102,7 @@ class FoodAnalysisRepository(
         val ingList = parsedData.ingredients
 
         if (ingList.isNotEmpty()) {
-            ingredientDao.insertAll(ingList)
+            tracedPersistence { ingredientDao.insertAll(ingList) }
         }
 
         val profile = userProfileDao.getProfileSync() ?: UserHealthProfile()
@@ -93,7 +113,7 @@ class FoodAnalysisRepository(
             parsedData.warnings
         }
 
-        productDao.insertProduct(analyzedProd)
+        tracedPersistence { productDao.insertProduct(analyzedProd) }
 
         val finalScore = analyzedProd.healthScore
         if (finalScore != null) {
@@ -103,7 +123,8 @@ class FoodAnalysisRepository(
                     productName = analyzedProd.productName,
                     brand = analyzedProd.brand,
                     healthScore = finalScore,
-                    scanType = scanType
+                    scanType = scanType,
+                    scanAttemptId = coroutineContext[ScanTraceContext]?.id?.value
                 )
             )
         }
@@ -167,7 +188,8 @@ class FoodAnalysisRepository(
                     productName = existing.productName,
                     brand = existing.brand,
                     healthScore = scoreBreakdown.totalScore,
-                    scanType = "BARCODE"
+                    scanType = "BARCODE",
+                    scanAttemptId = coroutineContext[ScanTraceContext]?.id?.value
                 )
             )
 
@@ -190,7 +212,7 @@ class FoodAnalysisRepository(
         val ingList = parsedData.ingredients
 
         if (ingList.isNotEmpty()) {
-            ingredientDao.insertAll(ingList)
+            tracedPersistence { ingredientDao.insertAll(ingList) }
         }
 
         val scoreBreakdown = HealthScoreCalculator.calculate(
@@ -207,7 +229,7 @@ class FoodAnalysisRepository(
         val allWarnings = (parsedData.warnings + personalizedWarnings).distinctBy { "${it.title}_${it.condition}" }
 
         val finalProd = analyzedProd.copy(healthScore = scoreBreakdown.totalScore)
-        productDao.insertProduct(finalProd)
+        tracedPersistence { productDao.insertProduct(finalProd) }
 
         scanHistoryDao.insertHistory(
             ScanHistoryEntity(
@@ -215,7 +237,8 @@ class FoodAnalysisRepository(
                 productName = finalProd.productName,
                 brand = finalProd.brand,
                 healthScore = scoreBreakdown.totalScore,
-                scanType = "BARCODE"
+                scanType = "BARCODE",
+                scanAttemptId = coroutineContext[ScanTraceContext]?.id?.value
             )
         )
 

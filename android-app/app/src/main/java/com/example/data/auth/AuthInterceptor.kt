@@ -40,7 +40,10 @@ class AuthInterceptor(
         // If 401 occurs and this request has not already been retried
         if (response.code == 401 && originalRequest.header(HEADER_RETRY) == null) {
             Log.w(TAG, "Received 401 Unauthorized on $requestUrl. Attempting token refresh/re-auth...")
-            response.close() // Close the previous 401 response body
+            originalRequest.tag(com.example.data.diagnostics.ScanTraceContext::class.java)?.let {
+                it.reason = com.example.data.diagnostics.ScanReason.AUTH_EXPIRED
+                it.record(com.example.data.diagnostics.LocalScanStage.RESPONSE, com.example.data.diagnostics.LocalScanOutcome.FAILED)
+            }
 
             val newAccessToken = synchronized(this) {
                 val authService = authServiceProvider()
@@ -61,9 +64,21 @@ class AuthInterceptor(
             }
 
             if (!newAccessToken.isNullOrBlank()) {
+                response.close()
                 val retryRequest = originalRequest.newBuilder()
                     .header("Authorization", "Bearer $newAccessToken")
                     .header(HEADER_RETRY, "1")
+                    .apply {
+                        originalRequest.tag(com.example.data.diagnostics.ScanTraceContext::class.java)?.let {
+                            val sequence = it.nextRequest()
+                            header("X-Scan-Request-Sequence", sequence.toString())
+                            it.recordMetrics(
+                                com.example.data.diagnostics.LocalScanStage.RETRY,
+                                com.example.data.diagnostics.LocalScanOutcome.RETRIED,
+                                mapOf("retryCount" to (sequence - 1).toDouble())
+                            )
+                        }
+                    }
                     .build()
                 return chain.proceed(retryRequest)
             }

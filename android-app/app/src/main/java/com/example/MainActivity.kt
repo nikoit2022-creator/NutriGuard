@@ -180,7 +180,7 @@ class MainActivity : ComponentActivity() {
                     }
                     is DeviceAuthState.Authenticated -> {
                         val viewModel: MainViewModel = viewModel(
-                            factory = MainViewModel.Factory(appContainer.foodAnalysisRepository)
+                            factory = MainViewModel.Factory(appContainer.foodAnalysisRepository, appContainer.scanDiagnostics)
                         )
                         NutriGuardApp(
                             viewModel = viewModel,

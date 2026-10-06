@@ -26,6 +26,10 @@ class FakeProductAnalysisSource(
     override val allProducts: StateFlow<List<ProductEntity>> = MutableStateFlow(emptyList())
     override val scanHistory: MutableStateFlow<List<ScanHistoryEntity>> = MutableStateFlow(initialScanHistory)
     override val userProfile: StateFlow<UserHealthProfile?> = MutableStateFlow(null)
+    override val scanAttempts = MutableStateFlow<List<com.example.data.diagnostics.ScanAttemptRecord>>(emptyList())
+    override suspend fun saveScanAttempt(record: com.example.data.diagnostics.ScanAttemptRecord) {
+        scanAttempts.value = (scanAttempts.value.filterNot { it.scanAttemptId == record.scanAttemptId } + record).takeLast(200)
+    }
 
     /** Set to script the next [analyzeBarcode] outcome. Defaults to throwing if unset. */
     var barcodeResult: Result<FullProductAnalysis> = Result.failure(IllegalStateException("barcodeResult not configured"))

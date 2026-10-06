@@ -29,6 +29,13 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import com.example.data.diagnostics.*
+import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.createSavedStateHandle
+import androidx.lifecycle.viewmodel.CreationExtras
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.CancellationException
 
 sealed interface AnalysisUiState {
     object Idle : AnalysisUiState
@@ -105,8 +112,129 @@ sealed interface BarcodeLookupUiState {
 }
 
 class MainViewModel(
-    private val repository: ProductAnalysisSource
+    private val repository: ProductAnalysisSource,
+    private val savedState: SavedStateHandle = SavedStateHandle(),
+    private val diagnostics: ScanDiagnostics? = null
 ) : ViewModel() {
+    private val generator = ScanAttemptIdGenerator()
+    private val eventSequence = java.util.concurrent.atomic.AtomicInteger()
+    private var attemptOwner: String? = savedState["scan.owner"]
+    private var activeTrace: ScanTraceContext? = null
+    private var monotonicStart = android.os.SystemClock.elapsedRealtime()
+    private val _scanAttempt = MutableStateFlow<ScanAttempt?>(restoreAttempt())
+    val scanAttempt = _scanAttempt.asStateFlow()
+    val scanAttempts = repository.scanAttempts.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    private val _resultAttemptId = MutableStateFlow<ScanAttemptId?>(null)
+    val resultAttemptId = _resultAttemptId.asStateFlow()
+    private val _resultServerId = MutableStateFlow<ScanAttemptId?>(null)
+    val resultServerId = _resultServerId.asStateFlow()
+
+    init {
+        // Never replay a network operation after process death. Keep its ID as interrupted.
+        _scanAttempt.value?.let { restored ->
+            if (restored.outcome == null) finishAttempt(ScanAttemptOutcome.INTERRUPTED)
+        }
+    }
+
+    private fun restoreAttempt(): ScanAttempt? = runCatching {
+        val id = savedState.get<String>("scan.id") ?: return null
+        ScanAttempt(ScanAttemptId(id), ScanInput.valueOf(savedState["scan.input"]!!),
+            savedState["scan.started"] ?: 0L,
+            requestSequence = savedState["scan.sequence"] ?: 0,
+            outcome = savedState.get<String>("scan.outcome")?.let(ScanAttemptOutcome::valueOf),
+            serverId = savedState.get<String>("scan.serverId")?.let(::ScanAttemptId))
+    }.getOrNull()
+
+    fun beginScanAttempt(input: ScanInput): Boolean {
+        if (_scanAttempt.value?.outcome == null && _scanAttempt.value != null) return false
+        if (_barcodeLookupState.value is BarcodeLookupUiState.Searching) return false
+        val retained = scanAttempts.value.map { it.scanAttemptId }.toSet() + listOfNotNull(_scanAttempt.value?.id?.value)
+        val id = runCatching { generator.next(retained) }.getOrNull() ?: return false
+        val attempt = ScanAttempt(id, input, System.currentTimeMillis())
+        eventSequence.set(0)
+        monotonicStart = android.os.SystemClock.elapsedRealtime()
+        activeTrace = null
+        attemptOwner = diagnostics?.ownerKey()
+        savedState["scan.owner"] = attemptOwner
+        _scanAttempt.value = attempt
+        savedState["scan.id"] = id.value
+        savedState["scan.input"] = input.name
+        savedState["scan.started"] = attempt.startedAt
+        savedState["scan.sequence"] = 0
+        savedState["scan.serverId"] = null as String?
+        savedState["scan.outcome"] = null as String?
+        recordEvent(attempt.id, LocalScanStage.ACQUISITION, LocalScanOutcome.STARTED)
+        return true
+    }
+
+    private fun traceForSubmission(input: ScanInput): ScanTraceContext {
+        if (_scanAttempt.value == null || _scanAttempt.value?.outcome != null) beginScanAttempt(input)
+        val id = checkNotNull(_scanAttempt.value).id
+        recordEvent(id, LocalScanStage.ACQUISITION, LocalScanOutcome.SUCCEEDED)
+        return ScanTraceContext(id) { stage, outcome -> recordEvent(id, stage, outcome) }
+            .also { trace ->
+                trace.recordMetrics = { stage, outcome, metrics -> recordEvent(id, stage, outcome, metrics) }
+                activeTrace = trace
+            }
+    }
+
+    private fun recordEvent(
+        id: ScanAttemptId,
+        stage: LocalScanStage,
+        outcome: LocalScanOutcome,
+        metrics: Map<String, Double> = emptyMap()
+    ) {
+        if (diagnostics == null) return
+        val sequence = eventSequence.incrementAndGet()
+        if (sequence > 100_000) return
+        diagnostics.record(PendingScanEvent(scanAttemptId = id, occurredAt = System.currentTimeMillis(),
+            sequence = sequence, requestSequence = activeTrace?.requestSequence?.takeIf { it > 0 },
+            durationMs = (android.os.SystemClock.elapsedRealtime() - monotonicStart).coerceIn(0, 86_400_000),
+            reasonCode = when {
+                outcome == LocalScanOutcome.CANCELLED -> ScanReason.USER_CANCELLED
+                outcome == LocalScanOutcome.FAILED -> activeTrace?.reason ?: ScanReason.UNKNOWN
+                stage == LocalScanStage.RETRY -> ScanReason.AUTH_RETRY
+                else -> null
+            }, ownerKey = attemptOwner, stage = stage, outcome = outcome, metrics = metrics))
+    }
+
+    fun finishAcquisition(cancelled: Boolean) {
+        if (_barcodeLookupState.value is BarcodeLookupUiState.Searching) return
+        finishAttempt(if (cancelled) ScanAttemptOutcome.CANCELLED else ScanAttemptOutcome.FAILED)
+    }
+
+    private fun finishAttempt(outcome: ScanAttemptOutcome) {
+        val active = _scanAttempt.value ?: return
+        if (active.outcome != null) return
+        _scanAttempt.value = active.copy(requestSequence = activeTrace?.requestSequence ?: active.requestSequence,
+            serverId = activeTrace?.serverAttemptId ?: active.serverId).finish(outcome)
+        savedState["scan.outcome"] = outcome.name
+        savedState["scan.sequence"] = _scanAttempt.value!!.requestSequence
+        savedState["scan.serverId"] = _scanAttempt.value!!.serverId?.value
+        recordEvent(active.id, LocalScanStage.RESULT, LocalScanOutcome.valueOf(
+            if (outcome == ScanAttemptOutcome.SUCCESS) "SUCCEEDED" else outcome.name))
+        val record = ScanAttemptRecord(active.id.value, active.input.name, active.startedAt,
+            outcome.name, _scanAttempt.value?.serverId?.value)
+        viewModelScope.launch {
+            try { repository.saveScanAttempt(record) }
+            catch (e: CancellationException) { throw e }
+            catch (_: Exception) { /* Diagnostic persistence must not break the result. */ }
+        }
+    }
+
+    private fun finishSubmission() {
+        val outcome = when (_barcodeLookupState.value) {
+            is BarcodeLookupUiState.LabelScanRequired -> ScanAttemptOutcome.PARTIAL
+            is BarcodeLookupUiState.Failed -> ScanAttemptOutcome.FAILED
+            is BarcodeLookupUiState.Searching -> ScanAttemptOutcome.INTERRUPTED
+            else -> ScanAttemptOutcome.SUCCESS
+        }
+        if (outcome == ScanAttemptOutcome.SUCCESS) {
+            _resultAttemptId.value = _scanAttempt.value?.id
+            _resultServerId.value = activeTrace?.serverAttemptId
+        }
+        finishAttempt(outcome)
+    }
 
     private val _analysisState = MutableStateFlow<AnalysisUiState>(AnalysisUiState.Idle)
     val analysisState: StateFlow<AnalysisUiState> = _analysisState.asStateFlow()
@@ -175,6 +303,7 @@ class MainViewModel(
      */
     fun scanBarcode(barcode: String) {
         if (_barcodeLookupState.value is BarcodeLookupUiState.Searching) return
+        val trace = traceForSubmission(ScanInput.BARCODE_MANUAL)
         // Set synchronously, before launch: a coroutine launched on
         // viewModelScope doesn't necessarily start running before this
         // function returns (e.g. StandardTestDispatcher, or a second
@@ -183,7 +312,7 @@ class MainViewModel(
         // observe a stale Idle from a lookup that's already "in flight"
         // but hasn't run its first suspend point yet.
         _barcodeLookupState.value = BarcodeLookupUiState.Searching
-        viewModelScope.launch {
+        viewModelScope.launch(trace) {
             try {
                 val result = repository.analyzeBarcode(barcode)
                 _analysisState.value = AnalysisUiState.Success(result)
@@ -225,11 +354,15 @@ class MainViewModel(
                     e.message ?: "Something went wrong looking up this product. Please try again.",
                     barcode
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _barcodeLookupState.value = BarcodeLookupUiState.Failed(
                     e.localizedMessage ?: "Something went wrong looking up this product. Please try again.",
                     barcode
                 )
+            } finally {
+                finishSubmission()
             }
         }
     }
@@ -300,9 +433,10 @@ class MainViewModel(
      */
     fun analyzeOcrText(text: String) {
         if (_barcodeLookupState.value is BarcodeLookupUiState.Searching) return
+        val trace = traceForSubmission(ScanInput.TEXT)
         _barcodeLookupState.value = BarcodeLookupUiState.Searching
         val barcodeForThisSubmission = _pendingBarcode.value
-        viewModelScope.launch {
+        viewModelScope.launch(trace) {
             try {
                 val result = repository.analyzeOcrText(text, barcodeForThisSubmission)
                 _analysisState.value = AnalysisUiState.Success(result)
@@ -344,11 +478,15 @@ class MainViewModel(
                     e.message ?: "Something went wrong analyzing this text. Please try again.",
                     barcodeForThisSubmission ?: ""
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _barcodeLookupState.value = BarcodeLookupUiState.Failed(
                     e.localizedMessage ?: "Something went wrong analyzing this text. Please try again.",
                     barcodeForThisSubmission ?: ""
                 )
+            } finally {
+                finishSubmission()
             }
         }
     }
@@ -378,9 +516,10 @@ class MainViewModel(
      */
     fun analyzeLabelImage(bitmap: Bitmap) {
         if (_barcodeLookupState.value is BarcodeLookupUiState.Searching) return
+        val trace = traceForSubmission(ScanInput.LABEL_CAMERA)
         _barcodeLookupState.value = BarcodeLookupUiState.Searching
         val barcodeForThisSubmission = _pendingBarcode.value
-        viewModelScope.launch {
+        viewModelScope.launch(trace) {
             try {
                 val result = repository.analyzeImageLabel(bitmap, barcodeForThisSubmission)
                 _analysisState.value = AnalysisUiState.Success(result)
@@ -423,11 +562,15 @@ class MainViewModel(
                     e.message ?: "Something went wrong analyzing this label. Please try again.",
                     barcodeForThisSubmission ?: ""
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _barcodeLookupState.value = BarcodeLookupUiState.Failed(
                     e.localizedMessage ?: "Something went wrong analyzing this label. Please try again.",
                     barcodeForThisSubmission ?: ""
                 )
+            } finally {
+                finishSubmission()
             }
         }
     }
@@ -466,7 +609,11 @@ class MainViewModel(
         _analysisState.value = AnalysisUiState.Idle
     }
 
-    class Factory(private val repository: ProductAnalysisSource) : ViewModelProvider.Factory {
+    class Factory(private val repository: ProductAnalysisSource, private val diagnostics: ScanDiagnostics? = null) : ViewModelProvider.Factory {
+        override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T {
+            @Suppress("UNCHECKED_CAST")
+            return MainViewModel(repository, extras.createSavedStateHandle(), diagnostics) as T
+        }
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
             return MainViewModel(repository) as T

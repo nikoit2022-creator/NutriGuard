@@ -171,7 +171,17 @@ fun IngredientChip(
     }
 }
 
-fun hasUsefulIngredientDetails(ingredient: IngredientEntity): Boolean = listOf(
+fun hasUsefulIngredientDetails(
+    ingredient: IngredientEntity,
+    language: com.example.ui.i18n.AppLanguage = com.example.ui.i18n.AppLanguage.ENGLISH
+): Boolean = hasCanonicalIngredientDetails(ingredient) || ingredient.localizedContent(language).let {
+    listOf(it.description, it.purposeInFood, it.healthConcerns, it.effectConditions,
+        it.dietaryGuidance, it.evidenceLevel, it.countriesRestrictedOrBanned,
+        it.sideEffects, it.allergens, it.acceptableDailyIntake)
+        .any { value -> value.cleanOrNull() != null }
+}
+
+private fun hasCanonicalIngredientDetails(ingredient: IngredientEntity): Boolean = listOf(
     ingredient.description,
     ingredient.purposeInFood,
     ingredient.healthConcerns,
@@ -183,7 +193,8 @@ fun hasUsefulIngredientDetails(ingredient: IngredientEntity): Boolean = listOf(
     ingredient.allergens,
     ingredient.references,
     ingredient.sourceUrl.orEmpty(),
-    ingredient.localizationsJson,
+    ingredient.acceptableDailyIntake,
+    ingredient.whoIarcClassification.orEmpty(),
 ).any { it.cleanOrNull() != null } ||
     ingredient.riskAssessmentAvailable ||
     ingredient.efsaApprovalStatus.cleanOrNull()?.uppercase() in setOf("APPROVED", "NOT_APPROVED") ||

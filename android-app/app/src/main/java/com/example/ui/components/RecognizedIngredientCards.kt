@@ -155,7 +155,9 @@ fun RecognizedIngredientsSection(
             section.models.forEach { model ->
                 RecognizedIngredientCard(
                     model = model,
-                    onClick = { onIngredientClick(model.ingredient) }
+                    onClick = if (hasUsefulIngredientDetails(model.ingredient, language)) {
+                        { onIngredientClick(model.ingredient) }
+                    } else null
                 )
             }
         }

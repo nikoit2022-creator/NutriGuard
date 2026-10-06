@@ -50,10 +50,12 @@ class OpenFoodToxMigrationTest {
             db.execSQL("INSERT INTO ingredients ($columns) SELECT $columns FROM saved_ingredients")
             db.execSQL("DROP TABLE saved_ingredients")
             db.execSQL("DELETE FROM room_master_table")
+            db.execSQL("ALTER TABLE scan_history DROP COLUMN scanAttemptId")
+            db.execSQL("DROP TABLE scan_attempts")
             db.version = 4
             room.close()
             room = Room.databaseBuilder(context, AppDatabase::class.java, name)
-                .addMigrations(AppDatabase.MIGRATION_4_5).allowMainThreadQueries().build()
+                .addMigrations(AppDatabase.MIGRATION_4_5, AppDatabase.MIGRATION_5_6).allowMainThreadQueries().build()
             val restored = requireNotNull(room.ingredientDao().getIngredientByIdOrEnum(entity.id))
             assertEquals(entity.description, restored.description)
             assertEquals(entity.localizationsJson, restored.localizationsJson)

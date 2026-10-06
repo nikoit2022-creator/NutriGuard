@@ -11,5 +11,6 @@ data class ScanHistoryEntity(
     val brand: String,
     val healthScore: Int,
     val scannedAt: Long = System.currentTimeMillis(),
-    val scanType: String // "BARCODE", "OCR_LABEL", "MANUAL_INPUT"
+    val scanType: String, // "BARCODE", "OCR_LABEL", "MANUAL_INPUT"
+    val scanAttemptId: String? = null
 )
