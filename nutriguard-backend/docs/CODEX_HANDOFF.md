@@ -1,5 +1,19 @@
 # CODEX_HANDOFF
 
+## 2026-10-06: integration branch for scan-attempt diagnostics + ingredient identity (Claude Code)
+
+- Branch `integration/scan-diagnostics-ingredient-identity`, built from `origin/main` `2da53e3` by merging the ingredient follow-up
+  (`a915243`, `39fac43`, `e69ebf0`; the last two were Windows-local only) and the diagnostics branch (`98b2401`). One textual conflict
+  (this file) resolved by keeping both sides. No migration, dependency or compose change.
+- Full details, exact SHAs, Android compatibility findings, test results and a proposed (not executed) deployment/rollback:
+  `docs/SCAN_DIAGNOSTICS_INGREDIENT_IDENTITY_INTEGRATION_REPORT.md`.
+- Tests (disposable image + PostgreSQL 16 on the VM, never the live database): offline 1029 passed, 22 skipped; with the migrated disposable database
+  1050 passed, 1 skipped (OpenFoodTox migration test needs a separate empty database). OpenAPI identical to the checked-in file; vs main only the
+  additive `/scan-diagnostics/client-events` path and 6 schemas.
+- Unresolved: Android source not available (compatibility verified against its specified behaviour); diagnostics gaps listed in the report;
+  E150D/E150d lookup change needs owner review; live checkout untouched at `a915243` (`--reload` bind mount).
+- Recommended next step: owner review of the branch, then Codex runs the Android client against it; deployment only after explicit approval using the report's steps.
+
 ## 2026-10-06: Cyrillic E-number follow-up: legacy identities, live audit, E150D/E150d, completeness (Claude Code)
 
 - Full findings, exact test results and limitations: `docs/CYRILLIC_E_NUMBER_FOLLOWUP_REPORT.md`.
