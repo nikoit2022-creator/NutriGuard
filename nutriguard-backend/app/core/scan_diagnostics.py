@@ -82,11 +82,22 @@ def _append_locked(path: Path, line: bytes, max_bytes: int, backup_count: int) -
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def record_scan_diagnostic(**fields: Any) -> None:
-    """Best-effort write; diagnostic I/O must never break a scan."""
+def record_scan_diagnostic(**fields: Any) -> bool:
+    """Best-effort write; diagnostic I/O must never break a scan.
+
+    Returns whether a line was actually, durably appended: `False` when
+    diagnostics are disabled (nothing was ever attempted) OR when the
+    write itself failed (I/O error, lock contention, anything) --
+    deliberately the SAME signal for both, since a caller that needs to
+    know "was this truly persisted?" (Codex review round 2, finding 2 --
+    truthful client-event acknowledgment, see
+    `app.api.v1.scan_diagnostics`) must treat "skipped" and "failed"
+    identically: neither means the data now exists on disk. Callers
+    that don't need this (the router's own fire-and-forget diagnostic
+    writes) simply ignore the return value, exactly as before."""
     try:
         if not settings.SCAN_DIAGNOSTICS_ENABLED:
-            return
+            return False
         payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "backendVersion": settings.APP_VERSION,
@@ -100,7 +111,8 @@ def record_scan_diagnostic(**fields: Any) -> None:
             settings.SCAN_DIAGNOSTICS_MAX_BYTES,
             settings.SCAN_DIAGNOSTICS_BACKUP_COUNT,
         )
+        return True
     except Exception:
         # This journal is observational only. Normal application logging
         # remains responsible for reporting operational failures.
-        return
+        return False

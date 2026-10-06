@@ -1,8 +1,8 @@
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.enums import RiskLevel
+from app.models.enums import TRUSTED_INGREDIENT_SOURCES, RiskLevel
 from app.models.ingredient import Ingredient
 
 
@@ -23,13 +23,26 @@ async def get_by_official_identifier(
     if not e_number and not ins_number and not cas_number:
         return None
     clauses = []
+    # E-/INS-numbers compare case-INSENSITIVELY: a subtype suffix is the
+    # same identifier whether written "E150d" (curated seed, EU style) or
+    # "E150D" (OCR, upper-cased) -- a case-sensitive match minted a second
+    # row for the same additive. The suffix letter itself still
+    # distinguishes subtypes (E150a != E150d); only its case is ignored.
+    # When legacy data already holds several rows for one identifier, a
+    # curated/regulatory row wins, then the lowest id, so the result is
+    # deterministic instead of whichever row the planner returned first.
     if e_number:
-        clauses.append(Ingredient.e_number == e_number)
+        clauses.append(func.upper(Ingredient.e_number) == e_number.strip().upper())
     if ins_number:
-        clauses.append(Ingredient.ins_number == ins_number)
+        clauses.append(func.upper(Ingredient.ins_number) == ins_number.strip().upper())
     if cas_number:
         clauses.append(Ingredient.cas_number == cas_number)
-    stmt = select(Ingredient).where(or_(*clauses)).limit(1)
+    stmt = (
+        select(Ingredient)
+        .where(or_(*clauses))
+        .order_by(case((Ingredient.source.in_(tuple(TRUSTED_INGREDIENT_SOURCES)), 0), else_=1), Ingredient.id)
+        .limit(1)
+    )
     result = await db.execute(stmt)
     return result.scalar_one_or_none()
 
@@ -81,9 +94,16 @@ async def delete(db: AsyncSession, ingredient: Ingredient) -> None:
 
 async def get_by_id_or_e_number(db: AsyncSession, identifier: str) -> Ingredient | None:
     """Mirrors IngredientDao.getIngredientByIdOrEnum: WHERE id = :id OR eNumber = :id"""
-    stmt = select(Ingredient).where(
-        or_(Ingredient.id == identifier, Ingredient.e_number == identifier)
-    ).limit(1)
+    stmt = (
+        select(Ingredient)
+        .where(or_(Ingredient.id == identifier, func.upper(Ingredient.e_number) == identifier.strip().upper()))
+        .order_by(
+            case((Ingredient.id == identifier, 0), else_=1),
+            case((Ingredient.source.in_(tuple(TRUSTED_INGREDIENT_SOURCES)), 0), else_=1),
+            Ingredient.id,
+        )
+        .limit(1)
+    )
     result = await db.execute(stmt)
     return result.scalar_one_or_none()
 

@@ -55,13 +55,19 @@ async def test_long_unicode_and_punctuation_heavy_names_insert_cleanly_into_real
             "PG Test Модифицирано царевично нишесте хидролизат емулгатор стабилизатор "
             "сгъстител консервант партиден " * 2
         ),
-        "punctuation_heavy": "PG Test !!!Sodium-Benzoate/Potassium.Sorbate (E211/E202) -- 99.9%!!! @@@###$$$%%%^^^&&&***",
+        # No E-number here on purpose: a name carrying one resolves to the
+        # catalogue row that owns it (official-identifier reuse, covered
+        # separately below), so it would not exercise INSERT at all.
+        "punctuation_heavy": "PG Test !!!Sodium-Benzoate/Potassium.Sorbate (preservatives) -- 99.9%!!! @@@###$$$%%%^^^&&&***",
         "colliding_prefix_a": ("PG Test Highly Specific Compound Additive Formulation Batch " * 2) + "Variant Alpha",
         "colliding_prefix_b": ("PG Test Highly Specific Compound Additive Formulation Batch " * 2) + "Variant Beta",
     }
     for name in names.values():
         assert len(name) <= 255, f"test fixture name itself exceeds common_name's String(255): {len(name)} chars"
     synthetics = {key: create_synthetic_ingredient(name) for key, name in names.items()}
+    # Guard the fixture itself: every name must reach INSERT, never an
+    # official-identifier reuse (which depends on what the database holds).
+    assert all(s.e_number is None for s in synthetics.values()), "fixture names must not carry an E-number"
 
     ids = [s.id for s in synthetics.values()]
     assert len(set(ids)) == len(ids), f"expected all distinct ids, got {ids!r}"
@@ -104,3 +110,50 @@ async def test_long_unicode_and_punctuation_heavy_names_insert_cleanly_into_real
         await verify_session.close()
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_punctuation_heavy_name_with_an_e_number_reuses_the_catalogue_row_instead_of_inserting(postgres_url):
+    """Official-identifier reuse, tested separately from the INSERT/length
+    test above. Self-contained: it creates its own curated row under an
+    E-number no seed or migration uses (so it neither depends on nor
+    modifies seeded rows) and removes only that row afterwards."""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    from app.models.enums import IngredientSource, IngredientVerificationStatus, RiskLevel
+    from app.models.ingredient import Ingredient
+    from app.services.ingredient_catalog import get_or_create_catalog_ingredient
+    from app.services.ocr_normalizer import create_synthetic_ingredient
+
+    curated_id = "pgtest_e997z_curated"
+    engine = create_async_engine(postgres_url, future=True)
+    factory = async_sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
+    synthetic = create_synthetic_ingredient("PG Test !!!Sodium-Benzoate/Potassium.Sorbate (E997Z) -- 99.9%!!! @@@###")
+    assert synthetic.e_number == "E997Z" and len(synthetic.id) <= 64
+    try:
+        async with factory() as s:
+            await s.execute(Ingredient.__table__.delete().where(Ingredient.id.in_([curated_id, synthetic.id])))
+            s.add(
+                Ingredient(
+                    id=curated_id, common_name="PG Curated 997z", normalized_name="pg curated 997z", scientific_name="",
+                    e_number="E997z", category="Test", description="", purpose_in_food="", health_concerns="",
+                    evidence_level="", countries_restricted_or_banned="", efsa_status="", fda_status="",
+                    acceptable_daily_intake="", side_effects="", allergens="", references="",
+                    risk_level=RiskLevel.SAFE, risk_assessment_available=False,
+                    verification_status=IngredientVerificationStatus.LIMITED_DATA,
+                    source=IngredientSource.CURATED_SEED, confidence=0.75,
+                )
+            )
+            await s.commit()
+        async with factory() as s:
+            resolved = await get_or_create_catalog_ingredient(s, synthetic)
+            await s.commit()
+            assert resolved.id == curated_id  # case-insensitive: E997Z finds E997z
+        async with factory() as s:
+            assert (await s.execute(select(Ingredient).where(Ingredient.id == synthetic.id))).scalar_one_or_none() is None
+    finally:
+        async with factory() as s:
+            await s.execute(Ingredient.__table__.delete().where(Ingredient.id.in_([curated_id, synthetic.id])))
+            await s.commit()
+        await engine.dispose()

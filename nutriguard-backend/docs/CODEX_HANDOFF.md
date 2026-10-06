@@ -1,5 +1,42 @@
 # CODEX_HANDOFF
 
+## 2026-10-06: integration branch for scan-attempt diagnostics + ingredient identity (Claude Code)
+
+- Branch `integration/scan-diagnostics-ingredient-identity`, built from `origin/main` `2da53e3` by merging the ingredient follow-up
+  (`a915243`, `39fac43`, `e69ebf0`; the last two were Windows-local only) and the diagnostics branch (`98b2401`). One textual conflict
+  (this file) resolved by keeping both sides. No migration, dependency or compose change.
+- Full details, exact SHAs, Android compatibility findings, test results and a proposed (not executed) deployment/rollback:
+  `docs/SCAN_DIAGNOSTICS_INGREDIENT_IDENTITY_INTEGRATION_REPORT.md`.
+- Tests (disposable image + PostgreSQL 16 on the VM, never the live database): offline 1029 passed, 22 skipped; with the migrated disposable database
+  1050 passed, 1 skipped (OpenFoodTox migration test needs a separate empty database). OpenAPI identical to the checked-in file; vs main only the
+  additive `/scan-diagnostics/client-events` path and 6 schemas.
+- Unresolved: Android source not available (compatibility verified against its specified behaviour); diagnostics gaps listed in the report;
+  E150D/E150d lookup change needs owner review; live checkout untouched at `a915243` (`--reload` bind mount).
+- Recommended next step: owner review of the branch, then Codex runs the Android client against it; deployment only after explicit approval using the report's steps.
+
+## 2026-10-06: Cyrillic E-number follow-up: legacy identities, live audit, E150D/E150d, completeness (Claude Code)
+
+- Full findings, exact test results and limitations: `docs/CYRILLIC_E_NUMBER_FOLLOWUP_REPORT.md`.
+  Scan-attempt diagnostics (issue #30) integration plan and contract for Codex:
+  `docs/SCAN_ATTEMPT_DIAGNOSTICS_INTEGRATION_PLAN.md` (no diagnostics code was integrated).
+- Branch `fix/backend-cyrillic-e-number-followup` (from `a915243`). Not merged, not deployed; the live
+  database was only read in `READ ONLY` transactions; no container, secret or live checkout was touched.
+- Changed: `ocr_normalizer.resolve_synthetic_identity` (legacy id generations 0-3, ambiguity-safe),
+  `food_analysis._resolve_unmatched_reference` (every unambiguous text-backed E-number reference, current and legacy ids, reaches
+  the catalogue row on read; SELECT-only; ambiguous/unmatched/bare-number ids fail closed),
+  case-insensitive E-/INS-number lookup in `ingredient_repository`, new read-only scripts
+  `scripts/audit_catalogue_readonly.py`, `scripts/plan_e_number_remediation.py` and
+  `scripts/inventory_error_text_ingredients.py`, updated `scripts/audit_synthetic_ingredient_identity.py`, and tests.
+  Postgres id-length test split from official-identifier reuse (no curated rows deleted, no length assertion weakened).
+- Review follow-up (second commit): findings 1-3 addressed; exact results are in the report, section 6.
+- Tests (disposable image + PostgreSQL 16 on the deployment VM): default offline suite 949 passed, 22 skipped;
+  with the disposable database 970 passed, 1 skipped (OpenFoodTox migration test, needs a separate empty database); OpenAPI unchanged.
+- Unresolved: 38 live references are ambiguous (gen-0 collapsed Cyrillic ids); E150D/E150d duplicate and 7 legacy
+  Cyrillic-E rows are planned, not repaired; 2 historical error-text ingredient rows (17 products, created 2026-09-09..2026-09-26)
+  are inventoried only, current contamination is NOT proven (prevention exists and is tested); the lookup change needs review before deploy.
+- Recommended next step: review and merge this branch, then a separate approved task applies the E150D remediation
+  steps from the dry-run plan and only then proposes the `upper(e_number)` unique index; Codex builds diagnostics from the integration plan.
+
 ## 2026-10-02 (latest): PR #32 (OpenFoodTox pilot) deployed and verified (Claude Code)
 
 - Owner authorized deployment per issue #33, gated on PR #32 merged with
@@ -1255,6 +1292,130 @@ complete and verified. If the leftover `deploy-verify-20260917`
 device/user row should be removed, grant Bash permission for that
 specific delete (or run it manually) and re-run the two `DELETE`
 statements this session attempted.
+
+## 2026-09-29: issue #30 round 2 — addressed all 7 Codex review findings
+
+Continuation of the `feat/backend-scan-attempt-diagnostics-issue-30`
+branch (round 1 was pushed, not merged, per the completion report
+below). Codex reviewed the published round-1 code and returned 7
+blockers; this entry documents round 2, addressing all of them. Worked
+in the same isolated worktree
+(`/home/vboxuser/nutriguard-worktrees/feat-backend-scan-attempt-diagnostics-issue-30`)
+— the live bind-mounted checkout and its running containers
+(`nutriguard-backend-backend-1`/`-db-1`/`-redis-1`) were never touched,
+restarted, or connected to.
+
+1. **Internal pipeline tracing** — new `app.core.pipeline_trace`:
+   request-scoped (via `contextvars`, bound once per HTTP request in
+   `app.api.v1.scan`) entry/success/failure events for
+   `app.services.food_analysis`'s own internal stages
+   (`provider_cache_lookup`, `extraction`, `ingredient_segmentation`,
+   `identity_language_resolution`, `catalog_persistence`,
+   `nutrition_scoring_decision`, `response_construction`). Every call
+   site in `food_analysis.py` is a plain, synchronous
+   `enter_stage(...)`/`stage_success(...)` call inserted between
+   EXISTING statements — no `try`/`except` added to that file, no
+   control-flow change, no altered return value anywhere in it; failure
+   attribution happens centrally in the router's own already-existing
+   exception handlers instead (whichever stage(s) never reached their
+   own success call were the ones running when the exception
+   propagated — a LIFO stack, since this codebase deliberately commits
+   several stages' work in one outer transaction, so stages can nest).
+   Proven against the real endpoints, not just unit-level, in
+   `tests/integration/test_pipeline_trace_events.py`: a genuine success
+   path, a genuine `labelScanRequired` PARTIAL result (zero fabricated
+   failure events — persistence really did succeed before the 404 was
+   raised), a genuine extraction failure (both Gemini and the fallback
+   raising), and correlation isolation between two concurrent requests.
+2. **Truthful client-event acknowledgment** — `record_scan_diagnostic`
+   now returns whether a line was actually, durably written (`False`
+   for both "disabled" and "write failed" — the same signal, since a
+   caller needing truthfulness must treat them identically). The
+   endpoint (`app.api.v1.scan_diagnostics`) now reports an event as
+   `acceptedEventIds` ONLY after that return value is `True`; a new
+   `retryableEventIds` response field (additive `ClientEventBatchResponse`
+   field) carries anything not durably written, including while
+   diagnostics are disabled. Partial-batch failure is safe by
+   construction: each event is reserved/written/committed-or-released
+   independently in a loop; one event's failure cannot affect another's
+   outcome (regression test: `test_partial_batch_one_bad_write_does_not_affect_other_events`).
+3. **Cross-process-safe dedup** — new `app.core.client_event_ledger`: a
+   small, separate, bounded SQLite database (WAL mode, NOT the
+   application's own Postgres database, never touched by this feature)
+   implementing an atomic reserve-then-commit-or-release protocol
+   (`BEGIN IMMEDIATE` gives real cross-process mutual exclusion, proven
+   against genuinely separate OS processes in
+   `test_concurrent_reserve_across_processes_never_double_wins`).
+   Replaces the round-1 process-local in-memory LRU, which could never
+   coordinate across the multiple Uvicorn worker processes production
+   actually runs. Bounded (`SCAN_DIAGNOSTICS_CLIENT_EVENTS_DEDUP_MAX_ROWS`,
+   oldest pruned first) and self-healing (an abandoned reservation —
+   its owning worker crashed mid-write — is reclaimed after
+   `SCAN_DIAGNOSTICS_CLIENT_EVENTS_RESERVATION_TIMEOUT_SECONDS`).
+4. **Pseudonymous owner scoping** — new `app.core.owner_scope`: every
+   journal line (both `origin: backend` and `origin: android`) now
+   carries a stable, one-way `ownerScope` (HMAC-SHA256 of the
+   authenticated user id, keyed by the server's own `JWT_SECRET` —
+   never the raw user id itself, never reversible without that
+   secret). The operator CLI uses it to definitively distinguish two
+   different owners sharing one `scanAttemptId` from the weaker,
+   pre-existing `requestSequence`-counting heuristic (which still
+   applies as a fallback when no owner-scope signal is available).
+5. **Operator CLI fixes** (`app/seed/scan_attempt_trace.py`, rewritten):
+   one shared lock (the SAME sibling `.lock` file the writer uses) held
+   across the ENTIRE read of the current file AND every rotated backup
+   in one invocation, instead of round 1's per-file lock (which computed
+   a DIFFERENT, writer-irrelevant `<journal>.N.lock` path for a rotated
+   backup and re-acquired/released per file, allowing an inconsistent
+   snapshot across a concurrent rotation). Non-object JSON, malformed
+   records, invalid field types, and unreadable files are now all
+   handled defensively (reported, never crash the lookup). The
+   docstring's previous "never blocks a writer for longer than one
+   append" claim is corrected to state the real, bounded truth. Proven
+   under genuine concurrent rotation from a separate OS process
+   (`test_concurrent_rotation_does_not_corrupt_a_concurrent_read`).
+6. **Streaming request-size enforcement** — `_enforce_body_size` no
+   longer calls Starlette's `Request.body()` (which fully buffers
+   before returning); it now reads the body as a bounded stream and
+   raises the instant the running total exceeds the limit, so a
+   missing/lying `Content-Length` (or chunked transfer) can no longer
+   bypass the intended bound by being buffered in full first. The
+   already-verified bytes are cached onto `request._body` so FastAPI's
+   own later Pydantic parsing reads the identical bytes rather than
+   re-reading the (already exhausted) stream.
+7. **Contract reconciliation** — additive enum values only, nothing
+   removed/renamed: `ClientDiagnosticStage` gained `IMAGE_PREPARATION`/
+   `PARSING`/`PERSISTENCE`; `ClientDiagnosticOutcome` gained `PARTIAL`/
+   `INTERRUPTED`. Documented in `docs/SCAN_ATTEMPT_DIAGNOSTICS.md` and
+   `openapi.json` (regenerated inside a throwaway `python:3.12-slim`
+   container against the pinned `requirements.txt`, matching CI —
+   diff confined to these additive enum values, `retryableEventIds`,
+   and updated docstrings; nothing existing changed shape).
+
+**Verification**: `python3 -m pytest -q` (host Python 3.14 — no
+functional incompatibility observed; `openapi.json` regenerated on
+pinned Python 3.12 specifically to avoid this affecting the committed
+snapshot): **776 passed, 16 skipped, 7 warnings** (up from round 1's
+744 passed, 16 skipped; the 16 skips and 7 pre-existing warnings are
+unchanged from the `origin/main` baseline). +32 new/rewritten tests
+covering all 7 findings, including 3 genuine multi-process
+(`multiprocessing`, not threads) concurrency tests. No database/schema
+change — this feature remains entirely log-file/SQLite-file-based, no
+disposable-PostgreSQL cycle applies. Docker was available and used,
+but only to regenerate `openapi.json` on pinned dependencies — the live
+containers were never touched, restarted, or connected to. No live
+scans were run; no credentials were changed.
+
+**Not done in this round** (unchanged from round 1, still an
+explicitly-flagged, not-silently-dropped gap): Android's own uploader
+integration against this now-revised contract, and any decision about
+whether to merge/deploy — both require separate, explicit
+authorization per this task's scope.
+
+Branch pushed (not merged, not deployed) at the commit recorded in
+`docs/SCAN_ATTEMPT_DIAGNOSTICS_COMPLETION_REPORT.md`.
+
+---
 
 ## 2026-09-27: VM verification of ingredient review list
 

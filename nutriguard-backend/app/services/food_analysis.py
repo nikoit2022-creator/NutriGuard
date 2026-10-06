@@ -120,6 +120,7 @@ from typing import Any
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import pipeline_trace
 from app.core.config import settings
 from app.core.exceptions import (
     AIServiceUnavailableError,
@@ -156,6 +157,7 @@ from app.services.ocr_normalizer import (
     match_against_database,
     normalize_and_extract_tokens,
     reconstruct_synthetic_ingredient,
+    resolve_synthetic_identity,
 )
 from app.services.warning_engine import HealthWarning
 
@@ -187,6 +189,38 @@ async def _run_ai_or_fallback(title_hint: str, raw_text: str, db_ingredients: li
 
 def _ingredient_ids_string(ingredients: list[Any]) -> str:
     return ",".join(ing.id for ing in ingredients)
+
+
+def _synthesize_unknown_from_original_text(
+    tokens: list[str], matchable_tokens: list[str], norm: "NormalizedIngredientResult"
+) -> list[Any]:
+    """`norm.unknown_ingredients` (see `match_against_database`) is
+    computed against `matchable_tokens` -- the Bulgarian-alias-
+    substituted list built so an English and a Bulgarian mention of the
+    same ingredient match/dedupe together (see
+    `label_language.bulgarian_ingredient_alias`). Building the synthetic
+    ingredient straight from that SUBSTITUTED text would silently
+    replace a Bulgarian token's displayed identity with its English
+    alias -- contradicting `bulgarian_ingredient_alias`'s own documented
+    contract ("never alter the stored/displayed text") -- and would
+    desynchronize the new ingredient's id from `Product.
+    raw_ingredient_text`, which still holds the ORIGINAL, unsubstituted
+    text: `reconstruct_synthetic_ingredient` re-tokenizes that exact
+    original text on every later read and can never reproduce an id
+    generated from an alias it has no record of. Recovering the first
+    original token that produced each unknown matchable value and
+    building the synthetic ingredient from THAT keeps the stored text
+    and the id it's keyed under self-consistent, while still getting
+    the dedup benefit of matching on the alias (two original tokens that
+    alias to the same matchable value still collapse to one entry
+    here, exactly as `match_against_database` already deduped them)."""
+    original_by_matchable: dict[str, str] = {}
+    for original, matchable in zip(tokens, matchable_tokens):
+        original_by_matchable.setdefault(matchable, original)
+    return [
+        create_synthetic_ingredient(original_by_matchable.get(unknown, unknown))
+        for unknown in norm.unknown_ingredients
+    ]
 
 
 def _to_product_model(
@@ -780,8 +814,32 @@ async def fetch_ingredients_for_product(db: AsyncSession, product: Product) -> l
                 await ingredient_catalog.resolve_canonical_alias_owner(db, by_id[ingredient_id])
             )
         else:
-            resolved.append(reconstruct_synthetic_ingredient(ingredient_id, product.raw_ingredient_text))
+            resolved.append(await _resolve_unmatched_reference(db, ingredient_id, product.raw_ingredient_text))
     return resolved
+
+
+async def _resolve_unmatched_reference(db: AsyncSession, ingredient_id: str, raw_text: str) -> Any:
+    """Read-only resolution of a stored id that is not a catalogue row.
+
+    A stored id is recovered ONLY when a token of the stored text
+    deterministically reproduces it (`resolve_synthetic_identity`: current
+    or legacy id, unambiguous). When that token literally carries an
+    E-number, the catalogue row that owns the official identifier is
+    returned (the same E-number-first rule a fresh scan uses), so content
+    added to the catalogue AFTER the product was saved is reached, for
+    current-format ids as well as legacy ones. Nothing is written and the
+    stored id is never rewritten. A bare number is never turned into an
+    E-number, and an ambiguous or unsupported id keeps the readable-slug
+    fallback (fail closed)."""
+    resolution = resolve_synthetic_identity(ingredient_id, raw_text)
+    if resolution.ingredient is None:
+        return reconstruct_synthetic_ingredient(ingredient_id, raw_text)
+    synthetic = resolution.ingredient
+    if synthetic.e_number:
+        row = await ingredient_repository.get_by_official_identifier(db, e_number=synthetic.e_number)
+        if row is not None:
+            return await ingredient_catalog.resolve_canonical_alias_owner(db, row)
+    return synthetic
 
 
 async def _get_profile_namespace(db: AsyncSession, user_id: uuid.UUID) -> SimpleNamespace:
@@ -858,6 +916,7 @@ async def analyze_barcode(db: AsyncSession, user_id: uuid.UUID, barcode: str) ->
     # dashes) all resolve to the same persisted row REGARDLESS of which
     # exact form a pre-existing/legacy row happens to be stored under
     # (see product_repository.get_by_barcode_or_aliases).
+    pipeline_trace.enter_stage(pipeline_trace.PROVIDER_CACHE_LOOKUP)
     product = await product_repository.get_by_barcode_or_aliases(db, barcode, alias_keys)
     was_cache_hit = product is not None
     extra_warnings: list[HealthWarning] = []
@@ -874,7 +933,12 @@ async def analyze_barcode(db: AsyncSession, user_id: uuid.UUID, barcode: str) ->
                 f"No product found for barcode {barcode}.",
                 details=_not_found_details(barcode, outcome.attempts),
             )
+        pipeline_trace.stage_success(pipeline_trace.PROVIDER_CACHE_LOOKUP)
+        pipeline_trace.enter_stage(pipeline_trace.CATALOG_PERSISTENCE)
         product, extra_warnings = await _persist_discovered_product(db, outcome.product)
+        pipeline_trace.stage_success(pipeline_trace.CATALOG_PERSISTENCE)
+    else:
+        pipeline_trace.stage_success(pipeline_trace.PROVIDER_CACHE_LOOKUP)
 
     # Applies equally to a product just discovered above AND to a cache
     # hit of a previously-discovered-but-incomplete row: neither ever
@@ -896,12 +960,16 @@ async def analyze_barcode(db: AsyncSession, user_id: uuid.UUID, barcode: str) ->
             details=_label_scan_required_details(product, partial_ingredients),
         )
 
+    pipeline_trace.enter_stage(pipeline_trace.NUTRITION_SCORING_DECISION)
     ingredients = await fetch_ingredients_for_product(db, product)
 
     profile = await _get_profile_namespace(db, user_id)
     score, warnings = _score_and_warnings(product, ingredients, profile)
     warnings = list(warnings) + extra_warnings
     product.health_score = score
+    pipeline_trace.stage_success(pipeline_trace.NUTRITION_SCORING_DECISION)
+
+    pipeline_trace.enter_stage(pipeline_trace.CATALOG_PERSISTENCE)
     await db.flush()
 
     await scan_history_repository.insert(
@@ -916,14 +984,18 @@ async def analyze_barcode(db: AsyncSession, user_id: uuid.UUID, barcode: str) ->
         ),
     )
     await db.commit()
+    pipeline_trace.stage_success(pipeline_trace.CATALOG_PERSISTENCE)
 
-    return {
+    pipeline_trace.enter_stage(pipeline_trace.RESPONSE_CONSTRUCTION)
+    result = {
         "product": product,
         "ingredients": ingredients,
         "health_score": score,
         "warnings": warnings,
         "is_from_database_cache": was_cache_hit,
     }
+    pipeline_trace.stage_success(pipeline_trace.RESPONSE_CONSTRUCTION)
+    return result
 
 
 async def analyze_ocr_text(db: AsyncSession, user_id: uuid.UUID, raw_text: str) -> dict:
@@ -968,10 +1040,14 @@ async def analyze_ocr_text(db: AsyncSession, user_id: uuid.UUID, raw_text: str) 
     product normally -- see that function's docstring.
     """
     all_db_ingredients = await ingredient_repository.get_all(db)
+    pipeline_trace.enter_stage(pipeline_trace.EXTRACTION)
     data, ingredients = await _run_ai_or_fallback("Scanned Product", raw_text, all_db_ingredients)
+    pipeline_trace.stage_success(pipeline_trace.EXTRACTION)
+    pipeline_trace.enter_stage(pipeline_trace.INGREDIENT_SEGMENTATION)
     ingredients, _, pre_translation_summary = await ingredient_catalog.materialize_ingredients(
         db, ingredients
     )
+    pipeline_trace.stage_success(pipeline_trace.INGREDIENT_SEGMENTATION)
     validity = gemini_image_parser.LabelFieldValidity()
     ingredients_trustworthy = True
 
@@ -1420,6 +1496,7 @@ async def _run_label_image_pipeline(
     trustworthy evidence (contrast `analyze_ocr_text_with_barcode`,
     where the fallback tokenizes the user's own genuine OCR text).
     """
+    pipeline_trace.enter_stage(pipeline_trace.EXTRACTION)
     data: AnalyzedProductData | None = None
     ingredients: list[Any] | None = None
     validity = gemini_image_parser.LabelFieldValidity()
@@ -1460,6 +1537,7 @@ async def _run_label_image_pipeline(
         data.raw_ingredient_text = ""
         ingredients = []
 
+    pipeline_trace.stage_success(pipeline_trace.EXTRACTION)
     return data, ingredients, validity, ingredients_trustworthy
 
 
@@ -1529,9 +1607,11 @@ async def _finalize_barcode_enrichment(
     """
     canonical_barcode = barcode_info.gtin13
     alias_keys = barcode_validation.alias_keys(barcode_info)
+    pipeline_trace.enter_stage(pipeline_trace.PROVIDER_CACHE_LOOKUP)
     existing = await product_repository.get_by_barcode_or_aliases(
         db, barcode_raw, alias_keys, for_update=True
     )
+    pipeline_trace.stage_success(pipeline_trace.PROVIDER_CACHE_LOOKUP)
     # `pre_translation_summary` -- the caller's OWN earlier
     # `materialize_ingredients` pass (run right after ingredient
     # matching, before this finalize function) -- is where real
@@ -1550,6 +1630,7 @@ async def _finalize_barcode_enrichment(
     # there is nothing to translate or replace. Real ingredient text always
     # receives the strict EN/BG/translation policy, including when it refreshes
     # a previously verified provider list.
+    pipeline_trace.enter_stage(pipeline_trace.IDENTITY_LANGUAGE_RESOLUTION)
     has_label_ingredients = bool(data.raw_ingredient_text.strip())
     label_result = await resolve_label_text(data.raw_ingredient_text, strict=has_label_ingredients)
 
@@ -1590,8 +1671,7 @@ async def _finalize_barcode_enrichment(
         matchable_tokens = [label_language.bulgarian_ingredient_alias(t) or t for t in tokens]
         norm = match_against_database(matchable_tokens, await ingredient_repository.get_all(db))
         rebuilt: list[Any] = list(norm.matched_ingredients)
-        for unknown in norm.unknown_ingredients:
-            rebuilt.append(create_synthetic_ingredient(unknown))
+        rebuilt.extend(_synthesize_unknown_from_original_text(tokens, matchable_tokens, norm))
         if rebuilt:
             # Persistent ingredient knowledge cache -- see
             # `ingredient_catalog`'s module docstring.
@@ -1612,7 +1692,9 @@ async def _finalize_barcode_enrichment(
                         name for ing in ingredients if (name := getattr(ing, "common_name", ""))
                     )
                 )
+    pipeline_trace.stage_success(pipeline_trace.IDENTITY_LANGUAGE_RESOLUTION)
 
+    pipeline_trace.enter_stage(pipeline_trace.CATALOG_PERSISTENCE)
     source_label = "label_scan_translated" if label_result.translation_used else "label_scan"
     product, used_label_analysis = await _persist_enriched_product(
         db, existing, canonical_barcode, data, ingredients, validity, ingredients_trustworthy, source_label
@@ -1659,6 +1741,7 @@ async def _finalize_barcode_enrichment(
         # verified but nutrition missing -- that path's own partial-
         # ingredients handling is unaffected by this change).
         await db.commit()
+        pipeline_trace.stage_success(pipeline_trace.CATALOG_PERSISTENCE)
         raise ProductNotFoundError(
             f"Product {product.barcode} could not be read reliably -- no ingredients were recognized.",
             details=_label_scan_required_details(product, None),
@@ -1667,6 +1750,7 @@ async def _finalize_barcode_enrichment(
             ),
         )
 
+    pipeline_trace.enter_stage(pipeline_trace.NUTRITION_SCORING_DECISION)
     ingredients_out = await fetch_ingredients_for_product(db, product)
 
     # Health Score stays a SEPARATE axis (V13): computed only when
@@ -1692,12 +1776,15 @@ async def _finalize_barcode_enrichment(
                 scan_type=scan_type,
             ),
         )
+    pipeline_trace.stage_success(pipeline_trace.NUTRITION_SCORING_DECISION)
     # The single outer-transaction commit: product changes, provenance,
     # and (when computed) Health Score + scan history all land together,
     # or (on any exception above) none of them do.
     await db.commit()
+    pipeline_trace.stage_success(pipeline_trace.CATALOG_PERSISTENCE)
 
-    return {
+    pipeline_trace.enter_stage(pipeline_trace.RESPONSE_CONSTRUCTION)
+    result = {
         "product": product,
         "ingredients": ingredients_out,
         "health_score": health_score_value,
@@ -1716,6 +1803,8 @@ async def _finalize_barcode_enrichment(
         # `_translation_diagnostic_fields` so the two can never drift.
         **_translation_diagnostic_fields(label_result, ingredient_translation_summary),
     }
+    pipeline_trace.stage_success(pipeline_trace.RESPONSE_CONSTRUCTION)
+    return result
 
 
 async def analyze_label_image_with_barcode(
@@ -1754,9 +1843,11 @@ async def analyze_label_image_with_barcode(
     # get-or-create against an already-existing row after the first
     # time) and keeps every code path honestly covered rather than
     # relying on the rebuild always running.
+    pipeline_trace.enter_stage(pipeline_trace.INGREDIENT_SEGMENTATION)
     ingredients, _, pre_translation_summary = await ingredient_catalog.materialize_ingredients(
         db, ingredients
     )
+    pipeline_trace.stage_success(pipeline_trace.INGREDIENT_SEGMENTATION)
 
     return await _finalize_barcode_enrichment(
         db,
@@ -1806,10 +1897,14 @@ async def analyze_ocr_text_with_barcode(
         raise ValidationAppError(f"'{barcode_raw}' is not a valid barcode.")
 
     all_db_ingredients = await ingredient_repository.get_all(db)
+    pipeline_trace.enter_stage(pipeline_trace.EXTRACTION)
     data, ingredients = await _run_ai_or_fallback("Scanned Product", raw_text, all_db_ingredients)
+    pipeline_trace.stage_success(pipeline_trace.EXTRACTION)
+    pipeline_trace.enter_stage(pipeline_trace.INGREDIENT_SEGMENTATION)
     ingredients, _, pre_translation_summary = await ingredient_catalog.materialize_ingredients(
         db, ingredients
     )
+    pipeline_trace.stage_success(pipeline_trace.INGREDIENT_SEGMENTATION)
     validity = gemini_image_parser.LabelFieldValidity()
     ingredients_trustworthy = True
 
@@ -1926,6 +2021,7 @@ async def _finalize_standalone_label_analysis(
     nutrition must never set `has_verified_nutrition`; only genuinely
     trustworthy evidence does, exactly like the barcode-linked path.
     """
+    pipeline_trace.enter_stage(pipeline_trace.IDENTITY_LANGUAGE_RESOLUTION)
     label_result = await resolve_label_text(data.raw_ingredient_text, strict=False)
     # See `_finalize_barcode_enrichment`'s identical block for the full
     # rationale on merging the caller's earlier pass with this
@@ -1951,8 +2047,7 @@ async def _finalize_standalone_label_analysis(
         matchable_tokens = [label_language.bulgarian_ingredient_alias(t) or t for t in tokens]
         norm = match_against_database(matchable_tokens, await ingredient_repository.get_all(db))
         rebuilt: list[Any] = list(norm.matched_ingredients)
-        for unknown in norm.unknown_ingredients:
-            rebuilt.append(create_synthetic_ingredient(unknown))
+        rebuilt.extend(_synthesize_unknown_from_original_text(tokens, matchable_tokens, norm))
         if rebuilt:
             # Persistent ingredient knowledge cache -- see
             # `ingredient_catalog`'s module docstring.
@@ -1969,6 +2064,8 @@ async def _finalize_standalone_label_analysis(
                     )
                 )
 
+    pipeline_trace.stage_success(pipeline_trace.IDENTITY_LANGUAGE_RESOLUTION)
+
     nutrition_complete = _nutrition_group_is_complete(validity)
     ingredients_complete = _ingredients_group_is_complete(data, ingredients_trustworthy)
     # `is_complete` still tracks full verification / Health-Score
@@ -1977,6 +2074,7 @@ async def _finalize_standalone_label_analysis(
     # more -- see that gate's own comment.
     is_complete = nutrition_complete and ingredients_complete
 
+    pipeline_trace.enter_stage(pipeline_trace.CATALOG_PERSISTENCE)
     barcode = f"{barcode_prefix}_{int(time.time() * 1000)}"
     source_label = "label_scan_translated" if label_result.translation_used else "label_scan"
     product = _to_product_model(
@@ -2016,6 +2114,7 @@ async def _finalize_standalone_label_analysis(
         # `ingredients_complete` is False here by construction, so there
         # is no genuinely trustworthy partial evidence to hand back.
         await db.commit()
+        pipeline_trace.stage_success(pipeline_trace.CATALOG_PERSISTENCE)
         raise ProductNotFoundError(
             f"Product {product.barcode} could not be read reliably -- no ingredients were recognized.",
             details=_label_scan_required_details(product, None),
@@ -2033,6 +2132,7 @@ async def _finalize_standalone_label_analysis(
     # (its nutrition is always a heuristic guess -- see
     # `analyze_ocr_text`'s docstring), so a standalone OCR-text call
     # always takes this branch.
+    pipeline_trace.enter_stage(pipeline_trace.NUTRITION_SCORING_DECISION)
     health_score_value: int | None = None
     warnings: list[HealthWarning] = []
     if nutrition_complete:
@@ -2051,9 +2151,12 @@ async def _finalize_standalone_label_analysis(
                 scan_type=scan_type,
             ),
         )
+    pipeline_trace.stage_success(pipeline_trace.NUTRITION_SCORING_DECISION)
     await db.commit()
+    pipeline_trace.stage_success(pipeline_trace.CATALOG_PERSISTENCE)
 
-    return {
+    pipeline_trace.enter_stage(pipeline_trace.RESPONSE_CONSTRUCTION)
+    result = {
         "product": product,
         "ingredients": ingredients,
         "health_score": health_score_value,
@@ -2065,6 +2168,8 @@ async def _finalize_standalone_label_analysis(
         # same function's own `ProductNotFoundError` raise site above.
         **_translation_diagnostic_fields(label_result, ingredient_translation_summary),
     }
+    pipeline_trace.stage_success(pipeline_trace.RESPONSE_CONSTRUCTION)
+    return result
 
 
 async def analyze_label_image(db: AsyncSession, user_id: uuid.UUID, image_bytes: bytes) -> dict:
@@ -2101,9 +2206,11 @@ async def analyze_label_image(db: AsyncSession, user_id: uuid.UUID, image_bytes:
     # get-or-create against an already-existing row after the first
     # time) and keeps every code path honestly covered rather than
     # relying on the rebuild always running.
+    pipeline_trace.enter_stage(pipeline_trace.INGREDIENT_SEGMENTATION)
     ingredients, _, pre_translation_summary = await ingredient_catalog.materialize_ingredients(
         db, ingredients
     )
+    pipeline_trace.stage_success(pipeline_trace.INGREDIENT_SEGMENTATION)
 
     return await _finalize_standalone_label_analysis(
         db,
