@@ -42,9 +42,12 @@ them. An E-number is only recovered when the stored token literally carries
 Cyrillic `Е` + digits; a bare number is never promoted (tests below).
 
 On read, `fetch_ingredients_for_product` (`food_analysis._resolve_unmatched_reference`)
-additionally resolves a **legacy-recovered token with an E-number** to the catalogue
-row that owns that official identifier (same E-number-first rule as a fresh scan),
-so curated narrative is reached. Nothing is written; `Product.ingredient_ids` is
+additionally resolves **every unambiguous, text-backed identity match that carries an
+explicit E-number, current-format ids included** (review finding 1), to the catalogue
+row that owns that official identifier (same E-number-first rule as a fresh scan), so
+curated narrative added after the product was saved is reached. Fail-closed cases are
+unchanged: an ambiguous or unmatched id, and a bare number, never reach a catalogue row.
+The lookup is SELECT-only (tested with a statement spy); `Product.ingredient_ids` is
 never rewritten.
 
 `scripts/audit_synthetic_ingredient_identity.py` now treats recoverable legacy ids
@@ -53,13 +56,16 @@ as non-damage, and sets `SET TRANSACTION READ ONLY` on PostgreSQL.
 ### Tests (all new unless noted)
 
 - `tests/unit/test_ocr_normalizer.py` (+17): legacy Cyrillic-E id, Cyrillic words with no readable slug, current id wins, bare number never an E-number, unrelated text does not recover, alias substitution, ambiguity (including the shared `synth_` id of several Cyrillic tokens, duplicate tokens of one identity, a simulated hash collision), gen-0 and gen-1 recovery, gen-1 case sensitivity.
-- `tests/integration/test_legacy_synthetic_identity_reload.py` (3): persists a `Product` with legacy ids and reloads it through `POST /scan/barcode`; asserts E414/alias identity recovered, stored row untouched, a bare `414` never becomes an E-number, and legacy `Е300` ids of both generations reach the curated E300 row.
+- `tests/integration/test_legacy_synthetic_identity_reload.py` (6): persists a `Product` with legacy ids and reloads it through `POST /scan/barcode`; asserts E414/alias identity recovered, stored row untouched, a bare `414` never becomes an E-number, and legacy `Е300` ids of both generations reach the curated E300 row. Review finding 1 adds: **save, then curated E300 appears, then reload** with a current-format id (before: empty synthetic profile; after: canonical id `e300_ascorbic_acid`, name, description and purpose); ambiguous/unmatched/bare-number ids fail closed even when a catalogue row exists; and the reload lookup issues only SELECT statements.
 - `tests/integration/test_audit_synthetic_ingredient_identity.py` (changed 1, added 1): the former "damaged" Cyrillic-E case is now recoverable; without supporting Cyrillic text it is still `BARE_NUMBER_NO_IDENTITY`.
 
 ### Before / after (regression demonstration)
 
 Persistence + reload test file run against the pre-change `ocr_normalizer.py`
-(commit `a915243` version bind-mounted into the same image):
+(commit `a915243` version bind-mounted into the same image). The finding-1 tests were also
+run against the previous `food_analysis.py` (commit `39fac43`, legacy-only lookup):
+`2 failed, 4 passed` (`assert 'synth_e300_4d18679422d6' == 'e300_ascorbic_acid'`); with the fix all 6 pass.
+First comparison:
 
 ```
 FAILED test_product_persisted_with_legacy_ids_reloads_with_identity
@@ -111,12 +117,19 @@ never reached it, after it they resolve to that row.
 
 ### Other live findings worth an owner decision
 
-- **Status strings stored as ingredients.** `synth_ai_response_was_unavailable_or_invalid_...`
-  ("AI response was unavailable or invalid", 17 product references) and
-  `synth_ingredients_could_not_be_extracted_from_the_i_...` ("Ingredients could not be
-  extracted from the image", 17) are persisted as ingredient rows. They are error/status
-  text, not ingredients. Source of the strings was not traced in this task (UNVERIFIED);
-  recommend a separate fix + review of how they reach `ingredients`.
+- **Historical error-text ingredient rows (not proven to be current).** Two catalogue rows are the
+  provider-failure sentences "AI response was unavailable or invalid" and "Ingredients could not be
+  extracted from the image" (`OCR_HEURISTIC`, `UNVERIFIED`, `retrieved_at` 2026-09-09), referenced by
+  17 products (34 references). The code already prevents new ones: `_run_label_image_pipeline` clears the
+  failed-image fallback text and ingredients (commit `d372985`, issue #23 stage 2), covered by
+  `test_a_failed_label_scan_no_longer_puts_error_text_into_the_catalog`; both entry points
+  (`analyze_label_image` and `analyze_label_image_with_barcode`) go through that function, and it is the only
+  place the placeholder sentence is built. All 17 referencing products were created between
+  2026-09-09 and 2026-09-26 (none later), which is consistent with historical data but does **not** prove no
+  current scan can create such a row. The dry-run inventory below only lists them.
+  `scripts/inventory_error_text_ingredients.py` (read-only, SELECT-only, tested) reports rows, aliases,
+  localizations, candidate-queue rows and referencing products (with `created_at`/`source`); live result:
+  2 rows, 17 products, 34 references, 0 candidate rows, 0 localizations. No deletion or repair is proposed here.
 - **Seven legacy rows with `e_number` NULL whose text is a Cyrillic E-number**
   (`synth_300_...` "Киселина: Е300", `synth_202_...`, `synth_211_...`, `synth_414_...`,
   `synth_955_...`, `synth_950_...`, `synth_150d_...` "Оцветител (Е 150d"), each referenced by one
@@ -212,7 +225,7 @@ Nothing was imported or invented; no live content changed.
 
 Next by product reach (all stubs): salt 20, wheat flour 12, "Ароматизант" 11, skimmed milk powder 7,
 E330 citric acid 6 (curated, draft BG), E150D 6, HFCS 5, E322 soy lecithin 4 (curated). Also the two
-status-string pseudo-ingredients (17 each, section 2).
+historical error-text rows (17 products each, section 2).
 
 ## 5. Scan-attempt diagnostics handoff (issue #30)
 
@@ -241,15 +254,22 @@ the `nutriguard-backend-*` containers and the bind-mounted checkout were not tou
 The local host has no Docker.
 
 - Default run, offline (`--network none`, SQLite, Postgres opt-in tests skipped):
-  `python -m pytest -q -p no:cacheprovider` -> **945 passed, 21 skipped, 2 warnings in 31.47s**
-  (baseline in the previous report: 916 passed, 20 skipped; the 21st skip is the new opt-in Postgres test).
+  `python -m pytest -q -p no:cacheprovider` -> **949 passed, 22 skipped, 2 warnings in 34.84s**
+  (previous report's baseline: 916 passed, 20 skipped; the extra skips are the two new opt-in Postgres tests).
 - Same suite with `NUTRIGUARD_TEST_POSTGRES_URL` set to the disposable database after
-  `alembic upgrade head` (all migrations apply on PostgreSQL 16): **964 passed, 1 failed, 1 skipped in 35.26s**.
-  The one failure, `tests/postgres/test_synthetic_ingredient_id_postgres.py::test_long_unicode_and_punctuation_heavy_names_insert_cleanly_into_real_postgres`,
-  **fails identically on the pre-change repository code** (verified by bind-mounting the old
-  `ingredient_repository.py`): the test assumes an empty database, but a migrated database already holds curated E211, so
-  its name containing `E211` resolves to that row instead of inserting. It is a pre-existing test-isolation
-  issue, not a regression.
+  `alembic upgrade head` (all migrations apply on PostgreSQL 16): **970 passed, 1 skipped, 2 warnings in 40.70s**.
+  The skip is `tests/postgres/test_openfoodtox_pilot_import_postgres.py` (needs a separate EMPTY database via
+  `NUTRIGUARD_TEST_POSTGRES_MIGRATION_URL` because it runs real `alembic downgrade`); it was not run.
+- Focused regressions (reload, inventory, candidate queue, both id/E-number Postgres files): 43 passed.
+- **PostgreSQL id-length test (review finding 2).** The earlier failure of
+  `test_synthetic_ingredient_id_postgres` came from its punctuation-heavy fixture name containing `E211`: with a
+  seeded/migrated `E211` the resolver correctly reuses the catalogue row, so no synthetic row exists to assert on.
+  Insertion/length testing is now separated from official-identifier reuse: the fixture name has no E-number
+  (heavy punctuation kept; the test asserts no fixture name carries one), and a new self-contained test
+  `test_a_punctuation_heavy_name_with_an_e_number_reuses_the_catalogue_row_instead_of_inserting` creates its own curated
+  row under an unseeded E-number (`E997z`), resolves `E997Z`, asserts reuse and that no synthetic row was inserted, and removes
+  only its own rows. Real PostgreSQL INSERT coverage (long ASCII, Unicode, punctuation-heavy, colliding prefixes) and
+  the 64-character length assertions are unchanged; no curated rows were deleted.
 - OpenAPI: `app.main.app.openapi()` compared with the checked-in `openapi.json` as sorted JSON: **identical**
   (no wire-contract change; no README deviation entry needed).
 
@@ -257,8 +277,8 @@ The local host has no Docker.
 
 - 38 live references are ambiguous by construction (gen-0 collapsed Cyrillic ids). Recovery needs a re-scan or a reviewed mapping; none was guessed.
 - The E150D to E150d lookup change alters resolution for new scans; it needs review before deploy. The remediation plan and any unique index are not applied.
-- Legacy rows with a NULL `e_number` (7) and the status-string pseudo-ingredients need a decision and a separate task.
-- The read path resolves legacy E-number references to catalogue rows with up to one extra query per such reference per product load.
+- Legacy rows with a NULL `e_number` (7) and the 2 historical error-text rows need a decision and a separate task; current contamination is not asserted.
+- The read path now resolves any text-backed E-number reference that is not a catalogue row to the catalogue row, with up to two extra SELECTs per such reference per product load.
 - Raw OpenFoodTox counts for the priority codes were not re-derived (1.4 GB staging file); they come from the earlier report.
 - No live data, container, secret or checkout was modified. The disposable test containers and the temporary directory `~/nutriguard-claude-task` on the VM are not cleaned up yet; remove them when the owner confirms.
 

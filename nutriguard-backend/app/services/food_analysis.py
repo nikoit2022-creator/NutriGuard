@@ -154,7 +154,6 @@ from app.services.label_language import LabelTextResult, resolve_label_text
 from app.services.ocr_normalizer import (
     create_synthetic_ingredient,
     match_against_database,
-    SyntheticIdentityMatch,
     normalize_and_extract_tokens,
     reconstruct_synthetic_ingredient,
     resolve_synthetic_identity,
@@ -818,32 +817,24 @@ async def fetch_ingredients_for_product(db: AsyncSession, product: Product) -> l
     return resolved
 
 
-_LEGACY_MATCHES = frozenset(
-    {
-        SyntheticIdentityMatch.LEGACY_CYRILLIC_E,
-        SyntheticIdentityMatch.LEGACY_ALIAS,
-        SyntheticIdentityMatch.LEGACY_BARE_SLUG,
-        SyntheticIdentityMatch.LEGACY_HASH10,
-    }
-)
-
-
 async def _resolve_unmatched_reference(db: AsyncSession, ingredient_id: str, raw_text: str) -> Any:
     """Read-only resolution of a stored id that is not a catalogue row.
 
-    An id minted by older code is recovered ONLY when a token of the
-    stored text deterministically reproduces it (`resolve_synthetic_identity`);
-    when that token literally carries an E-number, the catalogue row that
-    owns the official identifier is returned (the same E-number-first rule
-    a fresh scan uses), so the curated narrative is reached. Nothing is
-    written and the stored id is never rewritten. A bare number is never
-    turned into an E-number, and an ambiguous or unsupported id keeps the
-    readable-slug fallback."""
+    A stored id is recovered ONLY when a token of the stored text
+    deterministically reproduces it (`resolve_synthetic_identity`: current
+    or legacy id, unambiguous). When that token literally carries an
+    E-number, the catalogue row that owns the official identifier is
+    returned (the same E-number-first rule a fresh scan uses), so content
+    added to the catalogue AFTER the product was saved is reached, for
+    current-format ids as well as legacy ones. Nothing is written and the
+    stored id is never rewritten. A bare number is never turned into an
+    E-number, and an ambiguous or unsupported id keeps the readable-slug
+    fallback (fail closed)."""
     resolution = resolve_synthetic_identity(ingredient_id, raw_text)
     if resolution.ingredient is None:
         return reconstruct_synthetic_ingredient(ingredient_id, raw_text)
     synthetic = resolution.ingredient
-    if resolution.match in _LEGACY_MATCHES and synthetic.e_number:
+    if synthetic.e_number:
         row = await ingredient_repository.get_by_official_identifier(db, e_number=synthetic.e_number)
         if row is not None:
             return await ingredient_catalog.resolve_canonical_alias_owner(db, row)

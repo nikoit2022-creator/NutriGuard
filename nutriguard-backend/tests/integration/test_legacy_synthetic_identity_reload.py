@@ -152,3 +152,100 @@ async def test_legacy_cyrillic_e_reference_reaches_the_curated_catalogue_row(app
 
     row = (await db_session.execute(select(Product).where(Product.barcode == barcode))).scalar_one()
     assert row.ingredient_ids == stored_ids  # no live-record rewrite
+
+
+# --- Current-format ids also reach catalogue content (review finding 1) ------
+
+
+def _curated_e300():
+    from app.models.enums import IngredientSource, IngredientVerificationStatus, RiskLevel
+    from app.models.ingredient import Ingredient
+
+    return Ingredient(
+        id="e300_ascorbic_acid", common_name="Ascorbic acid", normalized_name="ascorbic acid",
+        scientific_name="", e_number="E300", category="Antioxidant", description="Vitamin C.",
+        purpose_in_food="Vitamin C; antioxidant/reducing agent", health_concerns="",
+        evidence_level="", countries_restricted_or_banned="", efsa_status="", fda_status="",
+        acceptable_daily_intake="", side_effects="", allergens="", references="",
+        risk_level=RiskLevel.SAFE, risk_assessment_available=False,
+        verification_status=IngredientVerificationStatus.LIMITED_DATA,
+        source=IngredientSource.CURATED_SEED, confidence=0.75,
+    )
+
+
+@pytest.mark.asyncio
+async def test_current_format_id_reaches_catalogue_content_added_after_the_product_was_saved(app_client, db_session):
+    """save -> catalogue content becomes available -> product reload."""
+    from app.services.ocr_normalizer import create_synthetic_ingredient
+
+    barcode = "8200889900117"
+    current_id = create_synthetic_ingredient("E300").id  # current format, E-number literally in the text
+    db_session.add(_persisted_product(barcode, "Water, E300", f"{_synthetic_id('Water')},{current_id}"))
+    await db_session.commit()
+    headers = await _headers(app_client)
+
+    before = (await app_client.post("/api/v1/scan/barcode", json={"barcode": barcode}, headers=headers)).json()
+    e300_before = next(i for i in before["ingredients"] if i.get("eNumber") == "E300")
+    assert e300_before["id"] == current_id and not e300_before["purposeInFood"]  # empty synthetic profile
+
+    db_session.add(_curated_e300())
+    await db_session.commit()
+
+    after = (await app_client.post("/api/v1/scan/barcode", json={"barcode": barcode}, headers=headers)).json()
+    e300 = next(i for i in after["ingredients"] if i.get("eNumber") == "E300")
+    assert e300["id"] == "e300_ascorbic_acid"  # canonical identity
+    assert e300["commonName"] == "Ascorbic acid"
+    assert e300["purposeInFood"] == "Vitamin C; antioxidant/reducing agent"
+    assert e300["description"] == "Vitamin C."
+    row = (await db_session.execute(select(Product).where(Product.barcode == barcode))).scalar_one()
+    assert current_id in row.ingredient_ids  # stored id untouched
+
+
+@pytest.mark.asyncio
+async def test_unmatched_ambiguous_and_bare_number_ids_fail_closed_even_with_a_catalogue_row(app_client, db_session):
+    from app.services.ocr_normalizer import create_synthetic_ingredient
+
+    db_session.add(_curated_e300())
+    bare_id = create_synthetic_ingredient("300").id
+    db_session.add(_persisted_product("8200889900124", "Вода, сол, 300", f"synth_,{bare_id},synth_unrelated_thing"))
+    await db_session.commit()
+
+    resp = await app_client.post(
+        "/api/v1/scan/barcode", json={"barcode": "8200889900124"}, headers=await _headers(app_client)
+    )
+    assert resp.status_code == 200, resp.text
+    ingredients = resp.json()["ingredients"]
+    assert "e300_ascorbic_acid" not in {i["id"] for i in ingredients}
+    assert not any(i.get("eNumber") for i in ingredients)
+    assert ingredients[0]["commonName"] == "Ingredient detected on label"  # ambiguous 'synth_'
+    assert ingredients[1]["commonName"] == "300"  # bare number stays a bare number
+
+
+@pytest.mark.asyncio
+async def test_catalogue_lookup_during_reload_issues_only_select_statements(db_session):
+    from sqlalchemy import event
+
+    from app.services.food_analysis import fetch_ingredients_for_product
+    from app.services.ocr_normalizer import create_synthetic_ingredient
+
+    db_session.add(_curated_e300())
+    product = _persisted_product(
+        "8200889900131", f"Вода, E300, {CYR_E}300", f"{create_synthetic_ingredient('E300').id},synth_300"
+    )
+    db_session.add(product)
+    await db_session.commit()
+
+    statements: list[str] = []
+    engine = db_session.bind.sync_engine
+
+    def _spy(conn, cursor, statement, params, context, executemany):
+        statements.append(statement.lstrip().split(None, 1)[0].upper())
+
+    event.listen(engine, "before_cursor_execute", _spy)
+    try:
+        resolved = await fetch_ingredients_for_product(db_session, product)
+    finally:
+        event.remove(engine, "before_cursor_execute", _spy)
+
+    assert [i.id for i in resolved] == ["e300_ascorbic_acid", "e300_ascorbic_acid"]
+    assert statements and set(statements) == {"SELECT"}

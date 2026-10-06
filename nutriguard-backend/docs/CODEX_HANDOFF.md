@@ -8,16 +8,18 @@
 - Branch `fix/backend-cyrillic-e-number-followup` (from `a915243`). Not merged, not deployed; the live
   database was only read in `READ ONLY` transactions; no container, secret or live checkout was touched.
 - Changed: `ocr_normalizer.resolve_synthetic_identity` (legacy id generations 0-3, ambiguity-safe),
-  `food_analysis._resolve_unmatched_reference` (legacy E-number references reach the catalogue row),
+  `food_analysis._resolve_unmatched_reference` (every unambiguous text-backed E-number reference, current and legacy ids, reaches
+  the catalogue row on read; SELECT-only; ambiguous/unmatched/bare-number ids fail closed),
   case-insensitive E-/INS-number lookup in `ingredient_repository`, new read-only scripts
-  `scripts/audit_catalogue_readonly.py` and `scripts/plan_e_number_remediation.py`, updated
-  `scripts/audit_synthetic_ingredient_identity.py`, and tests.
-- Tests (disposable image + PostgreSQL 16 on the deployment VM): default offline suite 945 passed, 21 skipped;
-  with the disposable database 964 passed, 1 failed (pre-existing, fails identically on the old code), 1 skipped;
-  OpenAPI unchanged.
+  `scripts/audit_catalogue_readonly.py`, `scripts/plan_e_number_remediation.py` and
+  `scripts/inventory_error_text_ingredients.py`, updated `scripts/audit_synthetic_ingredient_identity.py`, and tests.
+  Postgres id-length test split from official-identifier reuse (no curated rows deleted, no length assertion weakened).
+- Review follow-up (second commit): findings 1-3 addressed; exact results are in the report, section 6.
+- Tests (disposable image + PostgreSQL 16 on the deployment VM): default offline suite 949 passed, 22 skipped;
+  with the disposable database 970 passed, 1 skipped (OpenFoodTox migration test, needs a separate empty database); OpenAPI unchanged.
 - Unresolved: 38 live references are ambiguous (gen-0 collapsed Cyrillic ids); E150D/E150d duplicate and 7 legacy
-  Cyrillic-E rows are planned, not repaired; status strings stored as ingredients ("AI response was unavailable or invalid",
-  "Ingredients could not be extracted from the image") need a separate fix; the lookup change needs review before deploy.
+  Cyrillic-E rows are planned, not repaired; 2 historical error-text ingredient rows (17 products, created 2026-09-09..2026-09-26)
+  are inventoried only, current contamination is NOT proven (prevention exists and is tested); the lookup change needs review before deploy.
 - Recommended next step: review and merge this branch, then a separate approved task applies the E150D remediation
   steps from the dry-run plan and only then proposes the `upper(e_number)` unique index; Codex builds diagnostics from the integration plan.
 
