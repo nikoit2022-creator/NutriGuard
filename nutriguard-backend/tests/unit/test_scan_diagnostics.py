@@ -11,13 +11,14 @@ def test_scan_diagnostic_is_bounded_and_contains_no_payload(tmp_path, monkeypatc
     monkeypatch.setattr(scan_diagnostics.settings, "SCAN_DIAGNOSTICS_MAX_BYTES", 1024)
     monkeypatch.setattr(scan_diagnostics.settings, "SCAN_DIAGNOSTICS_BACKUP_COUNT", 1)
 
-    scan_diagnostics.record_scan_diagnostic(
+    written = scan_diagnostics.record_scan_diagnostic(
         requestId="request-1",
         barcode="3800123456789",
         outcome="partial",
         errorCode="PRODUCT_NOT_FOUND",
         recognizedIngredientCount=4,
     )
+    assert written is True
 
     payload = json.loads(path.read_text(encoding="utf-8").strip())
     assert payload["barcode"] == "3800123456789"
@@ -32,8 +33,9 @@ def test_scan_diagnostic_disabled_writes_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(scan_diagnostics.settings, "SCAN_DIAGNOSTICS_ENABLED", False)
     monkeypatch.setattr(scan_diagnostics.settings, "SCAN_DIAGNOSTICS_PATH", str(path))
 
-    scan_diagnostics.record_scan_diagnostic(barcode="3800123456789", outcome="success")
+    written = scan_diagnostics.record_scan_diagnostic(barcode="3800123456789", outcome="success")
 
+    assert written is False
     assert not path.exists()
 
 
@@ -70,7 +72,16 @@ def test_scan_diagnostic_write_error_never_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(scan_diagnostics.settings, "SCAN_DIAGNOSTICS_ENABLED", True)
     monkeypatch.setattr(scan_diagnostics.settings, "SCAN_DIAGNOSTICS_PATH", str(blocker / "scan.jsonl"))
 
-    scan_diagnostics.record_scan_diagnostic(barcode="3800123456789", outcome="success")  # must not raise
+    written = scan_diagnostics.record_scan_diagnostic(barcode="3800123456789", outcome="success")
+    assert written is False  # must not raise
+
+
+# Client diagnostic-event replay dedup/acknowledgment moved to a real,
+# cross-process-safe ledger -- see app.core.client_event_ledger and
+# tests/unit/test_client_event_ledger.py (Codex review round 2,
+# finding 3: the previous process-local-only in-memory cache tested
+# here could never coordinate across the multiple Uvicorn worker
+# processes production actually runs).
 
 
 # --- Multi-process safety --------------------------------------------------

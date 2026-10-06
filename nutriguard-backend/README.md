@@ -621,6 +621,7 @@ All 11 endpoints from the API Contract, plus the two auth endpoints it specifies
 | PUT | `/api/v1/health-profile` | 6.9 |
 | GET | `/api/v1/scan-history` | 6.10 |
 | DELETE | `/api/v1/scan-history` | 6.11 |
+| POST | `/api/v1/scan-diagnostics/client-events` | not in the original contract — additive, issue #30, see section 15 |
 
 Every endpoint: Pydantic request/response schemas, JWT auth dependency
 (except `/auth/*`), per-tier rate limiting, and the standard error
@@ -2901,4 +2902,75 @@ change (`openapi.json` identical):
 
 Full design, guarantees, maintenance commands and verification:
 `docs/INGREDIENT_CANDIDATE_QUEUE.md`.
+
+## 15. Scan-attempt tracing and client diagnostic event ingestion (issue #30)
+
+Every request to the three `/scan/*` endpoints now carries a 16-digit
+`X-Scan-Attempt-Id` (server-generated if the client omits or sends a
+malformed one) and an `X-Scan-Request-Sequence`, echoed back on success
+and on every handled failure. A new additive, authenticated endpoint,
+`POST /api/v1/scan-diagnostics/client-events`, lets a client report a
+bounded batch (≤20 events, ≤16 KiB) of its own already-queued,
+strictly-enumerated diagnostic events (no free text, no images, no
+OCR/ingredient text, no barcode values, no device identifiers — see the
+contract doc's privacy allowlist), written into the existing bounded,
+multi-process-safe scan-diagnostics journal (`app.core.scan_diagnostics`)
+alongside backend-authored lines, disambiguated by an `origin` field. No
+wire-format change to any existing endpoint; `openapi.json` only gained
+the new path and schemas.
+
+Full contract (headers, request/response schemas, every enum, every
+limit, dedup/acknowledgment/retention behavior, owner scoping, the
+internal pipeline-tracing layer, and the shared storage-cap trade-off):
+`docs/SCAN_ATTEMPT_DIAGNOSTICS.md`.
+
+A read-only operator CLI (`app/seed/scan_attempt_trace.py`, run as
+`python -m app.seed.scan_attempt_trace <scanAttemptId>`) looks up one
+attempt across the current journal file and its rotated backup(s) under
+one consistent, shared lock, distinguishes origins/requests/owner
+scopes, flags an ambiguous id collision instead of silently merging
+records, and never mutates anything.
+
+**Round 2 (Codex review) additions, all implemented in this delivery:**
+
+- **Internal pipeline tracing** (`app.core.pipeline_trace`): real
+  entry/success/failure events for `app.services.food_analysis`'s own
+  internal stages (provider/cache lookup, extraction, ingredient
+  segmentation, identity/language resolution, catalog persistence,
+  nutrition/scoring decision, response construction) — previously not
+  implemented; the router's own coarse stage marker (§3 of the contract
+  doc) is unchanged and unaffected.
+- **Truthful client-event acknowledgment**: `acceptedEventIds` now
+  means "durably written to the journal", never "we said yes before
+  trying" — a new `retryableEventIds` response field (contract-visible
+  addition to `ClientEventBatchResponse`, additive-only) carries
+  anything not (yet) durable, including while
+  `SCAN_DIAGNOSTICS_ENABLED=false`. **Deviation from Round 1's initial
+  design** (recorded here per section 8's contract-deviation rule):
+  Round 1 acknowledged disabled/failed writes as accepted; this was a
+  genuine correctness gap the Round 2 review caught, now fixed and
+  regression-tested (`tests/integration/test_scan_diagnostics_client_events.py`).
+- **Cross-process-safe dedup ledger** (`app.core.client_event_ledger`,
+  a small, separate, bounded SQLite database — not the application's
+  own Postgres database) replaces Round 1's process-local in-memory
+  cache, which could never coordinate across the multiple Uvicorn
+  worker processes production actually runs.
+- **Pseudonymous owner scoping** (`app.core.owner_scope`): every
+  journal line now carries a stable, one-way `ownerScope` (HMAC of the
+  user id, never the raw id itself), letting the operator CLI tell two
+  different owners' attempts apart definitively instead of only by
+  heuristic.
+- **Operator CLI fixes**: one shared lock across the current file and
+  every rotated backup (Round 1 computed a per-rotated-file lock the
+  writer never used, and never held one lock across multiple files);
+  safe handling of non-object JSON, malformed records, invalid field
+  types, and unreadable files.
+- **Streaming request-size enforcement**: the byte limit is enforced
+  against a bounded stream read, not a first-fully-buffer-then-check —
+  closes a gap where a missing/lying `Content-Length` bypassed the
+  intended bound.
+- **Contract reconciliation**: new `ClientDiagnosticStage`
+  (`IMAGE_PREPARATION`/`PARSING`/`PERSISTENCE`) and
+  `ClientDiagnosticOutcome` (`PARTIAL`/`INTERRUPTED`) enum values —
+  additive, so no existing value changed meaning.
 

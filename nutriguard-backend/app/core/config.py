@@ -55,6 +55,38 @@ class Settings(BaseSettings):
     RATE_LIMIT_READ_PER_HOUR: int = 300
     RATE_LIMIT_PROFILE_PER_HOUR: int = 60
     RATE_LIMIT_AUTH_PER_MINUTE: int = 10
+    RATE_LIMIT_DIAGNOSTICS_PER_HOUR: int = 120
+
+    # --- Scan-attempt tracing and client diagnostic event ingestion
+    # (issue #30, see docs/SCAN_ATTEMPT_DIAGNOSTICS.md) ---
+    # Bounded, process-local set of the most recently server-generated
+    # `scanAttemptId` values, consulted only to avoid immediately
+    # reusing one -- never a global uniqueness guarantee (see the
+    # contract doc's "residual collision risk" section).
+    SCAN_ATTEMPT_ID_RECENT_CACHE_SIZE: int = 500
+    # A batch of client-submitted diagnostic events (POST
+    # /api/v1/scan-diagnostics/client-events) is rejected if it has more
+    # events, or a larger raw request body, than these bounds.
+    SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BATCH: int = 20
+    SCAN_DIAGNOSTICS_CLIENT_EVENTS_MAX_BODY_BYTES: int = 16 * 1024
+    # Cross-process-safe, bounded replay-dedup ledger for client
+    # diagnostic events (see app.core.client_event_ledger; Codex review
+    # round 2, finding 3 -- replaces the previous process-local-only
+    # in-memory cache, which could never coordinate across the multiple
+    # Uvicorn worker processes production actually runs). A SQLite
+    # database file, deliberately separate from the application's own
+    # Postgres database.
+    CLIENT_EVENT_LEDGER_PATH: str = "/var/log/nutriguard/scan-diagnostics-client-events.sqlite3"
+    # An event reserved (persistence attempt started) but never
+    # committed or released within this window is treated as abandoned
+    # (its owning worker crashed mid-write) and reclaimable by a future
+    # retry, rather than a permanent lock.
+    SCAN_DIAGNOSTICS_CLIENT_EVENTS_RESERVATION_TIMEOUT_SECONDS: int = 30
+    # Hard cap on total ledger rows (reserved + committed); beyond this,
+    # the oldest rows are pruned first. Once a committed row is pruned,
+    # that event id is no longer recognized as a duplicate if
+    # resubmitted -- a documented, bounded-storage limitation.
+    SCAN_DIAGNOSTICS_CLIENT_EVENTS_DEDUP_MAX_ROWS: int = 20000
 
     # --- Barcode product discovery (multi-source lookup on a local miss) ---
     # Master switch: when false, an unknown barcode goes straight to the
