@@ -40,7 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.integrations.wikipedia_api import WikipediaApiClient, WikipediaLookupError
-from app.models.enums import IngredientSource, IngredientVerificationStatus
+from app.models.enums import IngredientSource
 from app.models.ingredient import Ingredient
 from app.models.ingredient_wikipedia_lookup import IngredientWikipediaLookup
 from app.repositories import ingredient_wikipedia_lookup_repository
@@ -84,12 +84,11 @@ def _is_blank(value: str | None) -> bool:
 
 
 def needs_enrichment(ingredient: Ingredient) -> bool:
-    """Task rules 1-2: call Wikipedia only when local resolution left
-    this ingredient genuinely short of information -- never for an
-    already-`VERIFIED` (curated/regulatory) row, regardless of whether
-    `description` happens to be blank on it too."""
-    if ingredient.verification_status == IngredientVerificationStatus.VERIFIED:
-        return False
+    """Call Wikipedia when local sources left the ingredient without a
+    usable description, regardless of its record-level verification
+    status. `merge_verified_fields` only fills blank fields and preserves
+    higher-priority curated/regulatory content, so this can safely
+    supplement an otherwise verified row without replacing its evidence."""
     return _is_blank(ingredient.description)
 
 
