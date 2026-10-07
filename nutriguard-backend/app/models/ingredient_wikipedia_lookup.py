@@ -50,12 +50,10 @@ class IngredientWikipediaLookup(Base):
     `review_reason`) without inventing a second ingredient-review
     subsystem.
 
-    Never overwrites curated/regulatory data -- this table is written
-    only by `ingredient_wikipedia_enrichment`, which never touches
-    `Ingredient` fields outside its own small allow-list (description,
-    purpose_in_food, category, scientific_name) and always goes through
-    `ingredient_catalog.merge_verified_fields`'s existing rank/blank-
-    value protections.
+    Never overwrites curated/regulatory values -- the enrichment path
+    may fill a blank description, but records Wikipedia as that field's
+    provenance and preserves any higher-ranked row source and every
+    nonblank field.
     """
 
     __tablename__ = "ingredient_wikipedia_lookups"

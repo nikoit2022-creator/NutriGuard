@@ -508,6 +508,46 @@ def merge_verified_fields(
     return True
 
 
+def merge_wikipedia_description(
+    existing: Ingredient,
+    *,
+    description: str,
+    source_url: str | None,
+    confidence: float,
+    now: datetime | None = None,
+) -> bool:
+    """Add a Wikipedia description only when the local description is
+    blank. This narrow supplement is allowed even when the record has a
+    higher-ranked source: it cannot replace existing text or change the
+    row's trusted source/verification status, and records Wikipedia as
+    the source of the description field itself."""
+    if not _is_blank_value(existing.description) or _is_blank_value(description):
+        return False
+
+    now = now or _utcnow()
+    provenance = _backfill_field_provenance(existing, now=now)
+    provenance["description"] = {
+        "source": IngredientSource.WIKIPEDIA_API.value,
+        "confidence": confidence,
+        "retrievedAt": now.isoformat(),
+    }
+    existing.field_provenance_json = _dump_field_provenance(provenance)
+    existing.description = description
+
+    current_rank = SOURCE_PRIORITY[existing.source]
+    wikipedia_rank = SOURCE_PRIORITY[IngredientSource.WIKIPEDIA_API]
+    if current_rank <= wikipedia_rank:
+        existing.source = IngredientSource.WIKIPEDIA_API
+        existing.confidence = confidence
+        existing.verification_status = IngredientVerificationStatus.LIMITED_DATA
+        if source_url:
+            existing.source_url = source_url
+    elif not existing.source_url and source_url:
+        existing.source_url = source_url
+    existing.retrieved_at = now
+    return True
+
+
 def _fill_missing_identity_fields(existing: Ingredient, synthetic: SyntheticIngredient) -> None:
     """A later scan of an already-cached UNVERIFIED ingredient may
     recognize an official identifier the earlier observation missed

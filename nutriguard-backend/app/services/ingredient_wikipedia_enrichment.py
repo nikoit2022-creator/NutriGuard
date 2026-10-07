@@ -8,12 +8,15 @@ Called once per already locally-resolved ingredient, from
 `get_or_create_catalog_ingredient`). Local-first by construction: this
 module only ever runs AFTER the catalog's own identifier/alias/
 normalized-name resolution has already happened, and only when that
-resolution left the ingredient genuinely short of general information
-(`needs_enrichment` below) -- never for an already-`VERIFIED` row.
+resolution left the ingredient without a usable description
+(`needs_enrichment` below).
 
-Only `description` is ever written here, via the existing
-`ingredient_catalog.merge_verified_fields` (rank/confidence-gated,
-blank-value-only overwrite protection -- unchanged). The REST summary
+Only a blank `description` is ever filled here, via the narrow
+`ingredient_catalog.merge_wikipedia_description` helper. It keeps any
+higher-ranked record source and verification status intact, and records
+Wikipedia as the source of the description field. A cached successful
+lookup is also applied on a later scan if an earlier rank gate left the
+description empty. The REST summary
 endpoint returns one short, unstructured extract; deriving a separate
 "category"/"purpose_in_food"/"scientific_name" from that free text would
 require inferring structure Wikipedia didn't give us, which is exactly
@@ -40,7 +43,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.integrations.wikipedia_api import WikipediaApiClient, WikipediaLookupError
-from app.models.enums import IngredientSource
 from app.models.ingredient import Ingredient
 from app.models.ingredient_wikipedia_lookup import IngredientWikipediaLookup
 from app.repositories import ingredient_wikipedia_lookup_repository
@@ -144,6 +146,23 @@ async def enrich_ingredient_from_wikipedia(
     now = _utcnow()
     existing = await ingredient_wikipedia_lookup_repository.get_by_ingredient_id(db, ingredient.id)
     if _is_cache_fresh(existing, now=now):
+        if (
+            existing is not None
+            and existing.match_status == "MATCHED"
+            and existing.extracted_summary
+            and _is_blank(ingredient.description)
+        ):
+            retrieved_at = _as_utc(existing.retrieved_at) if existing.retrieved_at else now
+            changed = ingredient_catalog.merge_wikipedia_description(
+                ingredient,
+                description=existing.extracted_summary,
+                source_url=existing.source_url,
+                confidence=float(existing.confidence),
+                now=retrieved_at,
+            )
+            if changed:
+                existing.fields_populated_json = json.dumps([_MERGE_FIELD])
+                await db.flush()
         return
 
     query_text = ingredient.common_name
@@ -197,10 +216,10 @@ async def enrich_ingredient_from_wikipedia(
         )
         return
 
-    changed = ingredient_catalog.merge_verified_fields(
+    changed = ingredient_catalog.merge_wikipedia_description(
         ingredient,
-        fields={_MERGE_FIELD: summary.extract},
-        source=IngredientSource.WIKIPEDIA_API,
+        description=summary.extract,
+        source_url=summary.page_url,
         confidence=settings.WIKIPEDIA_MERGE_CONFIDENCE,
         now=now,
     )
