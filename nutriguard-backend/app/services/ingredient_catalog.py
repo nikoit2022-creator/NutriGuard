@@ -91,6 +91,13 @@ _TRANSLATED_SYNTHETIC_CONFIDENCE_FLOOR = 0.3
 SOURCE_PRIORITY: dict[IngredientSource, int] = {
     IngredientSource.CURATED_SEED: 100,
     IngredientSource.REGULATORY_LOOKUP: 90,
+    # General encyclopedic text (see app.services.ingredient_wikipedia_enrichment)
+    # -- ranked above a per-scan AI label guess (GEMINI) since a matched
+    # Wikipedia page describes an established identity rather than a
+    # single OCR observation, but well below the two regulatory-grade
+    # sources: it can fill a blank description/etc. on a GEMINI/
+    # OCR_HEURISTIC row, but can never overwrite curated/regulatory data.
+    IngredientSource.WIKIPEDIA_API: 60,
     IngredientSource.GEMINI: 50,
     IngredientSource.OCR_HEURISTIC: 10,
 }
@@ -483,7 +490,7 @@ def merge_verified_fields(
     if SOURCE_PRIORITY[source] >= SOURCE_PRIORITY[IngredientSource.REGULATORY_LOOKUP]:
         existing.verification_status = IngredientVerificationStatus.VERIFIED
         existing.last_verified_at = now
-    elif source == IngredientSource.GEMINI:
+    elif source in (IngredientSource.GEMINI, IngredientSource.WIKIPEDIA_API):
         existing.verification_status = IngredientVerificationStatus.LIMITED_DATA
     # PR #13 review round 3 ("risk assessment and citation provenance
     # field-specific"): `risk_assessment_available` -- what actually
@@ -1252,6 +1259,32 @@ async def _register_original_text_alias(
         )
 
 
+async def _enrich_from_wikipedia_if_needed(db: AsyncSession, ingredient: Ingredient) -> None:
+    """Best-effort Wikipedia fallback enrichment (see
+    `app.services.ingredient_wikipedia_enrichment`) for one already
+    locally-resolved ingredient -- called once per ingredient per scan,
+    right after local resolution/alias registration above. The callee
+    already catches every expected failure (network/API error, no
+    page, ambiguous page, unclear name) and records it as provenance
+    rather than raising; this wrapper additionally swallows any
+    unexpected exception too, same as `_register_original_text_alias`
+    above -- Wikipedia enrichment is never required for THIS request's
+    own correctness, and one ingredient's failure must never interrupt
+    the rest of a scan's batch.
+
+    Imports `ingredient_wikipedia_enrichment` locally (not at module
+    level) because that module imports `merge_verified_fields`/
+    `SOURCE_PRIORITY` from this one -- a top-level import here would be
+    circular.
+    """
+    from app.services import ingredient_wikipedia_enrichment
+
+    try:
+        await ingredient_wikipedia_enrichment.enrich_ingredient_from_wikipedia(db, ingredient)
+    except Exception:  # noqa: BLE001
+        _logger.warning("ingredient_wikipedia_enrichment_failed", ingredient_id=ingredient.id)
+
+
 async def materialize_ingredients(
     db: AsyncSession, ingredients: list[Any]
 ) -> tuple[list[Any], bool, IngredientTranslationSummary]:
@@ -1290,6 +1323,7 @@ async def materialize_ingredients(
             resolved = await get_or_create_catalog_ingredient(db, ing)
             materialized.append(resolved)
             await _register_original_text_alias(db, resolved, ing)
+            await _enrich_from_wikipedia_if_needed(db, resolved)
             observations.append(
                 ingredient_candidates.Observation(
                     # The token as observed: the pre-translation text when a
@@ -1301,6 +1335,8 @@ async def materialize_ingredients(
             )
         else:
             materialized.append(ing)
+            if isinstance(ing, Ingredient):
+                await _enrich_from_wikipedia_if_needed(db, ing)
             if isinstance(ing, Ingredient) and not ingredient_candidates.is_known_identity(ing):
                 # A later sighting of an already-persisted uncurated identity
                 # (matched by exact name upstream): still an encounter.
