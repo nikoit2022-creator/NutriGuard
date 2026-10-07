@@ -143,6 +143,30 @@ class Settings(BaseSettings):
     # once reached, a NEW candidate is not recorded (counted in a warning
     # log) but existing ones keep counting; nothing is ever evicted
     # automatically.
+    # --- Wikipedia fallback (ingredient enrichment, English Wikipedia
+    # REST summary endpoint) -- used only when local DB/seed data about
+    # an ingredient is insufficient. See
+    # app.services.ingredient_wikipedia_enrichment.
+    WIKIPEDIA_LOOKUP_ENABLED: bool = True
+    WIKIPEDIA_API_BASE_URL: str = "https://en.wikipedia.org/api/rest_v1"
+    # Wikimedia's own API etiquette requires an identifying User-Agent
+    # with contact info; keep this descriptive if you fork/deploy under
+    # a different name.
+    WIKIPEDIA_USER_AGENT: str = "NutriGuard-Backend/1.0 (+https://github.com/nikoit2022-creator/NutriGuard)"
+    WIKIPEDIA_TIMEOUT_SECONDS: float = 5.0
+    WIKIPEDIA_MAX_RETRIES: int = 1
+    # Confidence assigned to a successful Wikipedia-sourced merge --
+    # below REGULATORY_LOOKUP/CURATED_SEED, so it can never read as a
+    # regulatory confirmation (see ingredient_catalog.SOURCE_PRIORITY).
+    WIKIPEDIA_MERGE_CONFIDENCE: float = 0.55
+    # How long a successful (MATCHED) lookup is trusted before a later
+    # scan is eligible to re-fetch it.
+    WIKIPEDIA_LOOKUP_CACHE_TTL_SECONDS: int = 180 * 24 * 60 * 60  # ~6 months
+    # How long a NOT_FOUND/AMBIGUOUS/ERROR/SKIPPED_UNCLEAR_NAME result is
+    # treated as fresh, so the same unresolved ingredient isn't
+    # re-attempted on every scan within this window.
+    WIKIPEDIA_NEGATIVE_CACHE_TTL_SECONDS: int = 24 * 60 * 60  # 24 hours
+
     INGREDIENT_CANDIDATE_MAX_ROWS: int = 5000
     # `prune` (manual, dry-run by default) only considers rows unseen for
     # this long, seen at most INGREDIENT_CANDIDATE_PRUNE_MAX_ENCOUNTERS

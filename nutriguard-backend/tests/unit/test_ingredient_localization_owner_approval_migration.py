@@ -17,7 +17,12 @@ def _scripts() -> ScriptDirectory:
 def test_the_migration_is_the_current_single_head_on_top_of_the_candidate_queue():
     scripts = _scripts()
     assert scripts.get_revision(REVISION).down_revision == "d7e8f9a0b1c2"
-    assert scripts.get_heads() == [REVISION]
+    # Single-head-without-pinning-which-one pattern (see
+    # test_ingredient_language_provenance_migration.py /
+    # test_ingredient_candidate_queue_migration.py) -- a later migration
+    # may sit on top of this one without breaking this test.
+    assert len(scripts.get_heads()) == 1
+    assert REVISION in {rev.revision for rev in scripts.walk_revisions()}
 
 
 def test_the_migration_only_adds_one_nullable_safe_boolean_column():

@@ -12,6 +12,41 @@ can later be pointed at this API with minimal, mechanical changes (see
 
 ## Changelog
 
+**V21 (Wikipedia fallback for ingredient enrichment):** English
+Wikipedia is now a last-resort fallback source for a scanned
+ingredient's `description`, used only when local resolution
+(`app.services.ingredient_catalog`) leaves it genuinely blank and not
+yet `VERIFIED` -- never when curated/regulatory local data already
+exists. New `IngredientSource.WIKIPEDIA_API` value (additive enum
+widening on the wire -- see `openapi.json`'s `IngredientSource` enum);
+deliberately excluded from `TRUSTED_INGREDIENT_SOURCES`, so it can
+never back an EFSA/FDA/ADI claim or promote `verificationStatus` past
+`LIMITED_DATA`. Only `description` is ever written, via the existing
+`merge_verified_fields` (unchanged rank/blank-value overwrite
+protection) -- `efsaStatus`/`fdaStatus`/`acceptableDailyIntake`/
+`riskLevel`/`healthConcerns`/`sideEffects` are never touched by this
+source. A name considered too vague to trust (a generic function term,
+placeholder text, no letters, or an already `identity_uncertain` row --
+reusing `app.services.ingredient_candidate_flags`' existing closed
+vocabulary) is never searched; it is recorded as
+`SKIPPED_UNCLEAR_NAME` with a closed-vocabulary `review_reason`
+instead. New `ingredient_wikipedia_lookups` table (migration
+`b9c0d1e2f3a4`) is the single provenance/cache/review-queue record per
+ingredient: matched page title/URL, retrieval date, the extract
+actually retrieved, which field(s) it populated, match status
+(`MATCHED`/`NOT_FOUND`/`AMBIGUOUS`/`SKIPPED_UNCLEAR_NAME`/`ERROR`), and
+-- on failure -- a short, safe error detail. A positive-cache TTL
+(`WIKIPEDIA_LOOKUP_CACHE_TTL_SECONDS`, default ~6 months) and a
+shorter negative-cache TTL (`WIKIPEDIA_NEGATIVE_CACHE_TTL_SECONDS`,
+default 24h) avoid repeat network calls for the same ingredient. A
+network/API failure is caught, logged, and written as `ERROR`
+provenance -- it never fabricates a value and never interrupts the
+rest of a scan's batch (each ingredient is enriched independently from
+`materialize_ingredients`). See
+`app/services/ingredient_wikipedia_enrichment.py`,
+`app/integrations/wikipedia_api.py`, and
+`tests/integration/test_ingredient_wikipedia_enrichment.py`.
+
 **V20 (reviewed EN/BG ingredient profiles):** Ingredient scientific
 copy now supports additive, persistent localizations. Canonical English
 fields and every existing API field remain unchanged. A new

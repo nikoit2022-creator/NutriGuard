@@ -1822,6 +1822,7 @@
           "CURATED_SEED",
           "REGULATORY_LOOKUP",
           "GEMINI",
+          "WIKIPEDIA_API",
           "OCR_HEURISTIC"
         ],
         "title": "IngredientSource",
