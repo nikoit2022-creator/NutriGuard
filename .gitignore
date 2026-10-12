@@ -83,3 +83,6 @@ Thumbs.db
 
 # Local archive / source material
 /files/
+/nutriguard-backend/android-releases/
+*.apk
+*.jks
