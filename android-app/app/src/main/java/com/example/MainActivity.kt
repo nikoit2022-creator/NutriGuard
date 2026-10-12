@@ -1,9 +1,15 @@
 package com.example
 
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,6 +33,7 @@ import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -36,6 +43,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.TextButton
 import com.example.ui.i18n.LocalizedText as Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -76,7 +84,10 @@ import com.example.ui.theme.ScannerSlateMuted
 import com.example.ui.theme.ScannerSoftBorder
 import com.example.ui.theme.ScannerViolet
 import com.example.ui.viewmodel.MainViewModel
+import com.example.data.updates.AndroidRelease
+import com.example.data.updates.AndroidUpdateClient
 import kotlinx.coroutines.launch
+import java.io.File
 
 sealed class Screen(val route: String) {
     object ScanHome : Screen("scan_home")
@@ -101,10 +112,52 @@ private sealed class DeviceAuthState {
 }
 
 class MainActivity : ComponentActivity() {
+    private var pendingUpdateApk: File? = null
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_UNKNOWN_SOURCES) {
+            val apk = pendingUpdateApk
+            pendingUpdateApk = null
+            if (apk != null && (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls())) {
+                openSystemInstaller(apk)
+            }
+        }
+    }
+
+    private fun installUpdate(apk: File) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+            pendingUpdateApk = apk
+            @Suppress("DEPRECATION")
+            startActivityForResult(
+                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                    data = Uri.parse("package:$packageName")
+                },
+                REQUEST_UNKNOWN_SOURCES,
+            )
+        } else {
+            openSystemInstaller(apk)
+        }
+    }
+
+    private fun openSystemInstaller(apk: File) {
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", apk)
+            startActivity(Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            })
+        } catch (error: Exception) {
+            Toast.makeText(this, getString(R.string.update_installer_error), Toast.LENGTH_LONG).show()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val appContainer = (application as NutriGuardApplication).container
+        val updateClient = AndroidUpdateClient(cacheDir)
         setContent {
             val languagePreferences = remember {
                 getSharedPreferences("nutriguard_ui", MODE_PRIVATE)
@@ -132,6 +185,22 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val coroutineScope = rememberCoroutineScope()
+                var availableUpdate by remember { mutableStateOf<AndroidRelease?>(null) }
+                var updateDownloading by remember { mutableStateOf(false) }
+                var updateError by remember { mutableStateOf<String?>(null) }
+
+                LaunchedEffect(Unit) {
+                    // Studio debug builds use a different signing key and cannot be
+                    // replaced by the privately distributed release APK.
+                    if (!BuildConfig.DEBUG) {
+                        runCatching { updateClient.latest() }
+                            .onSuccess { release ->
+                                if (release != null && release.versionCode > BuildConfig.VERSION_CODE) {
+                                    availableUpdate = release
+                                }
+                            }
+                    }
+                }
 
                 val triggerDeviceAuth: () -> Unit = {
                     authState = DeviceAuthState.Initializing
@@ -189,9 +258,56 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 }
+                availableUpdate?.let { release ->
+                    AlertDialog(
+                        onDismissRequest = { if (!updateDownloading) availableUpdate = null },
+                        title = { Text("Update available") },
+                        text = {
+                            Text(
+                                updateError ?: if (updateDownloading) "Downloading update…" else
+                                    if (appLanguage == AppLanguage.BULGARIAN) {
+                                        "Налична е версия ${release.versionName} на NutriGuard. Да я инсталираме ли?"
+                                    } else {
+                                        "NutriGuard ${release.versionName} is ready. Install the update?"
+                                    }
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(
+                                enabled = !updateDownloading,
+                                onClick = {
+                                    updateDownloading = true
+                                    updateError = null
+                                    coroutineScope.launch {
+                                        runCatching { updateClient.download(release) }
+                                            .onSuccess { apk ->
+                                                updateDownloading = false
+                                                availableUpdate = null
+                                                installUpdate(apk)
+                                            }
+                                            .onFailure {
+                                                updateDownloading = false
+                                                updateError = "Update download failed. Please try again."
+                                            }
+                                    }
+                                }
+                            ) { Text("Install") }
+                        },
+                        dismissButton = {
+                            TextButton(
+                                enabled = !updateDownloading,
+                                onClick = { availableUpdate = null }
+                            ) { Text("Later") }
+                        }
+                    )
+                }
             }
             }
         }
+    }
+
+    companion object {
+        private const val REQUEST_UNKNOWN_SOURCES = 7001
     }
 }
 

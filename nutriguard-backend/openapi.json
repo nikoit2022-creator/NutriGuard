@@ -713,6 +713,68 @@
           }
         }
       }
+    },
+    "/api/v1/app-updates/android/latest": {
+      "get": {
+        "tags": [
+          "app-updates"
+        ],
+        "summary": "Latest Android Release",
+        "operationId": "latest_android_release_api_v1_app_updates_android_latest_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AndroidRelease"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "No release published"
+          }
+        }
+      }
+    },
+    "/api/v1/app-updates/android/{version_code}.apk": {
+      "get": {
+        "tags": [
+          "app-updates"
+        ],
+        "summary": "Android Release Apk",
+        "operationId": "android_release_apk_api_v1_app_updates_android__version_code__apk_get",
+        "parameters": [
+          {
+            "name": "version_code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Version Code"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/vnd.android.package-archive": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2359,6 +2421,45 @@
         ],
         "title": "WarningSeverity",
         "description": "Mirrors com.example.util.WarningSeverity"
+      },
+      "AndroidRelease": {
+        "properties": {
+          "versionCode": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Versioncode"
+          },
+          "versionName": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Versionname"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256"
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Sizebytes"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 500,
+            "title": "Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "versionCode",
+          "versionName",
+          "sha256",
+          "sizeBytes"
+        ],
+        "title": "AndroidRelease"
       }
     },
     "securitySchemes": {

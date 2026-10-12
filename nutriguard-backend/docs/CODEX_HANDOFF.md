@@ -1,5 +1,16 @@
 # CODEX_HANDOFF
 
+## 2026-10-12: private Android APK update feed (Codex)
+
+- Branch `feat/android-self-update`, separate worktree `/home/vboxuser/nutriguard-updater`, based on local `main` `bca7a0d`. No push, merge, production deployment, or APK publication was performed.
+- Added public read-only `/api/v1/app-updates/android/latest` (204 until publication) and `/{version_code}.apk` routes in `app/api/v1/android_updates.py`, registered in `app/api/v1/router.py`. The feed reads files from `ANDROID_RELEASE_DIR` (`app/core/config.py`, `.env.example`); Compose mounts the ignored `android-releases/` directory read-only. The checked-in OpenAPI snapshot includes only the new paths and schema.
+- Added `scripts/publish_android_release.py`: verifies the APK signature, package, version and continuity of the signing certificate, then copies the APK and atomically publishes `latest.json` with SHA-256 and size. Documented release steps in backend `README.md` and Android `README.md`; `.gitignore` excludes APKs, keystores and the release directory.
+- Android sibling changes: `MainActivity.kt` checks on each release-build start, offers the update, downloads via `data/updates/AndroidUpdateClient.kt`, verifies size/SHA-256, and launches the Android system installer. Added install-source permission, English/Bulgarian dialog text, and bumped app version to 1.2 (code 3). Debug builds skip update checks because their signing key differs.
+- Checks: `python3 -m pytest -q tests/integration/test_android_updates.py` -> 3 passed; `python3 -m pytest -q` -> 1038 passed, 22 skipped, 8 warnings. `ANDROID_HOME=/home/vboxuser/android-sdk ./gradlew --no-daemon --max-workers=2 testDebugUnitTest` -> BUILD SUCCESSFUL after the last Android edit; `:app:compileReleaseKotlin` and `:app:assembleRelease` -> BUILD SUCCESSFUL, including release lint and signing. `git diff --check` and Python bytecode compilation passed.
+- User confirmed there was no existing release keystore and authorized creating one. Created `/home/vboxuser/nutriguard-release-credentials/` outside Git (directory mode 700; key and password mode 600), built version 1.2/code 3, and verified its package/version/signing certificate with Android SDK tools. Signed APK: `/home/vboxuser/NutriGuard-1.2-release.apk`, SHA-256 `0fd58e775127c7108578beec1fcc2584441aaf52a1461fc5ce419ca7005f6e26`; locally published to ignored `android-releases/3.apk`. A local in-process HTTP check returned 200 for both the release metadata and all 16,717,945 APK bytes.
+- Unresolved: The code is not merged/deployed, and the first signed release has not been installed on a phone. The existing Studio debug build uses a different certificate, so its one-time replacement may need uninstall/reinstall, potentially losing local app data. Android may require user approval for package installation. The signing key/password directory needs a durable secure backup outside this VM.
+- Next step: review and merge the branch, deploy the backend feed, distribute the signed version 3 APK once to each phone, then publish version 4 with the same key to verify an on-device update end to end.
+
 ## 2026-10-06: integration branch for scan-attempt diagnostics + ingredient identity (Claude Code)
 
 - Branch `integration/scan-diagnostics-ingredient-identity`, built from `origin/main` `2da53e3` by merging the ingredient follow-up

@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = "/api/v1"
     PROJECT_NAME: str = "NutriGuard Backend"
     APP_VERSION: str = "1.0.0"
+    ANDROID_RELEASE_DIR: str = "/var/lib/nutriguard/android-releases"
 
     # --- Database ---
     DATABASE_URL: str = "postgresql+asyncpg://nutriguard:nutriguard@localhost:5432/nutriguard"
