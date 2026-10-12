@@ -7,12 +7,12 @@ import com.example.BuildConfig
 import com.example.ui.i18n.AppLanguage
 import com.example.ui.i18n.LocalAppLanguage
 
-/** Build identity is captured at compilation, not read from a server or device clock. */
+/** The installed app version is captured at compilation. */
 @Composable
 fun AppBuildLabel() {
     val label = if (LocalAppLanguage.current == AppLanguage.BULGARIAN) "Версия" else "Version"
     Text(
-        text = "$label ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) • ${BuildConfig.SOURCE_REVISION}",
+        text = "$label ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
