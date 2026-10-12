@@ -78,6 +78,7 @@ import com.example.ui.i18n.AppLanguage
 import com.example.ui.i18n.LanguageSwitcher
 import com.example.ui.i18n.LocalAppLanguage
 import com.example.ui.i18n.localizeUiText
+import com.example.ui.components.AppBuildLabel
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.NutriGuardScannerTheme
 import com.example.ui.theme.ScannerPageBackground
@@ -506,48 +507,59 @@ fun NutriGuardApp(
         },
         bottomBar = {
             if (showBottomBar) {
-                NavigationBar(
-                    containerColor = ScannerPageBackground,
-                    tonalElevation = 0.dp
-                ) {
-                    tabs.forEach { tab ->
-                        val isSelected = currentRoute == tab.route
-                        NavigationBarItem(
-                            selected = isSelected,
-                            onClick = {
-                                if (currentRoute != tab.route) {
-                                    navController.navigate(tab.route) {
-                                        popUpTo(navController.graph.findStartDestination().id) {
-                                            saveState = true
+                Column {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(ScannerPageBackground)
+                            .padding(top = 4.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AppBuildLabel()
+                    }
+                    NavigationBar(
+                        containerColor = ScannerPageBackground,
+                        tonalElevation = 0.dp
+                    ) {
+                        tabs.forEach { tab ->
+                            val isSelected = currentRoute == tab.route
+                            NavigationBarItem(
+                                selected = isSelected,
+                                onClick = {
+                                    if (currentRoute != tab.route) {
+                                        navController.navigate(tab.route) {
+                                            popUpTo(navController.graph.findStartDestination().id) {
+                                                saveState = true
+                                            }
+                                            launchSingleTop = true
+                                            restoreState = true
                                         }
-                                        launchSingleTop = true
-                                        restoreState = true
                                     }
-                                }
-                            },
-                            icon = {
-                                Icon(
-                                    imageVector = if (isSelected) tab.selectedIcon else tab.unselectedIcon,
-                                    contentDescription = localizeUiText(tab.title, language)
+                                },
+                                icon = {
+                                    Icon(
+                                        imageVector = if (isSelected) tab.selectedIcon else tab.unselectedIcon,
+                                        contentDescription = localizeUiText(tab.title, language)
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = tab.title,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                                    )
+                                },
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = ScannerViolet,
+                                    selectedTextColor = ScannerViolet,
+                                    unselectedIconColor = ScannerSlateMuted,
+                                    unselectedTextColor = ScannerSlateMuted,
+                                    indicatorColor = ScannerViolet.copy(alpha = 0.13f),
+                                    disabledIconColor = ScannerSoftBorder,
+                                    disabledTextColor = ScannerSoftBorder
                                 )
-                            },
-                            label = {
-                                Text(
-                                    text = tab.title,
-                                    fontSize = 12.sp,
-                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
-                                )
-                            },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = ScannerViolet,
-                                selectedTextColor = ScannerViolet,
-                                unselectedIconColor = ScannerSlateMuted,
-                                unselectedTextColor = ScannerSlateMuted,
-                                indicatorColor = ScannerViolet.copy(alpha = 0.13f),
-                                disabledIconColor = ScannerSoftBorder,
-                                disabledTextColor = ScannerSoftBorder
                             )
-                        )
+                        }
                     }
                 }
             }

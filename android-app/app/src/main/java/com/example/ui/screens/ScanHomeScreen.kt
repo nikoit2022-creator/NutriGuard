@@ -331,7 +331,6 @@ fun ScanHomeScreen(
             ) {
         // App Header
         item {
-            if (com.example.BuildConfig.DEBUG) com.example.ui.components.AppBuildLabel()
             Spacer(modifier = Modifier.height(NutriGuardSpacing.md))
             Row(
                 modifier = Modifier.fillMaxWidth(),
