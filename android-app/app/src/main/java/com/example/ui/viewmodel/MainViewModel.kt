@@ -36,6 +36,10 @@ import androidx.lifecycle.viewmodel.CreationExtras
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withContext
+import com.example.ui.components.combineLabelPhotos
+
+const val MAX_LABEL_PHOTOS = 4
 
 sealed interface AnalysisUiState {
     object Idle : AnalysisUiState
@@ -126,6 +130,9 @@ class MainViewModel(
     // Keep the captured image across rotation while the user selects the label area.
     private val _pendingLabelCrop = MutableStateFlow<Bitmap?>(null)
     val pendingLabelCrop = _pendingLabelCrop.asStateFlow()
+    private val uncroppedGalleryPhotos = ArrayDeque<Bitmap>()
+    private val _pendingLabelPhotos = MutableStateFlow<List<Bitmap>>(emptyList())
+    val pendingLabelPhotos = _pendingLabelPhotos.asStateFlow()
     val scanAttempts = repository.scanAttempts.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     private val _resultAttemptId = MutableStateFlow<ScanAttemptId?>(null)
     val resultAttemptId = _resultAttemptId.asStateFlow()
@@ -203,18 +210,48 @@ class MainViewModel(
 
     fun finishAcquisition(cancelled: Boolean) {
         _pendingLabelCrop.value = null
+        uncroppedGalleryPhotos.clear()
+        _pendingLabelPhotos.value = emptyList()
         if (_barcodeLookupState.value is BarcodeLookupUiState.Searching) return
         finishAttempt(if (cancelled) ScanAttemptOutcome.CANCELLED else ScanAttemptOutcome.FAILED)
     }
 
     fun prepareLabelCrop(bitmap: Bitmap) {
-        if (_scanAttempt.value?.outcome == null) _pendingLabelCrop.value = bitmap
+        prepareLabelCrops(listOf(bitmap))
+    }
+
+    fun prepareLabelCrops(bitmaps: List<Bitmap>) {
+        if (_scanAttempt.value == null || _scanAttempt.value?.outcome != null || _pendingLabelCrop.value != null) return
+        val available = MAX_LABEL_PHOTOS - _pendingLabelPhotos.value.size - uncroppedGalleryPhotos.size
+        bitmaps.take(available.coerceAtLeast(0)).forEach(uncroppedGalleryPhotos::addLast)
+        _pendingLabelCrop.value = uncroppedGalleryPhotos.removeFirstOrNull()
     }
 
     fun submitCroppedLabel(bitmap: Bitmap) {
         if (_pendingLabelCrop.value == null) return
-        _pendingLabelCrop.value = null
-        analyzeLabelImage(bitmap)
+        _pendingLabelPhotos.value = _pendingLabelPhotos.value + bitmap
+        _pendingLabelCrop.value = uncroppedGalleryPhotos.removeFirstOrNull()
+    }
+
+    fun skipCurrentLabelCrop() {
+        _pendingLabelCrop.value = uncroppedGalleryPhotos.removeFirstOrNull()
+        if (_pendingLabelCrop.value == null && _pendingLabelPhotos.value.isEmpty()) {
+            finishAcquisition(cancelled = true)
+        }
+    }
+
+    fun removeLabelPhoto(index: Int) {
+        val photos = _pendingLabelPhotos.value
+        if (index !in photos.indices) return
+        _pendingLabelPhotos.value = photos.filterIndexed { photoIndex, _ -> photoIndex != index }
+        if (_pendingLabelPhotos.value.isEmpty()) finishAcquisition(cancelled = true)
+    }
+
+    fun submitLabelPhotoBatch() {
+        val photos = _pendingLabelPhotos.value
+        if (photos.isEmpty() || _pendingLabelCrop.value != null) return
+        _pendingLabelPhotos.value = emptyList()
+        analyzeLabelImage { withContext(Dispatchers.Default) { combineLabelPhotos(photos) } }
     }
 
     private fun finishAttempt(outcome: ScanAttemptOutcome) {
@@ -529,12 +566,17 @@ class MainViewModel(
      * either way -- exactly the pre-existing behavior.
      */
     fun analyzeLabelImage(bitmap: Bitmap) {
+        analyzeLabelImage { bitmap }
+    }
+
+    private fun analyzeLabelImage(prepareImage: suspend () -> Bitmap) {
         if (_barcodeLookupState.value is BarcodeLookupUiState.Searching) return
         val trace = traceForSubmission(ScanInput.LABEL_CAMERA)
         _barcodeLookupState.value = BarcodeLookupUiState.Searching
         val barcodeForThisSubmission = _pendingBarcode.value
         viewModelScope.launch(trace) {
             try {
+                val bitmap = prepareImage()
                 val result = repository.analyzeImageLabel(bitmap, barcodeForThisSubmission)
                 _analysisState.value = AnalysisUiState.Success(result)
                 _barcodeLookupState.value = BarcodeLookupUiState.Idle

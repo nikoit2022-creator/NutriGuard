@@ -103,6 +103,8 @@ import com.example.data.diagnostics.ScanInput
 import com.example.data.diagnostics.ScanAttemptOutcome
 import com.example.ui.components.ScanAttemptFooter
 import com.example.ui.components.LabelImageCropDialog
+import com.example.ui.components.LabelPhotoReviewDialog
+import com.example.ui.viewmodel.MAX_LABEL_PHOTOS
 import kotlin.math.ceil
 import kotlin.math.max
 
@@ -120,6 +122,7 @@ fun ScanHomeScreen(
     val recentScans by viewModel.scanHistory.collectAsState()
     val scanAttempt by viewModel.scanAttempt.collectAsState()
     val pendingLabelCrop by viewModel.pendingLabelCrop.collectAsState()
+    val pendingLabelPhotos by viewModel.pendingLabelPhotos.collectAsState()
     val barcodeLookupState by viewModel.barcodeLookupState.collectAsState()
     val pendingBarcode by viewModel.pendingBarcode.collectAsState()
     val labelCameraRequestBarcode by viewModel.labelCameraRequestBarcode.collectAsState()
@@ -135,6 +138,7 @@ fun ScanHomeScreen(
     var pendingCameraFile by rememberSaveable { mutableStateOf<File?>(null) }
     var cameraAttemptId by rememberSaveable { mutableStateOf<String?>(null) }
     var galleryAttemptId by rememberSaveable { mutableStateOf<String?>(null) }
+    var acquiringAdditionalPhoto by rememberSaveable { mutableStateOf(false) }
     var lastSubmittedBarcode by remember { mutableStateOf<String?>(null) }
     var selectedIngredient by remember { mutableStateOf<IngredientEntity?>(null) }
 
@@ -208,36 +212,50 @@ fun ScanHomeScreen(
         }
     }
 
-    // Both the gallery pick and the camera capture below call the SAME
-    // viewModel.analyzeLabelImage(bitmap) -- it internally attaches
-    // `pendingBarcode` (if any) via the backend's optional multipart
-    // `barcode` field, and drives the SAME Searching/LabelScanRequired/
-    // Failed card this screen already renders for a barcode lookup (see
-    // MainViewModel.BarcodeLookupUiState's docs). Neither launcher
-    // navigates directly anymore -- navigation only happens via
-    // navigateToResultEvent, on a genuine complete success, exactly
-    // like the barcode flow (requirement: gallery-picked photos must
-    // combine with a pending barcode exactly like camera photos do).
+    // Both sources collect images for one label scan. Each image is cropped
+    // before joining the batch; submission still uses the existing barcode
+    // attachment and result navigation in MainViewModel.
     val imagePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri ->
+        contract = ActivityResultContracts.GetMultipleContents()
+    ) { uris ->
         // A restored interrupted attempt is terminal: never silently replay its operation.
         val expectedId = galleryAttemptId
         galleryAttemptId = null
+        val wasAdditional = acquiringAdditionalPhoto
+        acquiringAdditionalPhoto = false
         if (expectedId == null || viewModel.scanAttempt.value?.id?.value != expectedId || viewModel.scanAttempt.value?.outcome != null) return@rememberLauncherForActivityResult
-        if (uri == null) viewModel.finishAcquisition(cancelled = true)
-        uri?.let {
-            try {
-                val bitmap = decodeCapturedBitmap(context, it)
-                if (bitmap != null) {
-                    viewModel.prepareLabelCrop(bitmap)
-                } else {
-                    viewModel.finishAcquisition(cancelled = false)
-                    toast("Unable to read the selected image.")
-                }
-            } catch (e: Exception) {
-                viewModel.finishAcquisition(cancelled = false)
-                toast("Unable to process the selected image.")
+        if (uris.isEmpty()) {
+            if (!wasAdditional) viewModel.finishAcquisition(cancelled = true)
+            return@rememberLauncherForActivityResult
+        }
+        val available = MAX_LABEL_PHOTOS - viewModel.pendingLabelPhotos.value.size
+        if (uris.size > available) toast("Only the first $available selected photos were added.")
+        val bitmaps = uris.take(available).mapNotNull { uri ->
+            runCatching { decodeCapturedBitmap(context, uri) }.getOrNull()
+        }
+        if (bitmaps.isNotEmpty()) {
+            viewModel.prepareLabelCrops(bitmaps)
+            if (bitmaps.size < uris.take(available).size) toast("Some selected images could not be read.")
+        } else {
+            if (!wasAdditional) viewModel.finishAcquisition(cancelled = false)
+            toast("Unable to read the selected images.")
+        }
+    }
+
+    val launchLabelGallery: (Boolean) -> Unit = { additional ->
+        val ready = if (additional) {
+            viewModel.scanAttempt.value?.outcome == null && viewModel.pendingLabelPhotos.value.isNotEmpty()
+        } else {
+            viewModel.beginScanAttempt(ScanInput.LABEL_GALLERY)
+        }
+        if (ready) {
+            galleryAttemptId = viewModel.scanAttempt.value?.id?.value
+            acquiringAdditionalPhoto = additional
+            try { imagePickerLauncher.launch("image/*") }
+            catch (_: Exception) {
+                acquiringAdditionalPhoto = false
+                if (!additional) viewModel.finishAcquisition(cancelled = false)
+                toast("Unable to open the gallery.")
             }
         }
     }
@@ -248,6 +266,8 @@ fun ScanHomeScreen(
         val uri = pendingCameraUri
         val file = pendingCameraFile
         val expectedId = cameraAttemptId
+        val wasAdditional = acquiringAdditionalPhoto
+        acquiringAdditionalPhoto = false
         cameraAttemptId = null
         pendingCameraUri = null
         pendingCameraFile = null
@@ -263,11 +283,11 @@ fun ScanHomeScreen(
                 if (bitmap != null) {
                     viewModel.prepareLabelCrop(bitmap)
                 } else {
-                    viewModel.finishAcquisition(cancelled = false)
+                    if (!wasAdditional) viewModel.finishAcquisition(cancelled = false)
                     toast("Unable to read the captured image.")
                 }
             } catch (_: Exception) {
-                viewModel.finishAcquisition(cancelled = false)
+                if (!wasAdditional) viewModel.finishAcquisition(cancelled = false)
                 toast("Unable to process the captured image.")
             } finally {
                 // decodeCapturedBitmap has fully read the file into `bitmap`
@@ -276,37 +296,45 @@ fun ScanHomeScreen(
                 file?.delete()
             }
         } else {
-            viewModel.finishAcquisition(cancelled = !captured)
+            if (!wasAdditional) viewModel.finishAcquisition(cancelled = !captured)
             // Cancelled (or captured with no URI, which shouldn't happen in
             // practice): nothing was ever read from the file.
             file?.delete()
         }
     }
 
-    val startIngredientPhotoCapture: () -> Unit = {
-        if (viewModel.beginScanAttempt(ScanInput.LABEL_CAMERA)) {
-        cameraAttemptId = viewModel.scanAttempt.value?.id?.value
-        var createdFile: File? = null
-        try {
-            val photoFile = File.createTempFile("ingredient_label_", ".jpg", context.cacheDir)
-            createdFile = photoFile
-            val uri = FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.fileprovider",
-                photoFile
-            )
-            pendingCameraFile = photoFile
-            pendingCameraUri = uri
-            cameraLauncher.launch(uri)
-        } catch (_: Exception) {
-            viewModel.finishAcquisition(cancelled = false)
-            createdFile?.delete()
-            pendingCameraFile = null
-            pendingCameraUri = null
-            toast("Unable to open the camera.")
+    val launchLabelCamera: (Boolean) -> Unit = { additional ->
+        val ready = if (additional) {
+            viewModel.scanAttempt.value?.outcome == null && viewModel.pendingLabelPhotos.value.isNotEmpty()
+        } else {
+            viewModel.beginScanAttempt(ScanInput.LABEL_CAMERA)
         }
+        if (ready) {
+            cameraAttemptId = viewModel.scanAttempt.value?.id?.value
+            acquiringAdditionalPhoto = additional
+            var createdFile: File? = null
+            try {
+                val photoFile = File.createTempFile("ingredient_label_", ".jpg", context.cacheDir)
+                createdFile = photoFile
+                val uri = FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    photoFile
+                )
+                pendingCameraFile = photoFile
+                pendingCameraUri = uri
+                cameraLauncher.launch(uri)
+            } catch (_: Exception) {
+                acquiringAdditionalPhoto = false
+                if (!additional) viewModel.finishAcquisition(cancelled = false)
+                createdFile?.delete()
+                pendingCameraFile = null
+                pendingCameraUri = null
+                toast("Unable to open the camera.")
+            }
         }
     }
+    val startIngredientPhotoCapture: () -> Unit = { launchLabelCamera(false) }
 
     // Product Details can request more evidence for its existing
     // barcode. Consume only after this screen and its camera launcher
@@ -493,13 +521,7 @@ fun ScanHomeScreen(
                                 Color.White,
                                 RoundedCornerShape(NutriGuardRadius.medium)
                             )
-                            .clickable {
-                                if (viewModel.beginScanAttempt(ScanInput.LABEL_GALLERY)) {
-                                    galleryAttemptId = viewModel.scanAttempt.value?.id?.value
-                                    try { imagePickerLauncher.launch("image/*") }
-                                    catch (_: Exception) { viewModel.finishAcquisition(cancelled = false) }
-                                }
-                            },
+                            .clickable { launchLabelGallery(false) },
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -870,7 +892,18 @@ fun ScanHomeScreen(
                 LabelImageCropDialog(
                     bitmap = bitmap,
                     onConfirm = viewModel::submitCroppedLabel,
-                    onDismiss = { viewModel.finishAcquisition(cancelled = true) }
+                    onDismiss = viewModel::skipCurrentLabelCrop
+                )
+            }
+            if (pendingLabelCrop == null && pendingLabelPhotos.isNotEmpty() && !acquiringAdditionalPhoto) {
+                LabelPhotoReviewDialog(
+                    photos = pendingLabelPhotos,
+                    maxPhotos = MAX_LABEL_PHOTOS,
+                    onCamera = { launchLabelCamera(true) },
+                    onGallery = { launchLabelGallery(true) },
+                    onRemove = viewModel::removeLabelPhoto,
+                    onAnalyze = viewModel::submitLabelPhotoBatch,
+                    onCancel = { viewModel.finishAcquisition(cancelled = true) }
                 )
             }
         }

@@ -163,7 +163,7 @@ fun LabelImageCropDialog(bitmap: Bitmap, onConfirm: (Bitmap) -> Unit, onDismiss:
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     TextButton(onClick = onDismiss) {
-                        Text(if (bulgarian) "Отказ" else "Cancel")
+                        Text(if (bulgarian) "Пропусни" else "Skip photo")
                     }
                     Button(onClick = { onConfirm(cropBitmap(bitmap, area)) }) {
                         Text(if (bulgarian) "Продължи" else "Continue")
