@@ -123,6 +123,9 @@ class MainViewModel(
     private var monotonicStart = android.os.SystemClock.elapsedRealtime()
     private val _scanAttempt = MutableStateFlow<ScanAttempt?>(restoreAttempt())
     val scanAttempt = _scanAttempt.asStateFlow()
+    // Keep the captured image across rotation while the user selects the label area.
+    private val _pendingLabelCrop = MutableStateFlow<Bitmap?>(null)
+    val pendingLabelCrop = _pendingLabelCrop.asStateFlow()
     val scanAttempts = repository.scanAttempts.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     private val _resultAttemptId = MutableStateFlow<ScanAttemptId?>(null)
     val resultAttemptId = _resultAttemptId.asStateFlow()
@@ -199,8 +202,19 @@ class MainViewModel(
     }
 
     fun finishAcquisition(cancelled: Boolean) {
+        _pendingLabelCrop.value = null
         if (_barcodeLookupState.value is BarcodeLookupUiState.Searching) return
         finishAttempt(if (cancelled) ScanAttemptOutcome.CANCELLED else ScanAttemptOutcome.FAILED)
+    }
+
+    fun prepareLabelCrop(bitmap: Bitmap) {
+        if (_scanAttempt.value?.outcome == null) _pendingLabelCrop.value = bitmap
+    }
+
+    fun submitCroppedLabel(bitmap: Bitmap) {
+        if (_pendingLabelCrop.value == null) return
+        _pendingLabelCrop.value = null
+        analyzeLabelImage(bitmap)
     }
 
     private fun finishAttempt(outcome: ScanAttemptOutcome) {

@@ -102,6 +102,7 @@ import java.io.File
 import com.example.data.diagnostics.ScanInput
 import com.example.data.diagnostics.ScanAttemptOutcome
 import com.example.ui.components.ScanAttemptFooter
+import com.example.ui.components.LabelImageCropDialog
 import kotlin.math.ceil
 import kotlin.math.max
 
@@ -118,6 +119,7 @@ fun ScanHomeScreen(
     }
     val recentScans by viewModel.scanHistory.collectAsState()
     val scanAttempt by viewModel.scanAttempt.collectAsState()
+    val pendingLabelCrop by viewModel.pendingLabelCrop.collectAsState()
     val barcodeLookupState by viewModel.barcodeLookupState.collectAsState()
     val pendingBarcode by viewModel.pendingBarcode.collectAsState()
     val labelCameraRequestBarcode by viewModel.labelCameraRequestBarcode.collectAsState()
@@ -226,9 +228,9 @@ fun ScanHomeScreen(
         if (uri == null) viewModel.finishAcquisition(cancelled = true)
         uri?.let {
             try {
-                val bitmap = context.contentResolver.openInputStream(it)?.use(BitmapFactory::decodeStream)
+                val bitmap = decodeCapturedBitmap(context, it)
                 if (bitmap != null) {
-                    viewModel.analyzeLabelImage(bitmap)
+                    viewModel.prepareLabelCrop(bitmap)
                 } else {
                     viewModel.finishAcquisition(cancelled = false)
                     toast("Unable to read the selected image.")
@@ -259,7 +261,7 @@ fun ScanHomeScreen(
             try {
                 val bitmap = decodeCapturedBitmap(context, uri)
                 if (bitmap != null) {
-                    viewModel.analyzeLabelImage(bitmap)
+                    viewModel.prepareLabelCrop(bitmap)
                 } else {
                     viewModel.finishAcquisition(cancelled = false)
                     toast("Unable to read the captured image.")
@@ -864,6 +866,13 @@ fun ScanHomeScreen(
                 ingredient = selectedIngredient,
                 onDismiss = { selectedIngredient = null }
             )
+            pendingLabelCrop?.let { bitmap ->
+                LabelImageCropDialog(
+                    bitmap = bitmap,
+                    onConfirm = viewModel::submitCroppedLabel,
+                    onDismiss = { viewModel.finishAcquisition(cancelled = true) }
+                )
+            }
         }
     }
 }
