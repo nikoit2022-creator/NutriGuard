@@ -1,14 +1,27 @@
 # NutriGuard Backend
 
+## Android release feed
+
+The public read-only endpoints `GET /api/v1/app-updates/android/latest` and
+`GET /api/v1/app-updates/android/{versionCode}.apk` serve privately distributed
+Android releases. `latest` returns 204 until a release is published. Compose
+mounts `./android-releases` read-only into the backend container; this directory
+is ignored by Git and must persist across deployments. Set `ANDROID_RELEASE_DIR`
+if running without Compose.
+
+Build a signed release APK with the **same signing key** as the already
+installed release and a higher `versionCode`. Copy it to the backend host, then
+run `python scripts/publish_android_release.py /path/to/app-release.apk 4 1.3`
+from this directory. Android SDK `apksigner` and `aapt` must be on `PATH`. The script checks
+the APK package, version, signature and signing-certificate continuity, computes SHA-256, copies it to the release directory, and
+publishes `latest.json` last. Publishing the APK does not deploy backend code.
+
 Production backend for the existing NutriGuard **native Android (Kotlin +
 Jetpack Compose)** app, implementing the `NutriGuard_API_Contract.md`
 specification. Built with FastAPI, PostgreSQL, SQLAlchemy 2.x (async),
 Alembic, Redis and Docker, as a modular monolith.
 
-The Android client is **not modified** by this project. This backend is
-designed so the client's existing `FoodAnalysisRepository` abstraction
-can later be pointed at this API with minimal, mechanical changes (see
-"Remaining Android integration work" at the end of this document).
+The Android client is maintained in the sibling `android-app` directory.
 
 ## Changelog
 

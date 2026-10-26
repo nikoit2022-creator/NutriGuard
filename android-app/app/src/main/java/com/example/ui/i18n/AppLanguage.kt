@@ -28,6 +28,11 @@ enum class AppLanguage(val code: String) {
 val LocalAppLanguage = staticCompositionLocalOf { AppLanguage.ENGLISH }
 
 private val bulgarianUiText = mapOf(
+    "Update available" to "Налично е обновяване",
+    "Downloading update…" to "Изтегляне на обновяването…",
+    "Install" to "Инсталирай",
+    "Later" to "По-късно",
+    "Update download failed. Please try again." to "Изтеглянето е неуспешно. Опитайте отново.",
     "Scan cancelled" to "Сканирането е отказано",
     "Scan interrupted" to "Сканирането е прекъснато",
     "Unable to read scan input" to "Неуспешно получаване на данните за сканиране",

@@ -1,8 +1,9 @@
 from fastapi import APIRouter
 
-from app.api.v1 import auth, health_profile, ingredients, products, scan, scan_diagnostics, scan_history
+from app.api.v1 import android_updates, auth, health_profile, ingredients, products, scan, scan_diagnostics, scan_history
 
 api_router = APIRouter()
+api_router.include_router(android_updates.router)
 api_router.include_router(auth.router)
 api_router.include_router(scan.router)
 api_router.include_router(scan_diagnostics.router)
