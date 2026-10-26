@@ -29,6 +29,8 @@ data class ProductEntity(
     val isHalal: Boolean,
     val isKosher: Boolean,
     val allergensDetected: String, // e.g., "Peanuts, Soy, Milk"
+    /** Backend's explicit yes/no/unknown evidence, persisted for cache hits. */
+    val dietaryStatusesJson: String = "",
     val hasVerifiedNutrition: Boolean = true,
     val hasVerifiedIngredients: Boolean = true,
     val isVerified: Boolean = true,

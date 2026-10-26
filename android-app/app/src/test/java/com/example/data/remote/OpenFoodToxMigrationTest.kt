@@ -55,7 +55,7 @@ class OpenFoodToxMigrationTest {
             db.version = 4
             room.close()
             room = Room.databaseBuilder(context, AppDatabase::class.java, name)
-                .addMigrations(AppDatabase.MIGRATION_4_5, AppDatabase.MIGRATION_5_6).allowMainThreadQueries().build()
+              .addMigrations(AppDatabase.MIGRATION_4_5, AppDatabase.MIGRATION_5_6, AppDatabase.MIGRATION_6_7).allowMainThreadQueries().build()
             val restored = requireNotNull(room.ingredientDao().getIngredientByIdOrEnum(entity.id))
             assertEquals(entity.description, restored.description)
             assertEquals(entity.localizationsJson, restored.localizationsJson)

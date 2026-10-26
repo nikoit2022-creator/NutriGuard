@@ -26,7 +26,7 @@ import kotlinx.coroutines.launch
         ScanHistoryEntity::class,
         com.example.data.diagnostics.ScanAttemptRecord::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -38,6 +38,17 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun scanAttemptDao(): com.example.data.diagnostics.ScanAttemptDao
 
     companion object {
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.query("PRAGMA table_info(`products`)").use { cursor ->
+                    val nameColumn = cursor.getColumnIndexOrThrow("name")
+                    while (cursor.moveToNext()) {
+                        if (cursor.getString(nameColumn) == "dietaryStatusesJson") return
+                    }
+                }
+                db.execSQL("ALTER TABLE `products` ADD COLUMN `dietaryStatusesJson` TEXT NOT NULL DEFAULT ''")
+            }
+        }
         val MIGRATION_5_6 = object : Migration(5, 6) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE `scan_history` ADD COLUMN `scanAttemptId` TEXT")
@@ -152,7 +163,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "nutriguard_db"
                 )
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                     .addCallback(object : Callback() {
                         override fun onCreate(db: SupportSQLiteDatabase) {
                             super.onCreate(db)

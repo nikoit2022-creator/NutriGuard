@@ -20,6 +20,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.ProductEntity
+import com.example.ui.i18n.AppLanguage
+import com.example.ui.i18n.LocalAppLanguage
+import com.example.util.dietaryDisplayStatus
 import com.example.ui.theme.NutriGuardRadius
 import com.example.ui.theme.ScannerFuchsia
 import com.example.ui.theme.ScannerHeroMiddle
@@ -40,22 +43,23 @@ fun DietaryBadgesRow(
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        BadgeItem(label = "Gluten-Free", isCompliant = product.isGlutenFree)
+        BadgeItem(label = "Gluten-Free", status = product.dietaryDisplayStatus("gluten"))
         Spacer(modifier = Modifier.width(8.dp))
-        BadgeItem(label = "Lactose-Free", isCompliant = product.isLactoseFree)
+        BadgeItem(label = "Lactose-Free", status = product.dietaryDisplayStatus("lactose"))
         Spacer(modifier = Modifier.width(8.dp))
-        BadgeItem(label = "Vegan", isCompliant = product.isVegan)
+        BadgeItem(label = "Vegan", status = product.dietaryDisplayStatus("vegan"))
         Spacer(modifier = Modifier.width(8.dp))
-        BadgeItem(label = "Vegetarian", isCompliant = product.isVegetarian)
+        BadgeItem(label = "Vegetarian", status = product.dietaryDisplayStatus("vegetarian"))
         Spacer(modifier = Modifier.width(8.dp))
-        BadgeItem(label = "Halal", isCompliant = product.isHalal)
+        BadgeItem(label = "Halal", status = product.dietaryDisplayStatus("halal"))
         Spacer(modifier = Modifier.width(8.dp))
-        BadgeItem(label = "Kosher", isCompliant = product.isKosher)
+        BadgeItem(label = "Kosher", status = product.dietaryDisplayStatus("kosher"))
     }
 }
-
 @Composable
-private fun BadgeItem(label: String, isCompliant: Boolean) {
+private fun BadgeItem(label: String, status: String) {
+    val language = LocalAppLanguage.current
+    val isCompliant = status == "yes"
     val bg = if (isCompliant) ScannerHeroStart else ScannerHeroMiddle.copy(alpha = 0.55f)
     val fg = if (isCompliant) ScannerViolet else ScannerSlateSecondary
     val borderColor = if (isCompliant) {
@@ -64,7 +68,7 @@ private fun BadgeItem(label: String, isCompliant: Boolean) {
         ScannerFuchsia.copy(alpha = 0.18f)
     }
 
-    val symbol = if (isCompliant) "✓" else "✕"
+    val symbol = when (status) { "yes" -> "✓"; "no" -> "✕"; else -> "?" }
 
     Box(
         modifier = Modifier
@@ -74,11 +78,12 @@ private fun BadgeItem(label: String, isCompliant: Boolean) {
             .padding(horizontal = 10.dp, vertical = 6.dp)
     ) {
         Text(
-            text = "$symbol $label",
+            text = "$symbol $label" + if (status == "unknown") {
+                if (language == AppLanguage.BULGARIAN) " (Неизвестно)" else " (Unknown)"
+            } else "",
             fontSize = 12.sp,
             fontWeight = if (isCompliant) FontWeight.SemiBold else FontWeight.Medium,
             color = if (isCompliant) fg else ScannerSlateMuted
         )
     }
 }
-

@@ -12,6 +12,27 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class ScanHistoryMigrationTest {
+    @Test fun productEvidenceMigrationPreservesCachedProducts() {
+        val helper = FrameworkSQLiteOpenHelperFactory().create(
+            SupportSQLiteOpenHelper.Configuration.builder(ApplicationProvider.getApplicationContext())
+                .callback(object : SupportSQLiteOpenHelper.Callback(6) {
+                    override fun onCreate(db: SupportSQLiteDatabase) {}
+                    override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+                }).build()
+        )
+        try {
+            val db = helper.writableDatabase
+            db.execSQL("CREATE TABLE products (barcode TEXT NOT NULL PRIMARY KEY, productName TEXT NOT NULL)")
+            db.execSQL("INSERT INTO products VALUES ('4823077614675', 'Existing')")
+            AppDatabase.MIGRATION_6_7.migrate(db)
+            db.query("SELECT productName, dietaryStatusesJson FROM products WHERE barcode='4823077614675'").use {
+                assertTrue(it.moveToFirst())
+                assertEquals("Existing", it.getString(0))
+                assertEquals("", it.getString(1))
+            }
+        } finally { helper.close() }
+    }
+
     @Test fun upgradePreservesHistoryAndDoesNotInventLegacyIds() {
         val helper = FrameworkSQLiteOpenHelperFactory().create(
             SupportSQLiteOpenHelper.Configuration.builder(ApplicationProvider.getApplicationContext())

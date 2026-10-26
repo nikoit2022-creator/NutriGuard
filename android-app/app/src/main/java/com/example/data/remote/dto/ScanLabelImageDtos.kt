@@ -87,6 +87,7 @@ data class ProductDto(
     val isHalal: Boolean? = null,
     val isKosher: Boolean? = null,
     val allergensDetected: String? = null,
+    val dietaryStatusesJson: String? = null,
     val hasVerifiedNutrition: Boolean? = null,
     val hasVerifiedIngredients: Boolean? = null,
     val isVerified: Boolean? = null
@@ -118,6 +119,7 @@ data class ProductDto(
                 isHalal = if (json.has("isHalal")) json.optBoolean("isHalal") else null,
                 isKosher = if (json.has("isKosher")) json.optBoolean("isKosher") else null,
                 allergensDetected = json.optString("allergensDetected").takeIf { it.isNotBlank() },
+                dietaryStatusesJson = json.optJSONObject("dietaryStatuses")?.toString(),
                 hasVerifiedNutrition = if (json.has("hasVerifiedNutrition")) json.optBoolean("hasVerifiedNutrition") else null,
                 hasVerifiedIngredients = if (json.has("hasVerifiedIngredients")) json.optBoolean("hasVerifiedIngredients") else null,
                 isVerified = if (json.has("isVerified")) json.optBoolean("isVerified") else null
@@ -470,6 +472,7 @@ fun ScanLabelImageResponseDto.toParsedEntities(): ParsedScanData {
         isHalal = productDto?.isHalal ?: true,
         isKosher = productDto?.isKosher ?: true,
         allergensDetected = productDto?.allergensDetected ?: "",
+        dietaryStatusesJson = productDto?.dietaryStatusesJson ?: "",
         hasVerifiedNutrition = productDto?.hasVerifiedNutrition ?: false,
         hasVerifiedIngredients = productDto?.hasVerifiedIngredients ?: false,
         isVerified = productDto?.isVerified ?: false,

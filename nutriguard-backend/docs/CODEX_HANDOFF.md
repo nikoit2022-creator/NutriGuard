@@ -1,5 +1,14 @@
 # CODEX_HANDOFF
 
+## 2026-10-26: product import data integrity (Codex, local review branch)
+
+- Branch: `fix/product-import-data-integrity` in an isolated worktree, based on local `main` `bca7a0d`. Changes are uncommitted, unpushed, and undeployed. The live database was read only for an audit export.
+- Investigated barcode `4823077614675` and the broader product cache. The refreshed export contains 122 products: 1 HTML-escaped display name, 12 explicit trace clauses, 26 rows where the audit detects named allergens missing from the stored allergen field, and 1118 synthetic ingredient references. Audit inputs/results are `/home/vboxuser/product_profiles_integrity_snapshot_2026-10-26.csv` and `/home/vboxuser/product_import_integrity_audit_2026-10-26.json`; the latter is a deterministic quality audit, not medical validation.
+- Backend changes: new `app/services/product_label.py` separates explicit trace statements, extracts named allergens, and computes evidence-based yes/no/unknown dietary states. `open_food_facts.py`, `barcode_discovery.py`, `barcode_text_safety.py`, `ocr_normalizer.py`, `food_analysis.py`, `schemas/product.py`, and `warning_engine.py` use those distinctions and decode HTML display text. New discovery stores provider dietary evidence in `Product.dietary_evidence_json` through Alembic migration `a9c0d1e2f3a4`. Added exact curated soy-lecithin aliases, additive OpenAPI fields, unit tests, and read-only `scripts/audit_product_import_integrity.py`.
+- Android changes: Room version 7 preserves `dietaryStatusesJson` through migration 6→7; DTO/repository/cache and product UI now distinguish confirmed dietary yes/no from unknown, show named allergens separately from possible traces, decode cached HTML product names, and mark ingredients without a scientific profile. Added regression and migration tests.
+- Verification: `python3 -m pytest -q` → **1043 passed, 22 skipped**; offline Alembic SQL upgrade generated cleanly with a single head. `ANDROID_HOME=/home/vboxuser/android-sdk ./gradlew testDebugUnitTest --offline` → **BUILD SUCCESSFUL** (169 tests, no failures). On 2026-10-26, a disposable PostgreSQL 16 container completed `alembic upgrade head` → `downgrade -1` → `upgrade head`; the container was stopped and removed. The first full backend run had one intermittent SQLite lock in a pre-existing multiprocess ledger test; it passed in isolation and in the repeated full run.
+- Remaining: these fixes do not fabricate scientific profiles for synthetic ingredients, and the audit's unmatched rows still need curated source-backed enrichment. Review the diff and run the normal PR/CI process before merging or deployment. No live DB repair was performed.
+
 ## 2026-10-06: integration branch for scan-attempt diagnostics + ingredient identity (Claude Code)
 
 - Branch `integration/scan-diagnostics-ingredient-identity`, built from `origin/main` `2da53e3` by merging the ingredient follow-up

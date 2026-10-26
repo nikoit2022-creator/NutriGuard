@@ -105,6 +105,8 @@ _EXTRA_ALIASES: list[tuple[str, str, str | None]] = [
     ("e322_soy_lecithin", "Emulsifier: soy lecithin", "en"),
     ("e322_soy_lecithin", "Lecithin soy", "en"),
     ("e322_soy_lecithin", "Lecithins (soy)", "en"),
+    ("e322_soy_lecithin", "Soya lecithin", "en"),
+    ("e322_soy_lecithin", "Emulsifier soya lecithin", "en"),
     ("e322_soy_lecithin", "соев лецитин", "bg"),
     ("e322_soy_lecithin", "емулгатор соев лецитин", "bg"),
 ]

@@ -24,6 +24,7 @@ from app.integrations.barcode_providers.base import (
     ProviderProductResult,
 )
 from app.services.barcode_validation import BarcodeInfo
+from app.services.product_label import stated_allergens
 
 logger = structlog.get_logger(__name__)
 
@@ -261,7 +262,10 @@ class OpenFoodFactsProvider(BarcodeProductProvider):
             external_id=body.get("code") or barcode.gtin13,
             product_name=product_name,
             brand=_first_csv(product.get("brands")),
-            category=_first_csv(product.get("categories")),
+            # OFF's language-neutral category frequently mixes languages even
+            # on an English product record. Only trust explicitly localized
+            # taxonomy text for user-facing category display.
+            category=_first_csv(product.get("categories_en") or product.get("categories_bg")),
             image_url=product.get("image_front_url") or product.get("image_url"),
             raw_ingredient_text=raw_text,
             ingredients_tokens=_ingredient_tokens(product, lang),
@@ -273,7 +277,7 @@ class OpenFoodFactsProvider(BarcodeProductProvider):
                 has_preservatives=has_preservatives,
                 nova_group=product.get("nova_group") if isinstance(product.get("nova_group"), int) else None,
             ),
-            allergens=_allergens(product),
+            allergens=sorted(set(_allergens(product)) | stated_allergens(raw_text or "")),
             dietary_flags=_dietary_flags(product),
             language=lang or None,
             source_url=f"{settings.OPEN_FOOD_FACTS_BASE_URL}/product/{barcode.gtin13}",

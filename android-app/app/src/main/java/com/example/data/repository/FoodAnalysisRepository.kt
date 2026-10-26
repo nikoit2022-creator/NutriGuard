@@ -171,6 +171,10 @@ class FoodAnalysisRepository(
 
         if (existing?.hasUsableVerifiedScore() == true) {
             val ingList = fetchIngredientsForProduct(existing)
+            val displayProduct = existing.copy(
+                productName = existing.productName.replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&"),
+                category = if (existing.category.any { it in "іїєґІЇЄҐ" }) "General Food" else existing.category
+            )
             val scoreBreakdown = HealthScoreCalculator.calculate(
                 ingredients = ingList,
                 sugarGrams = existing.sugarGrams,
@@ -180,12 +184,12 @@ class FoodAnalysisRepository(
                 hasPreservatives = existing.hasPreservatives,
                 novaGroup = existing.novaGroup
             )
-            val warnings = PersonalizedWarningEngine.generateWarnings(existing, ingList, profile)
+            val warnings = PersonalizedWarningEngine.generateWarnings(displayProduct, ingList, profile)
 
             scanHistoryDao.insertHistory(
                 ScanHistoryEntity(
                     barcode = barcode,
-                    productName = existing.productName,
+                    productName = displayProduct.productName,
                     brand = existing.brand,
                     healthScore = scoreBreakdown.totalScore,
                     scanType = "BARCODE",
@@ -194,7 +198,7 @@ class FoodAnalysisRepository(
             )
 
             return@withContext FullProductAnalysis(
-                product = existing.copy(healthScore = scoreBreakdown.totalScore),
+                product = displayProduct.copy(healthScore = scoreBreakdown.totalScore),
                 ingredients = ingList,
                 healthScore = scoreBreakdown.totalScore,
                 warnings = warnings,
@@ -278,7 +282,11 @@ class FoodAnalysisRepository(
     }
 
     private suspend fun fetchIngredientsForProduct(product: ProductEntity): List<IngredientEntity> {
-        val ids = product.ingredientIds.split(",").map { it.trim() }.filter { it.isNotBlank() }
+        val ids = product.ingredientIds.split(",").map { it.trim() }.filter {
+            it.isNotBlank() && !it.startsWith("synth_may_contain_", true) &&
+                !it.startsWith("synth_may_also_contain_", true) &&
+                !it.startsWith("synth_може_да_съдържа_", true)
+        }
         val result = mutableListOf<IngredientEntity>()
         ids.forEach { id ->
             val entity = ingredientDao.getIngredientByIdOrEnum(id)

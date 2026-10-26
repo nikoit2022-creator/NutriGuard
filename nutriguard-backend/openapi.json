@@ -2169,6 +2169,24 @@
           "isVerified": {
             "type": "boolean",
             "title": "Isverified"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source",
+            "default": "local"
+          },
+          "possibleTraces": {
+            "type": "string",
+            "title": "Possibletraces",
+            "readOnly": true
+          },
+          "dietaryStatuses": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Dietarystatuses",
+            "readOnly": true
           }
         },
         "type": "object",
@@ -2196,7 +2214,9 @@
           "timestamp",
           "hasVerifiedNutrition",
           "hasVerifiedIngredients",
-          "isVerified"
+          "isVerified",
+          "possibleTraces",
+          "dietaryStatuses"
         ],
         "title": "ProductOut",
         "description": "Mirrors com.example.data.model.ProductEntity exactly (API Contract 5.5).\n\n`ingredient_ids` is populated by the repository layer as a\ncomma-separated string (matching the Room column) even though the\ndatabase stores a normalized many-to-many relation internally."

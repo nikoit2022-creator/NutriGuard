@@ -3004,3 +3004,32 @@ records, and never mutates anything.
   no-Content-Length body and a lying-`Content-Length` body, neither of
   which the Round 2 fix actually had coverage for).
 
+# Barcode import integrity and dietary evidence (2026-10-26)
+
+Barcode discovery decodes HTML entities in display text and uses only explicit
+English/Bulgarian Open Food Facts category fields. The raw ingredient text is
+preserved, while explicit `may contain`/`може да съдържа` clauses are excluded
+from ingredient tokens and shown separately as `product.possibleTraces`.
+Named allergens in the ingredient segment augment provider allergen tags;
+cross-contact traces never become confirmed allergens. Cached legacy rows
+receive the same read-time display correction without a bulk database write.
+
+`ProductOut` adds `source`, `possibleTraces`, and `dietaryStatuses` (each
+suitability value is `yes`, `no`, or `unknown`). Legacy Boolean flags remain
+for API compatibility; clients must use `dietaryStatuses` to distinguish
+missing evidence from a proven negative. Migration `a9c0d1e2f3a4` stores
+explicit provider tag evidence in `products.dietary_evidence_json`, including
+negative tags, so repeat scans preserve the distinction. Existing rows without
+that evidence are interpreted conservatively. Positive suitability for externally
+discovered products requires an Open Food Facts structured tag. First-party
+Boolean defaults do not establish certification. Explicit ingredient
+contradictions can establish a negative; unknown cases receive informational
+warnings rather than claims of noncompliance. Ingredient matching coverage is
+separate from the nutrition and ingredient-text verification flags used for
+Health Score eligibility.
+
+To review stored rows without changing them, export `products` to CSV and run
+`python -m scripts.audit_product_import_integrity --input products.csv`. The
+audit reports escaped names, trace statements, named allergens missing from
+stored tags, synthetic ingredient IDs, and dietary statuses. No automatic
+database repair is performed.

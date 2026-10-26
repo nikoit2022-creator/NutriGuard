@@ -2,6 +2,7 @@ package com.example.data.remote
 
 import com.example.data.model.RiskLevel
 import com.example.data.remote.dto.IngredientDto
+import com.example.data.remote.dto.ProductDto
 import com.example.data.remote.dto.ScanLabelImageResponseDto
 import com.example.data.remote.dto.toEntities
 import com.example.data.remote.dto.toParsedEntities
@@ -19,6 +20,12 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
 class ScanLabelImageDtoTest {
+
+    @Test fun parsesDietaryEvidenceWithoutCollapsingUnknown() {
+        val dto = ProductDto.fromJson(JSONObject("""{"barcode":"4823077614675","dietaryStatuses":{"halal":"unknown","vegan":"no"}}"""))
+        assertEquals("unknown", JSONObject(dto.dietaryStatusesJson!!).getString("halal"))
+        assertEquals("no", JSONObject(dto.dietaryStatusesJson!!).getString("vegan"))
+    }
 
     private val fullResponseJson = """
         {

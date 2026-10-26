@@ -76,6 +76,8 @@ class Product(Base):
     is_kosher: Mapped[bool] = mapped_column("is_kosher", Boolean, default=True)
 
     allergens_detected: Mapped[str] = mapped_column("allergens_detected", Text, nullable=False, default="None")
+    # Exact provider tag evidence, separate from legacy Boolean defaults.
+    dietary_evidence_json: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     timestamp: Mapped[int] = mapped_column(BigInteger, default=_now_ms)
 
     created_at: Mapped[datetime] = mapped_column(

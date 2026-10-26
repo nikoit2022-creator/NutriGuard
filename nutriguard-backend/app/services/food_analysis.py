@@ -111,6 +111,7 @@ text — a pure identity lookup) is INTENTIONALLY UNCHANGED: it has no
 ingredient-recognition step of its own to succeed at, so it keeps
 gating on `is_verified` exactly as before.
 """
+import json
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -291,6 +292,7 @@ def _apply_discovered_fields(
     confidence: float,
     has_verified_nutrition: bool,
     has_verified_ingredients: bool,
+    dietary_flags: dict[str, bool] | None = None,
 ) -> None:
     """Overwrites a previously-discovered (never a verified/local) row
     with a higher-confidence re-discovery. Never called for a row whose
@@ -319,6 +321,7 @@ def _apply_discovered_fields(
     existing.is_halal = data.is_halal
     existing.is_kosher = data.is_kosher
     existing.allergens_detected = data.allergens_detected
+    existing.dietary_evidence_json = json.dumps(dietary_flags or {}, sort_keys=True)
     existing.source = source
     existing.source_confidence = confidence
     existing.has_verified_nutrition = has_verified_nutrition
@@ -351,20 +354,16 @@ def _to_analyzed_data_from_discovery(
     flag alone, so neither is scored in isolation.
 
     Dietary flags/allergens: OFF's own structured tags (`dietary_flags`/
-    `allergens` on `DiscoveredProduct`) are used where present. Anything
-    OFF did NOT state defaults to False (NOT True) for every one of
+    `allergens` on `DiscoveredProduct`) are used where present. Legacy
+    Boolean fields default to False for every one of
     is_gluten_free/is_lactose_free/is_vegan/is_vegetarian/is_halal/
-    is_kosher — "unknown" must never be presented as a positive
-    certification claim. False is the conservative direction here: for
-    a health- or religion-relevant dietary flag, a false negative
-    (a genuinely gluten-free product not marked as such) is far safer
-    than a false positive (a product silently claimed gluten-free/halal/
-    kosher with zero evidence for it) — the same asymmetry the
-    Personalized Warning Engine already assumes when it warns a user off
-    a product that isn't flagged as meeting their requirement.
+    is_kosher; the additive `dietaryStatuses` response preserves unknown
+    separately, so False is not presented as an actual negative.
     """
     nutrition_known = discovered.nutrition_known
-    ingredients_known = discovered.ingredients_known
+    ingredients_known = discovered.ingredients_known and bool(
+        normalize_and_extract_tokens(discovered.raw_ingredient_text)
+    )
     is_complete = nutrition_known and ingredients_known
 
     ingredient_list: list[Any] = []
@@ -720,6 +719,7 @@ async def _persist_discovered_product(
         has_verified_nutrition=nutrition_known,
         has_verified_ingredients=ingredients_known,
     )
+    candidate.dietary_evidence_json = json.dumps(discovered.dietary_flags, sort_keys=True)
     if not is_complete:
         # Mirrors `_new_product_from_label`: an incomplete row must not
         # carry a misleading verification timestamp (review round 3,
@@ -747,6 +747,7 @@ async def _persist_discovered_product(
                 confidence=discovered.confidence,
                 has_verified_nutrition=nutrition_known,
                 has_verified_ingredients=ingredients_known,
+                dietary_flags=discovered.dietary_flags,
             )
             await db.flush()
             product = existing
@@ -800,7 +801,16 @@ async def fetch_ingredients_for_product(db: AsyncSession, product: Product) -> l
     if not product.ingredient_ids:
         return []
 
-    ids = [i for i in product.ingredient_ids.split(",") if i]
+    # Older scans persisted cross-contact text as a synthetic ingredient.
+    # Hide those legacy references on reads; the raw label text remains
+    # untouched for provenance and `possibleTraces` in ProductOut.
+    ids = [
+        i for i in product.ingredient_ids.split(",")
+        if i and not i.lower().startswith((
+            "synth_may_contain_", "synth_may_also_contain_",
+            "synth_може_да_съдържа_", "synth_възможни_следи_от_",
+        ))
+    ]
     if not ids:
         return []
 
@@ -1158,7 +1168,7 @@ def _ingredients_group_is_complete(data: AnalyzedProductData, ingredients_trustw
     text was extracted (not a heuristic guess from a placeholder/error
     string -- see `ingredients_trustworthy`'s callers) AND it's actually
     non-empty. Independent of the nutrition group."""
-    return ingredients_trustworthy and bool(data.raw_ingredient_text.strip())
+    return ingredients_trustworthy and bool(normalize_and_extract_tokens(data.raw_ingredient_text))
 
 
 def _apply_label_enrichment(
@@ -1244,6 +1254,7 @@ def _apply_label_enrichment(
         existing.is_vegetarian = data.is_vegetarian
         existing.is_halal = data.is_halal
         existing.is_kosher = data.is_kosher
+        existing.dietary_evidence_json = ""
         # Allergen text: only overwritten when this attempt actually
         # names something -- an unknown/unreadable answer ("", see
         # `gemini_image_parser._extract_allergens_text`) must never

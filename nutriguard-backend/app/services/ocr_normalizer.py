@@ -14,6 +14,7 @@ from typing import Any
 from app.models.enums import TRUSTED_INGREDIENT_SOURCES, IngredientSource, RiskLevel
 from app.services.ingredient_normalization import normalize_ingredient_name
 from app.services.label_language import bulgarian_ingredient_alias
+from app.services.product_label import split_ingredients_and_traces
 
 _BRACKET_OR_PERCENT = re.compile(r"\[.*?\]|\(.*?%\)")
 _NON_WORD_EDGES = re.compile(r"^\W+|\W+$")
@@ -50,6 +51,7 @@ def normalize_and_extract_tokens(raw_text: str, *, fold_cyrillic_e: bool = True)
     # build a NEW id.
     if fold_cyrillic_e:
         raw_text = _CYRILLIC_E_BEFORE_NUMBER.sub("E", raw_text)
+    raw_text, _ = split_ingredients_and_traces(raw_text)
     cleaned = _BRACKET_OR_PERCENT.sub("", raw_text)
     cleaned = cleaned.replace("\n", " ")
     cleaned = re.sub(re.escape("Ingredients:"), "", cleaned, flags=re.IGNORECASE)

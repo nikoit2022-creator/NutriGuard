@@ -14,10 +14,11 @@ def _scripts() -> ScriptDirectory:
     return ScriptDirectory.from_config(config)
 
 
-def test_the_migration_is_the_current_single_head_on_top_of_the_candidate_queue():
+def test_the_migration_stays_on_the_single_head_chain_above_the_candidate_queue():
     scripts = _scripts()
     assert scripts.get_revision(REVISION).down_revision == "d7e8f9a0b1c2"
-    assert scripts.get_heads() == [REVISION]
+    assert len(scripts.get_heads()) == 1
+    assert REVISION in {revision.revision for revision in scripts.walk_revisions()}
 
 
 def test_the_migration_only_adds_one_nullable_safe_boolean_column():

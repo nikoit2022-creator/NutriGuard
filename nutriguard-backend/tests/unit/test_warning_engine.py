@@ -20,6 +20,8 @@ class FakeProduct:
     is_vegetarian: bool = True
     is_halal: bool = True
     is_kosher: bool = True
+    raw_ingredient_text: str = ""
+    allergens_detected: str = ""
 
 
 @dataclass
@@ -164,6 +166,26 @@ def test_gluten_no_violation_when_free():
         FakeProduct(is_gluten_free=True), [], make_profile(avoid_gluten=True)
     )
     assert find(warnings, "Gluten-Free Diet") == []
+
+
+def test_unknown_halal_is_information_not_claim_of_noncompliance():
+    warnings = generate_warnings(
+        FakeProduct(is_halal=False), [], make_profile(require_halal=True)
+    )
+    match = find(warnings, "Halal")
+    assert len(match) == 1
+    assert match[0].severity == WarningSeverity.INFO
+    assert "not been established" in match[0].description
+
+
+def test_named_peanuts_warn_even_when_provider_allergen_tags_omit_them():
+    product = FakeProduct(
+        raw_ingredient_text="Wheat flour, ground peanut kernels. May contain sesame seeds.",
+        allergens_detected="Gluten",
+    )
+    warnings = generate_warnings(product, [], make_profile(avoid_peanuts=True))
+    assert len(find(warnings, "Peanut Allergy")) == 1
+    assert find(warnings, "Peanut Allergy")[0].severity == WarningSeverity.HIGH
 
 
 # 9. Lactose ---------------------------------------------------------------
