@@ -1,14 +1,14 @@
 """Persist explicit dietary tag evidence for product three-state status.
 
 Revision ID: a9c0d1e2f3a4
-Revises: a8b9c0d1e2f3
+Revises: b9c0d1e2f3a4
 """
 
 from alembic import op
 import sqlalchemy as sa
 
 revision = "a9c0d1e2f3a4"
-down_revision = "a8b9c0d1e2f3"
+down_revision = "b9c0d1e2f3a4"
 branch_labels = None
 depends_on = None
 
