@@ -25,6 +25,41 @@ The Android client is maintained in the sibling `android-app` directory.
 
 ## Changelog
 
+**V21 (Wikipedia fallback for ingredient enrichment):** English
+Wikipedia is now a last-resort fallback source for a scanned
+ingredient's `description`, used only when local resolution
+(`app.services.ingredient_catalog`) leaves it genuinely blank and not
+yet `VERIFIED` -- never when curated/regulatory local data already
+exists. New `IngredientSource.WIKIPEDIA_API` value (additive enum
+widening on the wire -- see `openapi.json`'s `IngredientSource` enum);
+deliberately excluded from `TRUSTED_INGREDIENT_SOURCES`, so it can
+never back an EFSA/FDA/ADI claim or promote `verificationStatus` past
+`LIMITED_DATA`. Only `description` is ever written, via the existing
+`merge_verified_fields` (unchanged rank/blank-value overwrite
+protection) -- `efsaStatus`/`fdaStatus`/`acceptableDailyIntake`/
+`riskLevel`/`healthConcerns`/`sideEffects` are never touched by this
+source. A name considered too vague to trust (a generic function term,
+placeholder text, no letters, or an already `identity_uncertain` row --
+reusing `app.services.ingredient_candidate_flags`' existing closed
+vocabulary) is never searched; it is recorded as
+`SKIPPED_UNCLEAR_NAME` with a closed-vocabulary `review_reason`
+instead. New `ingredient_wikipedia_lookups` table (migration
+`b9c0d1e2f3a4`) is the single provenance/cache/review-queue record per
+ingredient: matched page title/URL, retrieval date, the extract
+actually retrieved, which field(s) it populated, match status
+(`MATCHED`/`NOT_FOUND`/`AMBIGUOUS`/`SKIPPED_UNCLEAR_NAME`/`ERROR`), and
+-- on failure -- a short, safe error detail. A positive-cache TTL
+(`WIKIPEDIA_LOOKUP_CACHE_TTL_SECONDS`, default ~6 months) and a
+shorter negative-cache TTL (`WIKIPEDIA_NEGATIVE_CACHE_TTL_SECONDS`,
+default 24h) avoid repeat network calls for the same ingredient. A
+network/API failure is caught, logged, and written as `ERROR`
+provenance -- it never fabricates a value and never interrupts the
+rest of a scan's batch (each ingredient is enriched independently from
+`materialize_ingredients`). See
+`app/services/ingredient_wikipedia_enrichment.py`,
+`app/integrations/wikipedia_api.py`, and
+`tests/integration/test_ingredient_wikipedia_enrichment.py`.
+
 **V20 (reviewed EN/BG ingredient profiles):** Ingredient scientific
 copy now supports additive, persistent localizations. Canonical English
 fields and every existing API field remain unchanged. A new
@@ -3017,3 +3052,32 @@ records, and never mutates anything.
   no-Content-Length body and a lying-`Content-Length` body, neither of
   which the Round 2 fix actually had coverage for).
 
+# Barcode import integrity and dietary evidence (2026-10-26)
+
+Barcode discovery decodes HTML entities in display text and uses only explicit
+English/Bulgarian Open Food Facts category fields. The raw ingredient text is
+preserved, while explicit `may contain`/`може да съдържа` clauses are excluded
+from ingredient tokens and shown separately as `product.possibleTraces`.
+Named allergens in the ingredient segment augment provider allergen tags;
+cross-contact traces never become confirmed allergens. Cached legacy rows
+receive the same read-time display correction without a bulk database write.
+
+`ProductOut` adds `source`, `possibleTraces`, and `dietaryStatuses` (each
+suitability value is `yes`, `no`, or `unknown`). Legacy Boolean flags remain
+for API compatibility; clients must use `dietaryStatuses` to distinguish
+missing evidence from a proven negative. Migration `a9c0d1e2f3a4` stores
+explicit provider tag evidence in `products.dietary_evidence_json`, including
+negative tags, so repeat scans preserve the distinction. Existing rows without
+that evidence are interpreted conservatively. Positive suitability for externally
+discovered products requires an Open Food Facts structured tag. First-party
+Boolean defaults do not establish certification. Explicit ingredient
+contradictions can establish a negative; unknown cases receive informational
+warnings rather than claims of noncompliance. Ingredient matching coverage is
+separate from the nutrition and ingredient-text verification flags used for
+Health Score eligibility.
+
+To review stored rows without changing them, export `products` to CSV and run
+`python -m scripts.audit_product_import_integrity --input products.csv`. The
+audit reports escaped names, trace statements, named allergens missing from
+stored tags, synthetic ingredient IDs, and dietary statuses. No automatic
+database repair is performed.

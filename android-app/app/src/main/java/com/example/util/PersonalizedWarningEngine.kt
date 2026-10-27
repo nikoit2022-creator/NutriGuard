@@ -175,64 +175,84 @@ object PersonalizedWarningEngine {
         }
 
         // 8. Custom Allergen & Dietary Rules
-        if (profile.avoidGluten && !product.isGlutenFree) {
+        val glutenStatus = product.dietaryDisplayStatus("gluten")
+        if (profile.avoidGluten && glutenStatus != "yes") {
             warnings.add(
                 HealthWarning(
-                    title = "Gluten Violation",
-                    description = "This product contains or is processed with Gluten sources.",
+                    title = if (glutenStatus == "no") "Gluten Violation" else "Gluten Status Unconfirmed",
+                    description = if (glutenStatus == "no") "Gluten-containing grain is named in the ingredients." else "Gluten-free status has not been established. Check the label before use.",
                     condition = "Gluten-Free Diet",
                     triggerFactor = "Gluten",
-                    severity = WarningSeverity.HIGH
+                    severity = if (glutenStatus == "no") WarningSeverity.HIGH else WarningSeverity.INFO
                 )
             )
         }
 
-        if (profile.avoidLactose && !product.isLactoseFree) {
+        val lactoseStatus = product.dietaryDisplayStatus("lactose")
+        if (profile.avoidLactose && lactoseStatus != "yes") {
             warnings.add(
                 HealthWarning(
-                    title = "Lactose Contained",
-                    description = "Product contains dairy or milk derivatives with lactose.",
+                    title = if (lactoseStatus == "no") "Lactose Contained" else "Lactose Status Unconfirmed",
+                    description = if (lactoseStatus == "no") "Lactose or milk powder is named in the ingredients." else "Lactose-free status has not been established. Check the label before use.",
                     condition = "Lactose Intolerance",
                     triggerFactor = "Lactose",
-                    severity = WarningSeverity.HIGH
+                    severity = if (lactoseStatus == "no") WarningSeverity.HIGH else WarningSeverity.INFO
                 )
             )
         }
 
-        if (profile.requireVegan && !product.isVegan) {
+        val veganStatus = product.dietaryDisplayStatus("vegan")
+        if (profile.requireVegan && veganStatus != "yes") {
             warnings.add(
                 HealthWarning(
-                    title = "Non-Vegan Product",
-                    description = "Contains animal-derived ingredients or processing agents.",
+                    title = if (veganStatus == "no") "Non-Vegan Product" else "Vegan Status Unconfirmed",
+                    description = if (veganStatus == "no") "Animal-derived ingredients are named in the ingredients." else "Vegan status has not been established. Check the label before use.",
                     condition = "Vegan Lifestyle",
                     triggerFactor = "Animal Origin",
-                    severity = WarningSeverity.HIGH
+                    severity = if (veganStatus == "no") WarningSeverity.HIGH else WarningSeverity.INFO
                 )
             )
         }
 
-        if (profile.requireHalal && !product.isHalal) {
+        if (profile.requireHalal && product.dietaryDisplayStatus("halal") != "yes") {
             warnings.add(
                 HealthWarning(
-                    title = "Halal Compliance Alert",
-                    description = "Contains non-Halal ingredients or unverified animal derivatives.",
+                    title = "Halal Status Unconfirmed",
+                    description = "Halal compliance has not been established from available evidence.",
                     condition = "Halal",
                     triggerFactor = "Halal Compliance",
-                    severity = WarningSeverity.HIGH
+                    severity = WarningSeverity.INFO
                 )
             )
         }
 
-        if (profile.requireKosher && !product.isKosher) {
+        if (profile.requireKosher && product.dietaryDisplayStatus("kosher") != "yes") {
             warnings.add(
                 HealthWarning(
-                    title = "Kosher Compliance Alert",
-                    description = "Product does not meet strict Kosher certification standards.",
+                    title = "Kosher Status Unconfirmed",
+                    description = "Kosher compliance has not been established from available evidence.",
                     condition = "Kosher",
                     triggerFactor = "Kosher Compliance",
-                    severity = WarningSeverity.HIGH
+                    severity = WarningSeverity.INFO
                 )
             )
+        }
+
+        val allergens = product.namedAllergens().map { it.lowercase() }.toSet()
+        listOf(
+            Triple(profile.avoidPeanuts, "Peanuts", "Peanut Allergy"),
+            Triple(profile.avoidSoy, "Soybeans", "Soy Allergy"),
+            Triple(profile.avoidTreeNuts, "Nuts", "Tree Nut Allergy")
+        ).forEach { (enabled, name, condition) ->
+            if (enabled && name.lowercase() in allergens) {
+                warnings.add(HealthWarning(
+                    title = "$name Listed in Ingredients",
+                    description = "$name are named as ingredients or declared allergens. Check the package before use.",
+                    condition = condition,
+                    triggerFactor = name,
+                    severity = WarningSeverity.HIGH
+                ))
+            }
         }
 
         return warnings

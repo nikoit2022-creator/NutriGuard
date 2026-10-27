@@ -27,6 +27,7 @@ scrubbing, script-safety fallback) should be consolidated into it rather
 than kept as two parallel implementations — this docstring is the
 pointer for that future cleanup.
 """
+import html
 import re
 
 _PLACEHOLDER_VALUES = {"", "null", "none", "n/a", "na", "nil", "undefined", "-", "unknown"}
@@ -69,7 +70,9 @@ def clean_optional(value: str | None) -> str | None:
     """None for placeholder junk, else the trimmed value."""
     if is_placeholder(value):
         return None
-    return value.strip()
+    # Provider names commonly contain escaped quotes/ampersands. Decode
+    # entities as text, never as markup, before persisting display fields.
+    return html.unescape(value).strip()
 
 
 def clean_required(value: str | None, fallback: str) -> str:

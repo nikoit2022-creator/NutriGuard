@@ -32,6 +32,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import com.example.ui.i18n.LocalizedText as Text
 import com.example.ui.i18n.LocalAppLanguage
+import com.example.ui.i18n.AppLanguage
 import com.example.ui.i18n.localizeUiText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -66,6 +67,7 @@ import com.example.ui.theme.ScannerSlateMuted
 import com.example.ui.theme.ScannerViolet
 import com.example.ui.viewmodel.AnalysisUiState
 import com.example.ui.viewmodel.MainViewModel
+import com.example.util.namedAllergens
 
 @Composable
 fun ProductDetailScreen(
@@ -261,11 +263,20 @@ fun ProductDetailScreen(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "Tap to view scientific profile",
+                            text = "Tap items with details",
                             style = MaterialTheme.typography.bodySmall,
                             color = ScannerSlateMuted
                         )
                     }
+                }
+
+                item {
+                    val detailed = analysis.ingredients.count { hasUsefulIngredientDetails(it, language) }
+                    Text(
+                        text = if (language == AppLanguage.BULGARIAN) "Съставки с информация: $detailed/${analysis.ingredients.size}" else "Ingredient details available: $detailed/${analysis.ingredients.size}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ScannerSlateMuted
+                    )
                 }
 
                 if (shouldOfferLabelEnrichment(
@@ -342,6 +353,35 @@ fun ProductDetailScreen(
                     }
                 }
 
+                val namedAllergens = product.namedAllergens()
+                if (namedAllergens.isNotEmpty()) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Text(text = "Declared or named allergens", fontWeight = FontWeight.SemiBold)
+                                Text(text = namedAllergens.sorted().joinToString(", "), style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
+                val possibleTraces = extractPossibleTraces(product.rawIngredientText)
+                if (possibleTraces.isNotBlank()) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Text(text = "May contain traces", fontWeight = FontWeight.SemiBold)
+                                Text(text = possibleTraces, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
+
                 // Source Footnote
                 item {
                     Row(
@@ -407,6 +447,12 @@ fun ProductDetailScreen(
             }
         }
     }
+}
+
+internal fun extractPossibleTraces(rawIngredientText: String): String {
+    val marker = Regex("(?i)(?:^|[.,;]\\s*|\\n\\s*)(?:may\\s+(?:also\\s+)?contain|може\\s+да\\s+съдържа|възможни\\s+следи\\s+от)\\s*[:\\-]?\\s*")
+    val match = marker.find(rawIngredientText) ?: return ""
+    return rawIngredientText.substring(match.range.last + 1).trim().trimEnd('.', ' ')
 }
 
 internal fun shouldOfferLabelEnrichment(

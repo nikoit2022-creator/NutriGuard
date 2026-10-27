@@ -88,9 +88,21 @@ def _connect() -> sqlite3.Connection:
         path = Path(settings.CLIENT_EVENT_LEDGER_PATH)
         path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(path), timeout=5.0, isolation_level=None, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        # Concurrent workers can race while changing a brand-new database to
+        # WAL mode. SQLite may report BUSY immediately for this pragma even
+        # with busy_timeout set; retry only that transient initialization lock.
+        deadline = time.monotonic() + 10.0
+        while True:
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                    conn.close()
+                    raise
+                time.sleep(0.05)
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS client_events (

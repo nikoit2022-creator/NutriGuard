@@ -53,6 +53,12 @@ class IngredientSource(str, enum.Enum):
     CURATED_SEED = "CURATED_SEED"
     REGULATORY_LOOKUP = "REGULATORY_LOOKUP"
     GEMINI = "GEMINI"
+    # General encyclopedic text (English Wikipedia), used only as a
+    # fallback to supplement a general description/identity when local
+    # data is insufficient (see app.services.ingredient_wikipedia_enrichment).
+    # Never promoted to VERIFIED and never trusted for a regulatory claim
+    # -- deliberately excluded from TRUSTED_INGREDIENT_SOURCES below.
+    WIKIPEDIA_API = "WIKIPEDIA_API"
     OCR_HEURISTIC = "OCR_HEURISTIC"
 
 

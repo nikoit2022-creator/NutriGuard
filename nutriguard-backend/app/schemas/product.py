@@ -1,9 +1,15 @@
+import html
+
+from pydantic import Field, ValidationInfo, computed_field, field_validator
+
 from app.schemas.common import ORMModel
+from app.services.product_label import dietary_statuses, split_ingredients_and_traces, stated_allergens
 
 
 class ProductOut(ORMModel):
     """
-    Mirrors com.example.data.model.ProductEntity exactly (API Contract 5.5).
+    Mirrors the legacy ProductEntity fields and adds evidence-aware display
+    fields (`possibleTraces`, `dietaryStatuses`, `source`).
 
     `ingredient_ids` is populated by the repository layer as a
     comma-separated string (matching the Room column) even though the
@@ -71,3 +77,37 @@ class ProductOut(ORMModel):
     has_verified_nutrition: bool
     has_verified_ingredients: bool
     is_verified: bool
+
+    # Additive display evidence. Legacy booleans remain on the wire for old
+    # clients, while the new UI uses these truthful three-state values.
+    source: str = "local"
+    dietary_evidence_json: str = Field(default="", exclude=True)
+
+    @field_validator("product_name", "brand", "category", mode="before")
+    @classmethod
+    def decode_legacy_html_entities(cls, value: str) -> str:
+        return html.unescape(value) if isinstance(value, str) else value
+
+    @field_validator("category", mode="after")
+    @classmethod
+    def hide_unsupported_category_script(cls, value: str) -> str:
+        # Ukrainian-specific characters are outside Bulgarian orthography;
+        # do not present an untranslated taxonomy label as local UI copy.
+        return "General Food" if any(ch in value for ch in "іїєґІЇЄҐ") else value
+
+    @field_validator("allergens_detected", mode="after")
+    @classmethod
+    def include_named_ingredient_allergens(cls, value: str, info: ValidationInfo) -> str:
+        stored = {part.strip() for part in value.split(",") if part.strip() and part.strip().lower() != "none"}
+        named = stated_allergens(info.data.get("raw_ingredient_text", ""))
+        return ", ".join(sorted(stored | named))
+
+    @computed_field
+    @property
+    def possible_traces(self) -> str:
+        return split_ingredients_and_traces(self.raw_ingredient_text)[1]
+
+    @computed_field
+    @property
+    def dietary_statuses(self) -> dict[str, str]:
+        return dietary_statuses(self)

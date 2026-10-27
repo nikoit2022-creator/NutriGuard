@@ -243,7 +243,7 @@ async def discover_product(barcode: BarcodeInfo) -> DiscoveryOutcome:
         barcode=barcode,
         product_name=_select_display_name(primary),
         brand=clean_required(brand, fallback=""),
-        category=to_safe_display_text(primary.category, fallback="Discovered Product"),
+        category=to_safe_display_text(primary.category, fallback="General Food"),
         image_url=image_url,
         raw_ingredient_text=raw_ingredient_text,
         nutrition=primary.nutrition,

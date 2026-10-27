@@ -14,16 +14,15 @@ Ingredient-like object needs: common_name, e_number, bad_for_diabetes,
     bad_for_pregnancy, bad_for_children, bad_for_high_cholesterol
 Profile-like object needs: all UserHealthProfile boolean flags
 
-NOTE (documented deviation, not a bug in this port): in the original
-Kotlin engine, `avoid_peanuts`, `avoid_soy`, `avoid_tree_nuts` and
-`require_vegetarian` exist on the profile model but have NO matching
-check implemented. This port preserves that exact (documented)
-inconsistency rather than silently "fixing" it — see API Contract 7.2.
+The peanut, soy, and tree nut preferences are checked against explicit
+ingredient/allergen evidence. Missing dietary evidence is reported as
+unknown, not as confirmed incompatibility.
 """
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.models.enums import WarningSeverity
+from app.services.product_label import dietary_statuses, stated_allergens
 
 
 @dataclass(frozen=True)
@@ -205,59 +204,78 @@ def generate_warnings(product: Any, ingredients: list[Any], profile: Any) -> lis
                 )
 
     # 8. Custom allergen & dietary rules
-    if profile.avoid_gluten and not product.is_gluten_free:
+    statuses = dietary_statuses(product)
+    if profile.avoid_gluten and statuses["glutenFree"] != "yes":
         warnings.append(
             HealthWarning(
-                title="Gluten Violation",
-                description="This product contains or is processed with Gluten sources.",
+                title="Gluten Violation" if statuses["glutenFree"] == "no" else "Gluten Status Unconfirmed",
+                description="Wheat, barley or rye is named in the ingredients." if statuses["glutenFree"] == "no" else "Gluten-free status has not been established. Check the label before use.",
                 condition="Gluten-Free Diet",
                 trigger_factor="Gluten",
-                severity=WarningSeverity.HIGH,
+                severity=WarningSeverity.HIGH if statuses["glutenFree"] == "no" else WarningSeverity.INFO,
             )
         )
 
-    if profile.avoid_lactose and not product.is_lactose_free:
+    if profile.avoid_lactose and statuses["lactoseFree"] != "yes":
         warnings.append(
             HealthWarning(
-                title="Lactose Contained",
-                description="Product contains dairy or milk derivatives with lactose.",
+                title="Lactose Contained" if statuses["lactoseFree"] == "no" else "Lactose Status Unconfirmed",
+                description="Lactose or milk powder is named in the ingredients." if statuses["lactoseFree"] == "no" else "Lactose-free status has not been established. Check the label before use.",
                 condition="Lactose Intolerance",
                 trigger_factor="Lactose",
-                severity=WarningSeverity.HIGH,
+                severity=WarningSeverity.HIGH if statuses["lactoseFree"] == "no" else WarningSeverity.INFO,
             )
         )
 
-    if profile.require_vegan and not product.is_vegan:
+    if profile.require_vegan and statuses["vegan"] != "yes":
         warnings.append(
             HealthWarning(
-                title="Non-Vegan Product",
-                description="Contains animal-derived ingredients or processing agents.",
+                title="Non-Vegan Product" if statuses["vegan"] == "no" else "Vegan Status Unconfirmed",
+                description="Animal-derived ingredients are named in the ingredients." if statuses["vegan"] == "no" else "Vegan status has not been established. Check the label before use.",
                 condition="Vegan Lifestyle",
                 trigger_factor="Animal Origin",
-                severity=WarningSeverity.HIGH,
+                severity=WarningSeverity.HIGH if statuses["vegan"] == "no" else WarningSeverity.INFO,
             )
         )
 
-    if profile.require_halal and not product.is_halal:
+    if profile.require_halal and statuses["halal"] != "yes":
         warnings.append(
             HealthWarning(
-                title="Halal Compliance Alert",
-                description="Contains non-Halal ingredients or unverified animal derivatives.",
+                title="Halal Status Unconfirmed",
+                description="Halal compliance has not been established from available evidence.",
                 condition="Halal",
                 trigger_factor="Halal Compliance",
-                severity=WarningSeverity.HIGH,
+                severity=WarningSeverity.INFO,
             )
         )
 
-    if profile.require_kosher and not product.is_kosher:
+    if profile.require_kosher and statuses["kosher"] != "yes":
         warnings.append(
             HealthWarning(
-                title="Kosher Compliance Alert",
-                description="Product does not meet strict Kosher certification standards.",
+                title="Kosher Status Unconfirmed",
+                description="Kosher compliance has not been established from available evidence.",
                 condition="Kosher",
                 trigger_factor="Kosher Compliance",
-                severity=WarningSeverity.HIGH,
+                severity=WarningSeverity.INFO,
             )
         )
+
+    named_allergens = stated_allergens(getattr(product, "raw_ingredient_text", "") or "")
+    stored_allergens = {x.strip().casefold() for x in (getattr(product, "allergens_detected", "") or "").split(",")}
+    for enabled, name, condition, aliases in (
+        (getattr(profile, "avoid_peanuts", False), "Peanuts", "Peanut Allergy", {"peanuts", "peanut"}),
+        (getattr(profile, "avoid_soy", False), "Soybeans", "Soy Allergy", {"soybeans", "soy", "soya"}),
+        (getattr(profile, "avoid_tree_nuts", False), "Nuts", "Tree Nut Allergy", {"nuts", "tree nuts"}),
+    ):
+        if enabled and (name in named_allergens or bool(stored_allergens & aliases)):
+            warnings.append(
+                HealthWarning(
+                    title=f"{name} Listed in Ingredients",
+                    description=f"{name} are named as ingredients or declared allergens. Check the package before use.",
+                    condition=condition,
+                    trigger_factor=name,
+                    severity=WarningSeverity.HIGH,
+                )
+            )
 
     return warnings

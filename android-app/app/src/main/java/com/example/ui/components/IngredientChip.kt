@@ -113,8 +113,10 @@ fun IngredientChip(
                         }
                     }
 
+                    val hasDetails = hasUsefulIngredientDetails(ingredient, language)
                     val displayCategory = localized.category.cleanOrNull()
-                    if (displayCategory != null || ingredient.riskAssessmentAvailable) {
+                        ?.takeUnless { it.equals("Ingredient", true) && !hasDetails }
+                    if (displayCategory != null || ingredient.riskAssessmentAvailable || !hasDetails) {
                         Spacer(modifier = Modifier.height(2.dp))
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -123,6 +125,13 @@ fun IngredientChip(
                             displayCategory?.let { category ->
                                 Text(
                                     text = category,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            if (!hasDetails) {
+                                Text(
+                                    text = "Details unavailable",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
